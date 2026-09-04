@@ -55,22 +55,40 @@ The voice runtime it targets is the MIT-licensed
 
 ## Quickstart
 
-Everything runs in Docker — no host Python. The builder reuses TurnCall's
-Postgres, so start TurnCall first.
+Everything runs in Docker — no host Python. The builder has no database or
+voice runtime of its own: it reuses TurnCall's Postgres and calls TurnCall's
+API, so **TurnCall must be running first**.
 
-**Against TurnCall's local-storage stack** (`turncall-local-*`, from `make docker-up-local` in the `turncall/` repo):
+### 1. Start TurnCall
 
-```bash
-make docker-up-local     # create builder db + build/start API + migrate
-make docker-down-local   # stop the builder API
-```
-
-**Against TurnCall's default stack** (`localstack-*`):
+In the [`turncall`](https://github.com/kobikis/turncall) repo:
 
 ```bash
-make docker-up           # same, targeting the localstack-* containers
-make docker-down
+make docker-up-local && make migrate-local   # no S3; containers are turncall-local-*
+# or: make docker-up && make migrate         # with LocalStack; containers are localstack-*
 ```
+
+Which one you pick decides the container names, and therefore which builder
+target you use below.
+
+### 2. Configure and provision
+
+```bash
+cp .env.example .env        # add ANTHROPIC_API_KEY; PLATFORM_API_KEY must match TurnCall's
+make turncall-setup         # mints a TurnCall API key and writes TURNCALL_API_KEY into .env
+```
+
+`turncall-setup` is required on a first run, not only after a reset — the
+builder cannot create agents without that key.
+
+### 3. Start the builder
+
+```bash
+make docker-up-local     # against turncall-local-* (from make docker-up-local)
+make docker-up           # against localstack-*     (from make docker-up)
+```
+
+Stop with `make docker-down`.
 
 Then: `make docker-logs` to tail, `make test` to run tests (also in Docker).
 The API listens on `127.0.0.1:8000` (loopback only — see ADR-0002).

@@ -9,6 +9,18 @@ set -euo pipefail
 
 BASE="${TURNCALL_HOST_URL:-http://localhost:8090}"   # TurnCall API as seen from the host
 
+# Project/key bootstrap is platform-gated (turncall#102): the POSTs below must
+# carry X-Platform-Key matching TurnCall's PLATFORM_API_KEY, or TurnCall answers
+# 401. Read it from the environment, falling back to the builder's .env.
+PLATFORM_KEY="${PLATFORM_API_KEY:-}"
+if [ -z "$PLATFORM_KEY" ] && [ -f .env ]; then
+  PLATFORM_KEY="$(sed -n 's/^PLATFORM_API_KEY=//p' .env | head -n1)"
+fi
+if [ -z "$PLATFORM_KEY" ]; then
+  echo "PLATFORM_API_KEY is not set (env or .env). It must match TurnCall's PLATFORM_API_KEY." >&2
+  exit 1
+fi
+
 # Wait for TurnCall to be ready — it may still be booting after `make docker-up`.
 printf "waiting for TurnCall at %s " "$BASE"
 for _ in $(seq 1 30); do
@@ -21,11 +33,23 @@ if [ "${ready:-}" != "1" ]; then
   exit 1
 fi
 
-PID=$(curl -fsS -X POST "$BASE/v1/projects" \
+# Bootstrap calls carry X-Platform-Key. A 401 here means the key doesn't match
+# TurnCall's PLATFORM_API_KEY — surface that plainly instead of a JSON traceback.
+bootstrap() {  # usage: bootstrap <url> [curl-args...]
+  local url="$1"; shift
+  local out
+  if ! out=$(curl -fsS -X POST "$url" -H "X-Platform-Key: $PLATFORM_KEY" "$@"); then
+    echo "TurnCall rejected $url — X-Platform-Key likely doesn't match TurnCall's PLATFORM_API_KEY (401)." >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
+
+PID=$(bootstrap "$BASE/v1/projects" \
   -H 'Content-Type: application/json' -d '{"name":"builder"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['id'])")
 
-KEY=$(curl -fsS -X POST "$BASE/v1/api-keys?project_id=$PID" \
+KEY=$(bootstrap "$BASE/v1/api-keys?project_id=$PID" \
   -H 'Content-Type: application/json' -d '{"name":"builder","role":"admin"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['raw_key'])")
 
