@@ -1,0 +1,167 @@
+"""Parser tests for the builder — pure, no network."""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.builder import _to_result, step
+
+
+def _mock_client():
+    block = SimpleNamespace(
+        type="tool_use", name="compose", input={"action": "ask", "question": "?"}
+    )
+    resp = SimpleNamespace(content=[block])
+    return SimpleNamespace(messages=SimpleNamespace(create=AsyncMock(return_value=resp)))
+
+
+@pytest.mark.asyncio
+async def test_step_edit_mode_injects_current_config():
+    client = _mock_client()
+    await step(
+        [{"role": "user", "content": "change the name to Zoe"}],
+        client=client,
+        current_config={"name": "Bob", "system_prompt": "hi"},
+    )
+    system = client.messages.create.call_args.kwargs["system"]
+    assert "EDITING an existing agent" in system
+    assert '"name": "Bob"' in system  # current config is grounded in the prompt
+
+
+@pytest.mark.asyncio
+async def test_step_build_mode_has_no_edit_section():
+    client = _mock_client()
+    await step([{"role": "user", "content": "build a receptionist"}], client=client)
+    assert "EDITING an existing agent" not in client.messages.create.call_args.kwargs["system"]
+
+
+@pytest.mark.asyncio
+async def test_step_injects_knowledge_doc_names():
+    client = _mock_client()
+    await step(
+        [{"role": "user", "content": "add room service using the menu"}],
+        client=client,
+        knowledge_docs=["House of Sanskara - Food Menu.pdf"],
+    )
+    system = client.messages.create.call_args.kwargs["system"]
+    assert "House of Sanskara - Food Menu.pdf" in system
+    assert "do not ask the user to paste" in system.lower()
+
+
+def test_system_prompt_has_knowledge_base_awareness():
+    from app.builder import SYSTEM
+
+    assert "knowledge base" in SYSTEM.lower()
+    assert "paste" in SYSTEM.lower()  # must be told not to ask for pasted content
+
+
+def test_ask_maps_question():
+    r = _to_result({"action": "ask", "question": "What should it do?"})
+    assert r.action == "ask"
+    assert r.question == "What should it do?"
+    assert r.agent_config is None
+
+
+def test_finalize_maps_config():
+    cfg = {"name": "Bot", "system_prompt": "You are...", "llm": {}, "tts": {}}
+    r = _to_result({"action": "finalize", "agent_config": cfg})
+    assert r.action == "finalize"
+    assert r.agent_config == cfg
+
+
+def test_ask_without_question_rejected():
+    with pytest.raises(ValueError):
+        _to_result({"action": "ask"})
+
+
+def test_finalize_without_config_rejected():
+    with pytest.raises(ValueError):
+        _to_result({"action": "finalize"})
+
+
+def test_unknown_action_rejected():
+    with pytest.raises(ValueError):
+        _to_result({"action": "wat"})
+
+
+def test_system_prompt_covers_human_transfer_patterns():
+    """The builder must know both transfer patterns: fixed number in the
+    prompt, dynamic number via a get_transfer_number backend tool."""
+    from app.builder import SYSTEM
+
+    assert "get_transfer_number" in SYSTEM
+    assert "transfer_call" in SYSTEM
+    assert "fixed" in SYSTEM.lower()
+
+
+# --- Builder model providers (per-Session provider choice) ---
+
+
+def _mock_openai_client(arguments='{"action": "ask", "question": "?"}'):
+    # Responses API shape: output items, function_call ones carry name+arguments.
+    call = SimpleNamespace(type="function_call", name="compose", arguments=arguments)
+    resp = SimpleNamespace(output=[SimpleNamespace(type="reasoning"), call])
+    return SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=resp)))
+
+
+@pytest.mark.asyncio
+async def test_openai_builder_translates_tool_and_parses_result():
+    from app.builder import COMPOSE_TOOL, OpenAIBuilder
+
+    client = _mock_openai_client()
+    out = await OpenAIBuilder(client).compose(
+        model="gpt-test", system="sys", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert out == {"action": "ask", "question": "?"}
+    kwargs = client.responses.create.call_args.kwargs
+    # forced function call, schema carried over verbatim, system as instructions
+    assert kwargs["tool_choice"] == {"type": "function", "name": "compose"}
+    assert kwargs["tools"][0]["parameters"] == COMPOSE_TOOL["input_schema"]
+    assert kwargs["instructions"] == "sys"
+    assert kwargs["model"] == "gpt-test"
+
+
+@pytest.mark.asyncio
+async def test_openai_builder_malformed_arguments_is_builder_error():
+    from app.builder import BuilderError, OpenAIBuilder
+
+    client = _mock_openai_client(arguments="not json")
+    with pytest.raises(BuilderError):
+        await OpenAIBuilder(client).compose(
+            model="gpt-test", system="s", messages=[{"role": "user", "content": "x"}]
+        )
+
+
+@pytest.mark.asyncio
+async def test_step_unknown_provider_is_builder_error():
+    from app.builder import BuilderError
+
+    with pytest.raises(BuilderError):
+        await step([{"role": "user", "content": "hi"}], provider="mistral", model="m")
+
+
+@pytest.mark.asyncio
+async def test_step_routes_to_session_provider(monkeypatch):
+    """step(provider='openai') must call the OpenAI adapter with the session model."""
+    from app import builder as builder_mod
+
+    captured = {}
+
+    class FakeOpenAI:
+        async def compose(self, *, model, system, messages):
+            captured["model"] = model
+            return {"action": "ask", "question": "?"}
+
+    monkeypatch.setitem(builder_mod._PROVIDERS, "openai", FakeOpenAI)
+    r = await step([{"role": "user", "content": "hi"}], provider="openai", model="gpt-test")
+    assert r.action == "ask"
+    assert captured["model"] == "gpt-test"
+
+
+def test_provider_availability_reflects_env(monkeypatch):
+    from app.builder import provider_availability
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert provider_availability() == {"anthropic": True, "openai": False}

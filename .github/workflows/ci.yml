@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # CONTRIBUTING.md requires a DCO sign-off, and here that sign-off also carries
+  # the licence-relicensing grant — so enforce it rather than just asking.
+  # Plain bash so there is no third-party action in the supply chain.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Check commits are signed off
+        run: |
+          # Use the branch tip, not HEAD: actions/checkout resolves a PR to a
+          # synthetic merge commit that carries no sign-off of its own.
+          # --no-merges likewise spares a contributor's own merge commits.
+          head='${{ github.event.pull_request.head.sha }}'
+          base=$(git merge-base origin/${{ github.base_ref }} "$head")
+          missing=$(git log --no-merges --format='%H %s' \
+            --invert-grep --grep='^Signed-off-by: .\+ <.\+@.\+>$' "$base".."$head")
+          if [ -n "$missing" ]; then
+            echo "::error::Commits missing a Signed-off-by trailer:"
+            echo "$missing"
+            echo "Fix with: git commit --amend -s   (or git rebase --signoff $base)"
+            exit 1
+          fi
+          echo "All commits signed off."
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      # Pinned: an unpinned ruff turns every upstream release into a red build.
+      - run: pip install ruff==0.15.18
+      - run: ruff check app/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Matches the engine's image: builder migrations run against TurnCall's
+      # Postgres, which needs the vector extension available.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: turncall
+          POSTGRES_PASSWORD: turncall
+          POSTGRES_DB: builder
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://turncall:turncall@localhost:5432/builder
+      TEST_DATABASE_URL: postgresql://turncall:turncall@localhost:5432/builder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - run: alembic upgrade head
+      # TEST_DATABASE_URL is what lets the real-DB migration tests run instead
+      # of self-skipping; without it they pass silently without asserting.
+      # `python -m pytest`, not bare `pytest`: the module form puts the working
+      # directory on sys.path, which is what makes `import app` resolve without
+      # installing the package.
+      - run: python -m pytest -q

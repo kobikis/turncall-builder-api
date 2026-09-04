@@ -1,0 +1,23 @@
+services:
+  # No postgres here — reuse TurnCall's (localstack compose, published on host :5432).
+  # One-time: `make docker-migrate` creates the `builder` database.
+  api:
+    build: .
+    ports:
+      # Loopback only: the API is unauthenticated (ADR-0002) and drives host
+      # Docker — never expose it beyond this machine. The console reaches it
+      # through the Vite dev proxy on the same host.
+      - "127.0.0.1:8000:8000"
+    env_file:               # ANTHROPIC_API_KEY, TURNCALL_API_KEY, PUBLIC_BASE_URL, ...
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://turncall:turncall@host.docker.internal:5432/builder
+      GENERATED_DIR: /generated              # where generated Agent Backends are written
+    volumes:
+      # Host Docker socket — lets the builder run each Agent Backend's compose (ADR-0004).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Generated repos land here on the host (visible on your Mac), mounted into the builder.
+      - ../turncall-generated:/generated
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux; no-op on Docker Desktop
