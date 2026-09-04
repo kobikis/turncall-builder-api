@@ -1,0 +1,109 @@
+name: Setup smoke test
+
+# Walks the documented first-run path against a real TurnCall instance.
+# This exists because `make turncall-setup` was broken for every new user:
+# provision-turncall.sh omitted the X-Platform-Key header the bootstrap
+# endpoints require, so it died on a JSONDecodeError parsing a 401 body.
+# Unit tests could not catch that — only running the script against a live
+# TurnCall can.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "scripts/provision-turncall.sh"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "Makefile"
+      - ".github/workflows/smoke.yml"
+
+jobs:
+  first-run:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: turncall
+          POSTGRES_PASSWORD: turncall
+          POSTGRES_DB: turncall
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      # Must match on both sides — the mismatch this test guards against.
+      PLATFORM_API_KEY: smoke-platform-key
+      TURNCALL_IMAGE: ghcr.io/kobikis/turncall:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # :latest, not a pin — this is an integration test of the contract between
+      # the builder and the current engine. If a TurnCall change breaks the
+      # bootstrap flow, this is where we want to hear about it.
+      - name: Pull TurnCall
+        run: docker pull "$TURNCALL_IMAGE"
+
+      - name: Apply TurnCall migrations
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_URL=postgresql+asyncpg://turncall:turncall@localhost:5432/turncall \
+            "$TURNCALL_IMAGE" alembic upgrade head
+
+      - name: Start TurnCall
+        run: |
+          docker run -d --name turncall --network host \
+            -e DATABASE_URL=postgresql+asyncpg://turncall:turncall@localhost:5432/turncall \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e PLATFORM_API_KEY="$PLATFORM_API_KEY" \
+            -e TURNCALL_ENV=development \
+            -e STORAGE_BACKEND=local \
+            "$TURNCALL_IMAGE"
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null http://localhost:8090/health && exit 0
+            sleep 2
+          done
+          echo "::error::TurnCall never became healthy"; docker logs turncall; exit 1
+
+      # The regression itself: unauthenticated bootstrap must be refused, and
+      # the script must send the header that gets past it.
+      - name: Bootstrap is gated
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/v1/projects \
+            -H 'Content-Type: application/json' -d '{"name":"nokey"}')
+          [ "$code" = "401" ] || { echo "::error::expected 401 without X-Platform-Key, got $code"; exit 1; }
+          echo "unauthenticated bootstrap correctly refused ($code)"
+
+      - name: Run the documented setup
+        run: |
+          cp .env.example .env
+          ./scripts/provision-turncall.sh
+
+      - name: The key was actually written
+        run: |
+          key=$(sed -n 's/^TURNCALL_API_KEY=//p' .env | head -n1)
+          [ -n "$key" ] || { echo "::error::TURNCALL_API_KEY is empty after setup"; exit 1; }
+          case "$key" in tc_*) ;; *) echo "::error::not a TurnCall key: ${key:0:8}..."; exit 1;; esac
+          echo "minted ${key:0:8}..."
+
+      # Proves the key works end to end, which is what the builder needs it for.
+      - name: Create an agent with that key
+        run: |
+          key=$(sed -n 's/^TURNCALL_API_KEY=//p' .env | head -n1)
+          code=$(curl -s -o /tmp/agent.json -w '%{http_code}' -X POST http://localhost:8090/v1/agents \
+            -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+            -d '{"name":"smoke","config":{"system_prompt":"hi"}}')
+          [ "$code" = "200" ] || [ "$code" = "201" ] || {
+            echo "::error::agent create returned $code"; cat /tmp/agent.json; exit 1; }
+          echo "agent created ($code)"
+
+      - name: TurnCall logs on failure
+        if: failure()
+        run: docker logs turncall || true
