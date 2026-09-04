@@ -13,6 +13,10 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql://turncall:turncall@host.docker.internal:5432/builder
+      # Your own TurnCall, not the hosted one. The code default is
+      # https://api.turncall.com, which is wrong for a self-hoster — set it
+      # here so the builder talks to the stack you just started.
+      TURNCALL_BASE_URL: ${TURNCALL_BASE_URL:-http://host.docker.internal:8090}
       GENERATED_DIR: /generated              # where generated Agent Backends are written
     volumes:
       # Host Docker socket — lets the builder run each Agent Backend's compose (ADR-0004).
