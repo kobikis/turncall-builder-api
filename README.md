@@ -74,12 +74,15 @@ target you use below.
 ### 2. Configure and provision
 
 ```bash
-cp .env.example .env        # add ANTHROPIC_API_KEY; PLATFORM_API_KEY must match TurnCall's
-make turncall-setup         # mints a TurnCall API key and writes TURNCALL_API_KEY into .env
+cp .env.example .env         # add ANTHROPIC_API_KEY; PLATFORM_API_KEY must match TurnCall's
+make turncall-setup-local    # against turncall-local-* (from make docker-up-local)
+make turncall-setup          # against localstack-*     (from make docker-up)
 ```
 
-`turncall-setup` is required on a first run, not only after a reset — the
-builder cannot create agents without that key.
+Pick the one matching Step 1 — the target names decide which containers the
+migrations run against. It mints a TurnCall API key and writes
+`TURNCALL_API_KEY` into `.env`; it is required on a first run, not only after
+a reset — the builder cannot create agents without that key.
 
 ### 3. Start the builder
 
