@@ -25,6 +25,7 @@ from .routers import (
     agents,
     auth,
     calls,
+    github,
     knowledge,
     members,
     phones,
@@ -93,6 +94,7 @@ app.add_middleware(
 )
 
 for _router in (
-    sessions, agents, phones, calls, knowledge, takeaways, auth, workspaces, members
+    sessions, agents, phones, calls, knowledge, takeaways, auth, workspaces,
+    members, github,
 ):
     app.include_router(_router.router)
