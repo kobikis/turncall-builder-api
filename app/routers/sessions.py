@@ -109,6 +109,33 @@ def meta() -> dict[str, Any]:
     }
 
 
+# What the console is told for each BuilderError kind. 503 means "this may work
+# if you try again"; 502 means "an operator has to change something first", so
+# the split matters more than the wording.
+BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
+    "credit": (
+        502,
+        "The builder's LLM provider reports no remaining credit. Top up the "
+        "account behind the builder's API key — retrying will not help.",
+    ),
+    "auth": (
+        502,
+        "The builder's LLM provider rejected its API key. Set a valid "
+        "ANTHROPIC_API_KEY (or OPENAI_API_KEY) for the builder API and restart it.",
+    ),
+    "rate_limit": (
+        503,
+        "The builder's LLM provider is rate-limiting requests — please retry in "
+        "a moment.",
+    ),
+    "protocol": (
+        502,
+        "The builder model returned an unusable response. Please retry; if it "
+        "persists, try a different builder model.",
+    ),
+    "upstream": (503, "The builder is temporarily unavailable — please retry."),
+}
+
 # The providers the builder supports (static). Models + voices are fetched live
 # per provider — see /providers/llm/{p}/models and /providers/tts/{p}/voices.
 _LLM_PROVIDERS = ["openai", "anthropic", "openrouter", "ollama", "custom_openai", "bedrock"]
@@ -241,12 +268,18 @@ async def post_message(
             knowledge_docs=doc_names or None,
         )
     except BuilderError as exc:
-        # The 503 hides the vendor detail from the user; keep it in the logs.
-        logger.warning("builder turn failed (session %s): %s", sid, exc)
-        raise HTTPException(
-            status_code=503,
-            detail="The builder is temporarily unavailable — please retry.",
-        ) from exc
+        # The vendor's raw message never reaches the browser (it carries request
+        # ids and account detail), but the *class* of failure does — telling
+        # someone to retry a request that can never succeed until they top up an
+        # account is worse than saying nothing.
+        logger.warning(
+            "builder turn failed (session %s, kind=%s): %s",
+            sid, getattr(exc, "kind", "upstream"), exc,
+        )
+        status, detail = BUILDER_ERROR_RESPONSES.get(
+            getattr(exc, "kind", "upstream"), BUILDER_ERROR_RESPONSES["upstream"]
+        )
+        raise HTTPException(status_code=status, detail=detail) from exc
 
     if result.action == "ask":
         history.append({"role": "assistant", "content": result.question or ""})

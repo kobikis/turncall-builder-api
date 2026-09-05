@@ -299,6 +299,50 @@ def test_post_message_builder_error_is_503(client, mocks, monkeypatch):
     assert r.status_code == 503
 
 
+def test_out_of_credit_is_502_and_says_retrying_wont_help(client, mocks, monkeypatch):
+    """A 503 + "please retry" is a lie when the account has no credit: the
+    request can never succeed until an operator tops it up."""
+    from app.builder import BuilderError
+
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions,
+        "step",
+        AsyncMock(side_effect=BuilderError("credit balance is too low", kind="credit")),
+    )
+    r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert "credit" in detail.lower()
+    assert "retrying will not help" in detail.lower()
+    # The vendor's raw message carries request ids and account detail.
+    assert "credit balance is too low" not in detail
+
+
+def test_bad_api_key_names_the_env_var(client, mocks, monkeypatch):
+    from app.builder import BuilderError
+
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions, "step", AsyncMock(side_effect=BuilderError("invalid x-api-key", kind="auth"))
+    )
+    r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
+    assert r.status_code == 502
+    assert "ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_rate_limit_stays_retryable(client, mocks, monkeypatch):
+    from app.builder import BuilderError
+
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions, "step", AsyncMock(side_effect=BuilderError("429", kind="rate_limit"))
+    )
+    r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
+    assert r.status_code == 503  # 503 = worth retrying, unlike 502 above
+    assert "retry" in r.json()["detail"].lower()
+
+
 def test_edit_session_inherits_creation_builder_choice(client, mocks, monkeypatch):
     """Opening an agent for chat editing reuses (and reports) the Builder model
     its creating session picked — when that provider is still keyed."""

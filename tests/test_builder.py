@@ -165,3 +165,46 @@ def test_provider_availability_reflects_env(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert provider_availability() == {"anthropic": True, "openai": False}
+
+
+# --- vendor error classification (surfacing actionable failures) --------------
+
+
+class _VendorError(Exception):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_classify_credit_exhaustion_despite_a_400():
+    """Anthropic reports an empty credit balance as a 400, indistinguishable
+    from a malformed request unless the message is read."""
+    from app.builder import classify_vendor_error
+
+    exc = _VendorError(
+        "Error code: 400 - {'error': {'message': 'Your credit balance is too low "
+        "to access the Anthropic API.'}}",
+        400,
+    )
+    assert classify_vendor_error(exc) == "credit"
+
+
+def test_classify_openai_quota_beats_its_429():
+    """OpenAI sends insufficient_quota as 429, but retrying never clears it."""
+    from app.builder import classify_vendor_error
+
+    assert classify_vendor_error(_VendorError("You exceeded your current quota", 429)) == "credit"
+
+
+def test_classify_auth_and_rate_limit_and_unknown():
+    from app.builder import classify_vendor_error
+
+    assert classify_vendor_error(_VendorError("invalid x-api-key", 401)) == "auth"
+    assert classify_vendor_error(_VendorError("Rate limit reached", 429)) == "rate_limit"
+    assert classify_vendor_error(_VendorError("Internal server error", 500)) == "upstream"
+
+
+def test_builder_error_defaults_to_upstream():
+    from app.builder import BuilderError
+
+    assert BuilderError("boom").kind == "upstream"
