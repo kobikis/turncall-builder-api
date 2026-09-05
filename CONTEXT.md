@@ -149,10 +149,13 @@ _Avoid_: GitHub account, integration, OAuth (it is an App, not OAuth),
 "the workspace's GitHub" (there is no such thing)
 
 **Linked repo**:
-The GitHub repository an [[Agent Backend]] pushes to — one per backend, under
-whichever account or org the App was installed on. It records the [[GitHub
-connection]] that owns it: the one that first linked it and whose token later
-pushes use. The *local* generated repo stays the source of truth; pushes are
+Where an [[Agent Backend]] pushes: an organisation, an existing repository, a
+branch, and an optional path inside it. The user *chooses* all four from what
+their [[GitHub connection]] can see — nothing is ever created on their behalf.
+The path is what lets a workspace keep every agent in one repository under
+`agents/<slug>/` instead of one repository each; that is the user's call, not
+ours. It records the connection that owns it: the one that first linked it and
+whose token later pushes use. The *local* generated repo stays the source of truth; pushes are
 one-way and never forced, so an edit made on GitHub causes a push to fail loudly
 rather than be clobbered. A Linked repo outlives its owning connection — when
 that connection goes, pushing stops and another user can take it over, but

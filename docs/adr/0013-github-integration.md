@@ -97,15 +97,38 @@ who are not its owner.
 
 ## Smaller decisions, taken rather than debated
 
-- **Repo owner** is whichever account or organisation the connecting user
-  installed the App on. The installation flow already asks this, so asking again
-  in our UI would be redundant.
-- **One repo per Agent Backend**, matching the existing model — `CONTEXT.md`
-  already says an Agent Backend "lives in its own generated repo", and each is
-  independently deployable with its own compose file.
 - **Deleting an agent leaves its GitHub repo alone.** Deleting a user's
   repository is irreversible and not something this product should do. The
   [[Linked repo]] is simply forgotten.
+
+## The user picks the destination; we never create it
+
+An earlier draft had the first push *create* `turncall-agent-<slug>` under the
+user's account, with an explicit button as the mitigation for a product
+reaching into someone's GitHub uninvited. Mintlify's Git settings solve this
+better by not having the problem: the user chooses an **organisation**, an
+existing **repository**, a **branch**, and an optional **path within the repo**.
+
+That is the model here too, and it is strictly better:
+
+- Nothing is created in anyone's account. The trust concern evaporates instead
+  of being mitigated.
+- The user keeps naming, visibility, branch protection and whatever CI the repo
+  already has.
+- **The path field is the important one.** It replaces an assumption made
+  earlier — one repo per Agent Backend — with the user's choice. A workspace
+  with twenty agents can put them all in one repo under `agents/<slug>/`, or use
+  a repo each. Mintlify needs this less than we do: a docs deployment is one
+  site, while a workspace is many agents.
+- **A branch is a field, not an assumption.** It also enables a better default
+  than committing to trunk: push to a branch and let the user open a pull
+  request against their own main.
+
+Two concerns stay separate, as they do in Mintlify's UI. *Which organisations
+has the App been installed on, and what can it see* is a property of the
+[[GitHub connection]]. *Which org, repo, branch and path does this agent push
+to* is a property of the [[Linked repo]]. Conflating them was a mistake in the
+first draft — the first is set up once, the second is set per agent.
 
 ## Consequences
 
@@ -121,6 +144,12 @@ who are not its owner.
 - **Vocabulary**: [[GitHub connection]] and [[Linked repo]] in `CONTEXT.md`.
   "Publish" was avoided (it means agent versioning in TurnCall) and so was
   "export" (it implies one-time, and this is continuous).
+- **Pushing into a shared repo means the local repo is no longer the whole
+  story.** With a path inside a monorepo, a push touches one subtree of a
+  repository that has other content and its own history. The push must be a
+  commit on top of whatever is there, never anything that rewrites the rest —
+  which the never-force rule already covers, but the stakes are higher when the
+  repo is not exclusively ours.
 - **A [[Linked repo]] outlives the connection that made it.** The repo row keeps
   working as a link and a clone target even when its owning connection is gone;
   only pushing stops.
