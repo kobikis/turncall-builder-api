@@ -200,6 +200,10 @@ async def push(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dic
             path=link["path"],
             last_tree_hash=await github_store.get_tree_hash(pool, agent_id),
             message=f"turncall: sync {backend['slug']}",
+            # Kept current on every agent edit, not only when tools change — so
+            # a prompt or model change shows up here even though it regenerates
+            # nothing.
+            agent_config=backend.get("config"),
         )
     except github.DivergedError as exc:
         await github_store.record_push(pool, agent_id, tree_hash=None, error=str(exc))

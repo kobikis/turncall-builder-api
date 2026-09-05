@@ -19,6 +19,7 @@ but silently discarding someone's fix is the worst outcome available here.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -168,6 +169,55 @@ async def assert_writable(token: str, owner: str, repo: str) -> None:
         )
 
 
+# --- the agent config, as a file ---------------------------------------------
+
+# Redacted by *key name*, recursively, rather than by known path. A path list
+# silently stops covering a config that grows a new secret field; matching the
+# name means a future one is caught by default. Over-redacting a config file is
+# recoverable; publishing an agent's HMAC secret to GitHub is not.
+_SECRET_KEYS = {
+    "webhook_secret",
+    "api_key",
+    "secret",
+    "secret_access_key",
+    "session_token",
+    "access_key_id",
+    "token",
+    "password",
+    "authorization",
+    # MCP servers document these as carrying credentials.
+    "headers",
+    "env",
+}
+
+REDACTED = "***"
+
+
+def redact_config(value: Any) -> Any:
+    """Deep copy with every secret-named key masked.
+
+    Masked rather than dropped: a reader reconstructing the agent needs to know
+    a value existed and must be supplied, which a missing key does not say.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (REDACTED if k.lower() in _SECRET_KEYS and v not in (None, "") else redact_config(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_config(v) for v in value]
+    return value
+
+
+def agent_config_file(config: dict[str, Any]) -> str:
+    """The agent's configuration as it is pushed: redacted, sorted, stable.
+
+    Sorted keys and a trailing newline so an unchanged config produces an empty
+    diff — otherwise every push would look like a change.
+    """
+    return json.dumps(redact_config(config), indent=2, sort_keys=True) + "\n"
+
+
 # --- pushing -----------------------------------------------------------------
 
 # Never pushed: local git internals, and the secrets file the scaffold keeps out
@@ -242,6 +292,7 @@ async def push_backend(
     path: str = "",
     last_tree_hash: str | None = None,
     message: str | None = None,
+    agent_config: dict[str, Any] | None = None,
 ) -> PushResult:
     """Publish this agent's files into owner/repo at branch:path.
 
@@ -249,12 +300,22 @@ async def push_backend(
     push, replaces it with the local files, and pushes fast-forward only.
     Everything outside `path` is left exactly as it was.
 
+    `agent_config` is written as `agent.json` alongside the code, secrets
+    redacted — so the repository describes the whole agent rather than only its
+    backend service.
+
     Raises DivergedError when the remote subtree no longer matches what we
     pushed, and GitHubError for anything else.
     """
     local = _collect(service_dir)
     if not local:
         raise GitHubError(f"Nothing to push — {service_dir} is empty.")
+
+    # The generated backend contains no model, prompt or voice — those live in
+    # the agent config, which is not code. Without this file the repo cannot
+    # reconstruct the agent, and a model change produces an empty diff.
+    if agent_config:
+        local["agent.json"] = agent_config_file(agent_config).encode()
 
     remote = _remote(token, owner, repo)
     workdir = tempfile.mkdtemp(prefix="turncall-push-")
