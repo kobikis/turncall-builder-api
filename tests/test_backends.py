@@ -218,3 +218,53 @@ def test_stub_tool_echoes_its_own_name():
     result = asyncio.run(ns["tool_lookup_order"]({"q": 1}))
     assert result["tool"] == "lookup_order"
     assert result["arguments"] == {"q": 1}
+
+# --- a clone has to be runnable, and must not carry secrets -------------------
+
+
+def _rendered():
+    from app.backends.scaffold import render
+
+    return render(
+        slug="demo",
+        port=9101,
+        tools=[],
+        tool_bodies={},
+        agent_id="agent-1",
+        webhook_secret="supersecret",
+        call_init_secret="ci-secret",
+    )
+
+
+def test_env_example_is_committed_alongside_the_gitignored_env():
+    files = _rendered()
+    assert ".env.example" in files
+    assert ".env" in files[".gitignore"].split()
+
+
+def test_env_example_carries_no_secret_values():
+    """It is in git — a value here is a leaked credential."""
+    files = _rendered()
+    for line in files[".env.example"].splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        assert value in ("", "http://localhost:5173"), f"{key} has a value"
+    assert "supersecret" not in files[".env.example"]
+    assert "ci-secret" not in files[".env.example"]
+
+
+def test_the_real_env_still_gets_the_secrets():
+    files = _rendered()
+    assert "WEBHOOK_SECRET=supersecret" in files[".env"]
+    assert "CALL_INIT_SECRET=ci-secret" in files[".env"]
+
+
+def test_env_example_names_every_variable_the_app_reads():
+    files = _rendered()
+    for var in ("AGENT_ID", "WEBHOOK_SECRET", "CALL_INIT_SECRET", "CONSOLE_ORIGIN"):
+        assert f"{var}=" in files[".env.example"]
+
+
+def test_readme_tells_you_how_to_run_a_clone():
+    assert "cp .env.example .env" in _rendered()["README.md"]

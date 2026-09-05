@@ -83,6 +83,7 @@ def render(
             call_init_secret=call_init_secret,
             console_origin=console_origin,
         ),
+        ".env.example": _ENV_EXAMPLE,
         ".gitignore": "__pycache__/\n*.pyc\nevents.db\n.env\n",
         "README.md": _README.format(slug=slug, port=port),
     }
@@ -235,6 +236,24 @@ _COMPOSE = """services:
     restart: unless-stopped
 """
 
+# Committed alongside the gitignored .env so someone who clones this repo — from
+# GitHub or anywhere else — can see what it needs to run. Values deliberately
+# empty: this file is in git.
+_ENV_EXAMPLE = """# Copy to .env and fill in. .env is gitignored; never commit it.
+# The builder writes a real .env when it generates this backend; these are the
+# values you need if you are running the repo yourself.
+
+# The TurnCall agent this backend serves.
+AGENT_ID=
+# Signs tool webhooks and events. Must match the agent's webhook_secret in
+# TurnCall, or every request is rejected (verification fails closed).
+WEBHOOK_SECRET=
+# Set when a phone number binds with managed call-init. Leave empty otherwise.
+CALL_INIT_SECRET=
+# Origin allowed to read GET /events. The console, or your own dashboard.
+CONSOLE_ORIGIN=http://localhost:5173
+"""
+
 _ENV = """AGENT_ID={agent_id}
 WEBHOOK_SECRET={webhook_secret}
 CALL_INIT_SECRET={call_init_secret}
@@ -261,4 +280,20 @@ fails closed: if a secret is missing the matching endpoint rejects traffic.
 Run: `docker compose up -d`. Tool handler bodies and the call-init lookup are
 stubs — fill in real logic. The builder auto-commits to git before it
 regenerates, so your edits are always recoverable via `git log`.
+
+## Running this yourself
+
+This repo is self-contained — you can take it and run it anywhere Docker runs,
+independently of the builder. `.env` is gitignored, so a fresh clone has no
+secrets:
+
+```bash
+cp .env.example .env     # then fill in the values
+docker compose up -d --build
+```
+
+`WEBHOOK_SECRET` must match the agent's `webhook_secret` in TurnCall, and
+TurnCall must be able to reach this service at the tool `webhook_url`s
+configured on the agent. Verification fails closed: a missing secret rejects
+traffic rather than accepting it unsigned.
 """
