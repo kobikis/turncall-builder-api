@@ -84,3 +84,62 @@ class TestWhatGetsPushed:
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "mod.py").write_text("x = 1")
         assert "sub/mod.py" in github._collect(str(tmp_path))
+
+
+@pytest.mark.unit
+class TestAgentConfigFile:
+    """The generated backend holds no model, prompt or voice — they live in the
+    agent config. Without agent.json the repo cannot reconstruct the agent, and
+    a model change produces an empty diff."""
+
+    def _config(self):
+        from app.mapper import to_create_agent_request
+
+        return to_create_agent_request(
+            {
+                "name": "Bot",
+                "system_prompt": "Be brief.",
+                "llm": {"provider": "openai", "model": "gpt-4o-mini"},
+                "custom_tools": [{"name": "book_table", "description": "Book"}],
+            },
+            tools_base_url="http://backend",
+            tools_secret="HMAC-SUPER-SECRET",
+        )["config"]
+
+    def test_the_model_and_prompt_are_visible(self):
+        out = github.agent_config_file(self._config())
+        assert '"model": "gpt-4o-mini"' in out
+        assert "Be brief." in out
+
+    def test_the_tool_signing_secret_never_reaches_the_repo(self):
+        """It authenticates every tool call and event for this agent."""
+        out = github.agent_config_file(self._config())
+        assert "HMAC-SUPER-SECRET" not in out
+        assert '"webhook_secret": "***"' in out
+
+    def test_redaction_is_by_key_name_and_recursive(self):
+        """A path allowlist stops covering a config that grows a field; matching
+        the name catches the next one by default."""
+        redacted = github.redact_config(
+            {
+                "llm": {"model": "x", "api_key": "sk-leak"},
+                "aws": {"region": "us-east-1", "secret_access_key": "aws-leak"},
+                "mcp_servers": [{"url": "https://x", "headers": {"Authorization": "Bearer leak"}}],
+                "server_url": {"url": "https://x", "secret": "sig-leak"},
+            }
+        )
+        blob = str(redacted)
+        for leaked in ("sk-leak", "aws-leak", "Bearer leak", "sig-leak"):
+            assert leaked not in blob
+        # Non-secrets survive — a redacted config still has to be readable.
+        assert redacted["llm"]["model"] == "x"
+        assert redacted["aws"]["region"] == "us-east-1"
+
+    def test_empty_values_are_left_alone(self):
+        """Masking an unset field would imply a secret exists where none does."""
+        assert github.redact_config({"llm": {"api_key": None}})["llm"]["api_key"] is None
+
+    def test_output_is_stable_so_an_unchanged_config_diffs_empty(self):
+        cfg = self._config()
+        assert github.agent_config_file(cfg) == github.agent_config_file(dict(reversed(list(cfg.items()))))
+        assert github.agent_config_file(cfg).endswith("\n")

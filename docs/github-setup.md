@@ -75,6 +75,21 @@ curl -X POST --cookie '...' -H 'X-Workspace-Id: <workspace>' \
   http://localhost:8000/agents/<agent-id>/github/push
 ```
 
+## What ends up in the repository
+
+The generated **Agent Backend** — `app.py` with your tool handlers, the
+`/events` receiver, `Dockerfile`, `docker-compose.yml`, `.env.example`,
+`README.md` — plus:
+
+- **`agent.json`** — the agent's configuration: system prompt, model, voice,
+  tools, guardrails. Secrets in it are redacted to `***`.
+
+That file matters because the backend contains no model, prompt or voice: those
+live in the agent config, not in code. Without it, changing the model would
+produce an empty diff and the repository could not reconstruct the agent.
+
+`.env` is never pushed. Nor is `events.db`, `.git/` or `__pycache__`.
+
 ## Gotchas
 
 **Organisation repositories may need approval.** If you pick an org as the
