@@ -174,9 +174,11 @@ response returns `agent_id` (any agent — call-init isn't project-scoped),
   they can run it independently of the builder. Design settled in ADR-0013;
   connections are per-user, pushes are one-way and never forced. The scaffold
   half has shipped: a generated repo now emits `.env.example` and a
-  run-it-yourself README, so a clone can actually start. The App integration is
-  **blocked on registering a GitHub App** — an operator step — and until one
-  exists the auth path cannot be verified end to end.
+  run-it-yourself README, so a clone can actually start. The API half has
+  shipped too: connect a fine-grained token, link an agent to a repo you already
+  own, push — with divergence detected rather than overwritten. Setup in
+  [github-setup.md](./docs/github-setup.md). Not yet built: pushing
+  automatically after materialize, and the console UI.
   Still open: whether an editor may push the workspace's agent code to a GitHub
   account only they control.
 
