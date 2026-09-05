@@ -56,12 +56,15 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
         "llm": {
             "type": "object",
             "properties": {
-                "provider": {"type": "string", "enum": ["openai", "anthropic"]},
+                "provider": {"type": "string", "enum": ["openai", "anthropic", "bedrock"]},
                 "model": {"type": "string"},
             },
             "required": ["provider", "model"],
             "description": "Default to openai / gpt-4o-mini unless the use case "
-            "implies otherwise.",
+            "implies otherwise. Use 'bedrock' only when the user says they want to "
+            "run on AWS / Bedrock / their own AWS account — its models are AWS ids "
+            "like 'anthropic.claude-3-5-sonnet-20241022-v2:0'. AWS credentials are "
+            "NEVER part of the config you generate; set aws.region only.",
         },
         "tts": {
             "type": "object",
@@ -133,20 +136,36 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "Speech-to-speech config. Required when pipeline_mode='s2s'.",
             "properties": {
-                "provider": {"type": "string", "enum": ["openai", "google"]},
+                "provider": {"type": "string", "enum": ["openai", "google", "aws"]},
                 "model": {
                     "type": "string",
                     "description": "openai: 'gpt-4o-realtime-preview'. "
-                    "google: 'models/gemini-3.1-flash-live-preview'.",
+                    "google: 'models/gemini-3.1-flash-live-preview'. "
+                    "aws: 'amazon.nova-2-sonic-v1:0' (Amazon Nova Sonic 2).",
                 },
                 "voice": {
                     "type": "string",
                     "description": "Must match the provider. openai voices: alloy, ash, "
                     "ballad, coral, echo, sage, shimmer, verse. google voices: Aoede, "
-                    "Charon, Fenrir, Kore, Leda, Orus, Puck, Zephyr.",
+                    "Charon, Fenrir, Kore, Leda, Orus, Puck, Zephyr. aws voices: "
+                    "matthew, tiffany, amy, lupe, carlos.",
                 },
             },
             "required": ["provider", "model", "voice"],
+        },
+        "aws": {
+            "type": "object",
+            "description": "AWS region for the 'bedrock' LLM or 'aws' S2S provider. "
+            "Set ONLY when one of those is used, and ONLY the region — credentials "
+            "are an operator concern (server environment or an assumed role) and "
+            "must never appear in a generated config.",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "e.g. 'us-east-1'. Bedrock model availability is "
+                    "region-specific.",
+                },
+            },
         },
         "voicemail_detection": {
             "type": "object",

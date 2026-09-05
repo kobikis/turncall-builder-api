@@ -62,6 +62,15 @@ def external_tool_names(cfg: dict[str, Any], tools_base_url: str | None) -> set[
     }
 
 
+# Per-provider S2S fallbacks — the OpenAI defaults are wrong for the others
+# (Nova Sonic would reject "alloy", Gemini would reject a realtime model id).
+_S2S_DEFAULTS = {
+    "openai": ("gpt-4o-realtime-preview", "alloy"),
+    "google": ("models/gemini-3.1-flash-live-preview", "Charon"),
+    "aws": ("amazon.nova-2-sonic-v1:0", "matthew"),
+}
+
+
 def to_create_agent_request(
     cfg: dict[str, Any],
     tools_base_url: str | None = None,
@@ -130,12 +139,24 @@ def to_create_agent_request(
     # voice comes from the s2s block.
     if cfg.get("pipeline_mode") == "s2s":
         s2s = cfg.get("s2s") or {}
+        provider = s2s.get("provider", "openai")
+        default_model, default_voice = _S2S_DEFAULTS.get(provider, _S2S_DEFAULTS["openai"])
         config["pipeline_mode"] = "s2s"
         config["s2s"] = {
-            "provider": s2s.get("provider", "openai"),
-            "model": s2s.get("model") or "gpt-4o-realtime-preview",
-            "voice": s2s.get("voice") or "alloy",
+            "provider": provider,
+            "model": s2s.get("model") or default_model,
+            "voice": s2s.get("voice") or default_voice,
         }
+
+    # AWS region for the bedrock LLM / aws S2S providers. Region only — the
+    # builder must never emit AWS credentials into an agent config: they belong
+    # to the operator (server environment, or an assumed role), and the config is
+    # not encrypted at rest. Omitted entirely when unset, so TurnCall falls back
+    # to its own AWS_REGION.
+    region = (cfg.get("aws") or {}).get("region")
+    if region and (config.get("llm", {}).get("provider") == "bedrock"
+                   or config.get("s2s", {}).get("provider") == "aws"):
+        config["aws"] = {"region": region}
 
     # Voicemail detection (cascade only): leave a message when an outbound call
     # reaches voicemail. TurnCall rejects it alongside s2s, so drop it in s2s mode

@@ -111,10 +111,10 @@ def meta() -> dict[str, Any]:
 
 # The providers the builder supports (static). Models + voices are fetched live
 # per provider — see /providers/llm/{p}/models and /providers/tts/{p}/voices.
-_LLM_PROVIDERS = ["openai", "anthropic", "openrouter", "ollama", "custom_openai"]
+_LLM_PROVIDERS = ["openai", "anthropic", "openrouter", "ollama", "custom_openai", "bedrock"]
 _TTS_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
 _STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
-_S2S_PROVIDERS = ["openai", "google"]
+_S2S_PROVIDERS = ["openai", "google", "aws"]
 
 
 @router.get("/providers")

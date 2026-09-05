@@ -93,8 +93,14 @@ _Avoid_: webhook, callback, notification
 
 **Config surface**:
 The subset of TurnCall agent fields the Builder is allowed to set (name,
-system_prompt, first_message, llm, voice, built-in tools). Everything outside
-it takes TurnCall defaults.
+system_prompt, first_message, llm, voice, built-in tools, and `aws.region` for
+the AWS providers). Everything outside it takes TurnCall defaults.
+
+**Credentials are outside the config surface, permanently.** The Builder may
+select an AWS *region* but never emits `access_key_id`, `secret_access_key` or
+`role_arn` — those belong to whoever operates the TurnCall server, and agent
+config is stored unencrypted. A generated config that carried a key would put
+it in a database row and in every API response that isn't masked.
 _Avoid_: schema (ambiguous with the full TurnCall schema)
 
 **Agent Backend**:
