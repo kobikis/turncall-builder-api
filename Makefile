@@ -1,4 +1,4 @@
-.PHONY: help docker-up docker-up-local docker-migrate migrate docker-down docker-down-local docker-logs seed-guest test
+.PHONY: help docker-up docker-up-local docker-migrate migrate turncall-migrate turncall-setup turncall-setup-local docker-down docker-down-local docker-logs seed-guest test
 
 # TurnCall's postgres container — the builder reuses it (see docker-compose.yml).
 TURNCALL_PG ?= localstack-postgres-1
@@ -15,15 +15,20 @@ migrate: ## Apply builder schema migrations (alembic upgrade head, in the api im
 	docker compose run --rm --build api alembic upgrade head
 
 TURNCALL_CONTAINER ?= localstack-turncall-1
+# How TurnCall was started, for the "is it up?" hint below.
+TURNCALL_UP ?= make docker-up
 
 turncall-migrate: ## Apply TurnCall's own DB migrations (runs alembic inside its container)
 	@docker exec -w /app $(TURNCALL_CONTAINER) sh -c \
 		"sed 's|@localhost:5432|@postgres:5432|' alembic.ini > /tmp/a.ini && alembic -c /tmp/a.ini upgrade head" \
 		&& echo "TurnCall migrations applied" \
-		|| echo "could not migrate — is TurnCall up? (in turncall/: make docker-up)"
+		|| echo "could not migrate — is TurnCall up? (in turncall/: $(TURNCALL_UP))"
 
 turncall-setup: docker-migrate turncall-migrate ## After a TurnCall reset: migrate TurnCall, create builder db, mint a fresh key
 	./scripts/provision-turncall.sh
+
+turncall-setup-local: ## turncall-setup against TurnCall's local-storage stack (turncall-local-*)
+	$(MAKE) turncall-setup TURNCALL_PG=turncall-local-postgres-1 TURNCALL_CONTAINER=turncall-local-turncall-1 TURNCALL_UP='make docker-up-local'
 
 docker-up: docker-migrate ## Create the db, build + start the builder API, apply migrations
 	docker compose up -d --build

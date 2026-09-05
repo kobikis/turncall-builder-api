@@ -33,25 +33,37 @@ if [ "${ready:-}" != "1" ]; then
   exit 1
 fi
 
-# Bootstrap calls carry X-Platform-Key. A 401 here means the key doesn't match
-# TurnCall's PLATFORM_API_KEY — surface that plainly instead of a JSON traceback.
-bootstrap() {  # usage: bootstrap <url> [curl-args...]
+# Bootstrap calls carry X-Platform-Key. A 401 means the key doesn't match
+# TurnCall's PLATFORM_API_KEY; any other non-2xx is reported with its status and
+# body — either way, plainly, instead of a JSON traceback downstream.
+bootstrap() {  # usage: bootstrap <url> [curl-args...]  -- prints the response body
   local url="$1"; shift
-  local out
-  if ! out=$(curl -fsS -X POST "$url" -H "X-Platform-Key: $PLATFORM_KEY" "$@"); then
-    echo "TurnCall rejected $url — X-Platform-Key likely doesn't match TurnCall's PLATFORM_API_KEY (401)." >&2
-    exit 1
-  fi
-  printf '%s' "$out"
+  local out status body
+  out=$(curl -sS -w $'\n%{http_code}' -X POST "$url" -H "X-Platform-Key: $PLATFORM_KEY" "$@") \
+    || out=$'\n000'
+  status="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  case "$status" in
+    2??) printf '%s' "$body" ;;
+    401) echo "TurnCall rejected $url — X-Platform-Key doesn't match TurnCall's PLATFORM_API_KEY (401)." >&2
+         exit 1 ;;
+    000) echo "Request to $url failed before TurnCall answered (network/TLS)." >&2
+         exit 1 ;;
+    *)   echo "TurnCall rejected $url (HTTP $status): $body" >&2
+         exit 1 ;;
+  esac
 }
 
-PID=$(bootstrap "$BASE/v1/projects" \
-  -H 'Content-Type: application/json' -d '{"name":"builder"}' \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['id'])")
+# Capture each response before parsing it: piping bootstrap straight into python3
+# runs both sides concurrently, so bootstrap's `exit 1` wouldn't stop python3 from
+# printing a JSONDecodeError over the message above.
+resp=$(bootstrap "$BASE/v1/projects" \
+  -H 'Content-Type: application/json' -d '{"name":"builder"}')
+PID=$(printf '%s' "$resp" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['id'])")
 
-KEY=$(bootstrap "$BASE/v1/api-keys?project_id=$PID" \
-  -H 'Content-Type: application/json' -d '{"name":"builder","role":"admin"}' \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['raw_key'])")
+resp=$(bootstrap "$BASE/v1/api-keys?project_id=$PID" \
+  -H 'Content-Type: application/json' -d '{"name":"builder","role":"admin"}')
+KEY=$(printf '%s' "$resp" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['raw_key'])")
 
 python3 - "$KEY" <<'PY'
 import os, re, sys

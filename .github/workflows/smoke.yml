@@ -6,6 +6,13 @@ name: Setup smoke test
 # endpoints require, so it died on a JSONDecodeError parsing a 401 body.
 # Unit tests could not catch that — only running the script against a live
 # TurnCall can.
+#
+# The stack below is built by hand rather than with `services:` so it matches
+# the topology the Makefile assumes: containers named the way TurnCall's own
+# compose names them, reachable from each other as `postgres` / `redis`. That
+# lets the job invoke the documented make targets with no overrides, so the
+# container names baked into the Makefile are themselves under test — the
+# earlier version called provision-turncall.sh directly and never touched make.
 
 on:
   push:
@@ -21,27 +28,26 @@ on:
 jobs:
   first-run:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: turncall
-          POSTGRES_PASSWORD: turncall
-          POSTGRES_DB: turncall
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 10s
-          --health-timeout 5s --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 10s
-          --health-timeout 5s --health-retries 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both branches of README Step 1, with the container names each one
+          # produces. `setup` is the Step 2 target that must match it.
+          - variant: localstack
+            pg: localstack-postgres-1
+            turncall: localstack-turncall-1
+            setup: turncall-setup
+          - variant: local
+            pg: turncall-local-postgres-1
+            turncall: turncall-local-turncall-1
+            setup: turncall-setup-local
+    name: first-run (${{ matrix.variant }})
     env:
       # Must match on both sides — the mismatch this test guards against.
       PLATFORM_API_KEY: smoke-platform-key
       TURNCALL_IMAGE: ghcr.io/kobikis/turncall:latest
+      DB_URL: postgresql+asyncpg://turncall:turncall@postgres:5432/turncall
     steps:
       - uses: actions/checkout@v4
 
@@ -51,26 +57,38 @@ jobs:
       - name: Pull TurnCall
         run: docker pull "$TURNCALL_IMAGE"
 
-      - name: Apply TurnCall migrations
+      - name: Start postgres and redis
         run: |
-          docker run --rm --network host \
-            -e DATABASE_URL=postgresql+asyncpg://turncall:turncall@localhost:5432/turncall \
-            "$TURNCALL_IMAGE" alembic upgrade head
+          set -euo pipefail
+          docker network create smoke
+          docker run -d --name "${{ matrix.pg }}" --network smoke --network-alias postgres \
+            -e POSTGRES_USER=turncall -e POSTGRES_PASSWORD=turncall -e POSTGRES_DB=turncall \
+            pgvector/pgvector:pg16
+          docker run -d --name smoke-redis --network smoke --network-alias redis redis:7-alpine
+          for _ in $(seq 1 30); do
+            docker exec "${{ matrix.pg }}" pg_isready -U turncall -q && exit 0
+            sleep 2
+          done
+          echo "::error::postgres never became ready"; docker logs "${{ matrix.pg }}"; exit 1
 
+      # Deliberately unmigrated: applying TurnCall's schema is turncall-migrate's
+      # job, and that runs as part of the make target under test below.
       - name: Start TurnCall
         run: |
-          docker run -d --name turncall --network host \
-            -e DATABASE_URL=postgresql+asyncpg://turncall:turncall@localhost:5432/turncall \
-            -e REDIS_URL=redis://localhost:6379/0 \
+          set -euo pipefail
+          docker run -d --name "${{ matrix.turncall }}" --network smoke -p 8090:8090 \
+            -e DATABASE_URL="$DB_URL" \
+            -e REDIS_URL=redis://redis:6379/0 \
             -e PLATFORM_API_KEY="$PLATFORM_API_KEY" \
             -e TURNCALL_ENV=development \
             -e STORAGE_BACKEND=local \
             "$TURNCALL_IMAGE"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             curl -fsS -o /dev/null http://localhost:8090/health && exit 0
             sleep 2
           done
-          echo "::error::TurnCall never became healthy"; docker logs turncall; exit 1
+          echo "::error::TurnCall never became healthy"
+          docker logs "${{ matrix.turncall }}"; exit 1
 
       # The regression itself: unauthenticated bootstrap must be refused, and
       # the script must send the header that gets past it.
@@ -81,10 +99,29 @@ jobs:
           [ "$code" = "401" ] || { echo "::error::expected 401 without X-Platform-Key, got $code"; exit 1; }
           echo "unauthenticated bootstrap correctly refused ($code)"
 
+      # README Step 2, verbatim. Both make prerequisites resolve container names
+      # from Makefile defaults, so a name that doesn't exist is a real failure.
       - name: Run the documented setup
         run: |
+          set -euo pipefail
           cp .env.example .env
-          ./scripts/provision-turncall.sh
+          make ${{ matrix.setup }} 2>&1 | tee /tmp/setup.log
+
+      # docker-migrate and turncall-migrate both swallow their exit status behind
+      # `|| echo`, so make succeeding proves nothing — assert on what they said.
+      # A wrong container name shows up here as the false "already exists" (its
+      # stderr is silenced) and as "could not migrate" while TurnCall is up.
+      - name: The migrations actually ran
+        run: |
+          set -euo pipefail
+          cat /tmp/setup.log
+          grep -q "created database 'builder'" /tmp/setup.log || {
+            echo "::error::builder database was not created — is ${{ matrix.pg }} the right container?"; exit 1; }
+          grep -q "TurnCall migrations applied" /tmp/setup.log || {
+            echo "::error::TurnCall migrations did not run — is ${{ matrix.turncall }} the right container?"; exit 1; }
+          ! grep -q "No such container" /tmp/setup.log || {
+            echo "::error::make referenced a container that does not exist"; exit 1; }
+          echo "both migration steps reported success"
 
       - name: The key was actually written
         run: |
@@ -104,6 +141,9 @@ jobs:
             echo "::error::agent create returned $code"; cat /tmp/agent.json; exit 1; }
           echo "agent created ($code)"
 
-      - name: TurnCall logs on failure
+      - name: Container logs on failure
         if: failure()
-        run: docker logs turncall || true
+        run: |
+          docker logs "${{ matrix.turncall }}" || true
+          docker logs "${{ matrix.pg }}" || true
+          docker logs smoke-redis || true
