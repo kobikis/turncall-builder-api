@@ -83,16 +83,17 @@ _GOOGLE_S2S_VOICES = [
 # usually the right default in production; direct ids and provisioned-throughput
 # ARNs also work and can be typed in freely.
 _BEDROCK_MODELS = [
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "amazon.nova-lite-v1:0",
-    "amazon.nova-micro-v1:0",
+    # Anthropic entries are the "us." cross-region inference profiles on
+    # purpose: newer Anthropic models reject their own bare id with
+    # "Invocation ... with on-demand throughput isn't supported". Outside the
+    # US the prefix is "eu." / "apac." — the console allows free text for that.
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-opus-4-6-v1",
+    # Amazon's own models invoke fine by bare id.
+    "amazon.nova-2-lite-v1:0",
     "amazon.nova-pro-v1:0",
     "meta.llama3-3-70b-instruct-v1:0",
-    "mistral.mistral-large-2407-v1:0",
-    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
 ]
 
 # Amazon Nova Sonic. 2 is the default; v1 is the older model and does not
