@@ -284,3 +284,49 @@ def test_nova_sonic_is_offered_as_an_s2s_option():
     from app.builder import build_system_prompt
 
     assert "amazon.nova-2-sonic-v1:0" in build_system_prompt(first_turn=False)
+
+
+# --- the generated agent has to sound like a phone call ----------------------
+# From a real Sushi Samba transcript: the agent read out "1. Your name 2. The
+# time you'd like 3. A contact phone number" to a caller, and answered an
+# out-of-scope request with a flat "I'm only able to assist with reservations".
+
+
+def test_generated_agent_is_told_to_ask_one_thing_at_a_time():
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False)
+    assert "ONE thing at a time" in p
+    assert "Never enumerate" in p
+
+
+def test_generated_agent_is_told_not_to_emit_lists_or_markdown():
+    """Everything the agent says is spoken verbatim by TTS."""
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False)
+    assert "numbered lists" in p
+    assert "spoken verbatim" in p
+
+
+def test_out_of_scope_requests_get_a_warm_redirect_not_a_refusal():
+    from app.builder import build_system_prompt
+
+    assert "Never a flat refusal" in build_system_prompt(first_turn=False)
+
+
+def test_builder_is_told_not_to_copy_its_own_interview_style():
+    """The Builder asks numbered rounds in a text console; an agent that copies
+    that style reads a list down the phone."""
+    from app.builder import build_system_prompt
+
+    assert "never copy that style" in build_system_prompt(first_turn=False)
+
+
+def test_voice_guidance_applies_when_editing_an_existing_agent():
+    """Editing is how an already-created agent gets this fixed."""
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False, current_config={"name": "Sushi"})
+    assert "ONE thing at a time" in p
+    assert "Never a flat refusal" in p
