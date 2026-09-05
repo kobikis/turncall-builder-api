@@ -208,3 +208,79 @@ def test_builder_error_defaults_to_upstream():
     from app.builder import BuilderError
 
     assert BuilderError("boom").kind == "upstream"
+
+
+# --- prompt assembly: interview shape, recommendations, language --------------
+
+
+def test_opening_turn_asks_exactly_one_question():
+    """The first reply decides whether this reads as a conversation or a form."""
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=True)
+    assert "exactly ONE question" in p
+    assert "Suggested:" not in p  # rounds guidance must not leak into turn one
+
+
+def test_later_turns_ask_a_round_with_recommendations():
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False)
+    assert "single round" in p
+    assert "At most 4 questions" in p
+    assert "Suggested:" in p          # every question carries a recommendation
+    assert "all suggested" in p       # ...and the user can accept the whole round
+    assert "exactly ONE question" not in p
+
+
+def test_rounds_forbid_markdown():
+    """The console renders builder text verbatim — asterisks would show up raw."""
+    from app.builder import build_system_prompt
+
+    assert "no markdown" in build_system_prompt(first_turn=False).lower()
+
+
+def test_rounds_keep_dependent_questions_out_of_the_same_round():
+    from app.builder import build_system_prompt
+
+    assert "depends on another question" in build_system_prompt(first_turn=False)
+
+
+def test_builder_is_told_to_reuse_the_users_vocabulary():
+    """The user's own nouns are the most valuable thing they say."""
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False)
+    assert "Use the user's own words" in p
+    assert "covers, guests, patients" in p
+
+
+def test_edit_mode_drops_the_interview_but_keeps_the_domain_rules():
+    from app.builder import build_system_prompt
+
+    p = build_system_prompt(first_turn=False, current_config={"name": "Bot"})
+    assert "Suggested:" not in p            # editing must not re-interview
+    assert "EDITING an existing agent" in p
+    assert "pipeline_mode" in p             # ...but still has to emit a valid config
+    assert "guardrails.prohibited_topics" in p
+
+
+def test_knowledge_rule_applies_before_any_document_is_attached():
+    """Someone saying "I'll upload our menu" must not be asked to paste it."""
+    from app.builder import build_system_prompt
+
+    assert "NEVER ask the user to" in build_system_prompt(first_turn=False)
+
+
+def test_attached_filenames_are_named_only_when_present():
+    from app.builder import build_system_prompt
+
+    with_docs = build_system_prompt(first_turn=False, knowledge_docs=["menu.pdf"])
+    assert "menu.pdf" in with_docs
+    assert "menu.pdf" not in build_system_prompt(first_turn=False)
+
+
+def test_nova_sonic_is_offered_as_an_s2s_option():
+    from app.builder import build_system_prompt
+
+    assert "amazon.nova-2-sonic-v1:0" in build_system_prompt(first_turn=False)

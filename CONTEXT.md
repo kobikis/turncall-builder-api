@@ -72,6 +72,29 @@ The TurnCall agent configuration the Builder produces. Lives in a Session,
 editable by the user before creation.
 _Avoid_: spec, settings, definition
 
+**Build mode** / **Edit mode**:
+The two modes of the [[Builder]]. Build mode interviews from nothing and produces
+a new [[Config]]; edit mode applies a requested change to an existing one and must
+not re-interview. They share the domain rules and differ only in the interview.
+Distinct from [[Create]] — the Builder is done before Create begins.
+_Avoid_: "creation agent" / "creation mode" (reads as [[Create]], which is a
+different step), new vs update
+
+**Round**:
+One Builder turn's set of questions. The opening turn asks a single question;
+every turn after it asks a *round* — up to four questions that are answerable
+now, each carrying the Builder's own recommendation so the user can accept
+instead of decide. Questions whose answers depend on another question in the
+same round belong in the next one.
+_Avoid_: batch, form, questionnaire
+
+**Discipline**:
+One editable piece of the Builder's system prompt — voice pipeline, tools,
+guardrails, knowledge, defaults, plus the interview and language pieces.
+[[Build mode]] and [[Edit mode]] assemble different sets of them per turn, so a
+turn only carries guidance it can act on.
+_Avoid_: section, rule, prompt fragment
+
 **Finalize**:
 The Builder turn where it stops asking questions and emits a complete Config.
 The boundary between the Q&A loop and the display/create phase.
