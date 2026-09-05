@@ -65,18 +65,41 @@ fails, surfaces the error in the console with a link to the repo, and offers
 nothing destructive. Two-way sync is a real feature and a separate decision —
 worth making only once we know whether anyone actually edits upstream.
 
-## Workspace-level, admin-only
+## Per-user connections, with an owner per repo
 
-The connection belongs to the [[Workspace]], not to the [[User]] who made it.
-Repositories are the business's, and a per-user connection silently breaks when
-that person leaves — taking the agent's deployment path with it. Only `admin`
-can connect or disconnect.
+A workspace-level connection was proposed first, on the grounds that a per-user
+one breaks when that person leaves. That objection does not survive contact
+with the failure mode: if the connecting user goes, the local repo keeps
+generating and the GitHub repo keeps existing under its owner's account. Only
+the *sync* stops, and another user can relink. An inconvenience, not a loss.
+
+Per-user is also the more honest model. A GitHub App installation is authorized
+by a person against an account they control; a "workspace connection" would in
+practice have been the first admin's connection with the attribution hidden.
+Commits pushed under a user's own installation are attributed to them on
+GitHub, which is better provenance than a shared machine identity.
+
+So: each [[User]] connects their own GitHub, and each [[Linked repo]] records
+which user's connection owns it — the one that first linked it, and the one
+whose token subsequent pushes use.
+
+**When that connection goes away** — disconnected, revoked, or the user
+removed from the workspace — pushes for repos it owns fail with a distinct
+state: *the connection that owns this repo is gone*. Any other connected user
+can take it over. Nothing is deleted and nothing is force-pushed.
+
+**Open: whether an editor may push to a personal account.** The generated
+backend is the business's tool logic, and a per-user connection means anyone who
+can push could send it to a GitHub account only they control. That may be
+exactly right (it is their code) or may want restricting to organisations the
+workspace recognises. Not decided; worth deciding before a workspace has members
+who are not its owner.
 
 ## Smaller decisions, taken rather than debated
 
-- **Repo owner** is whichever account or organisation the App is installed on.
-  The installation flow already asks this, so asking again in our UI would be
-  redundant.
+- **Repo owner** is whichever account or organisation the connecting user
+  installed the App on. The installation flow already asks this, so asking again
+  in our UI would be redundant.
 - **One repo per Agent Backend**, matching the existing model — `CONTEXT.md`
   already says an Agent Backend "lives in its own generated repo", and each is
   independently deployable with its own compose file.
@@ -98,6 +121,9 @@ can connect or disconnect.
 - **Vocabulary**: [[GitHub connection]] and [[Linked repo]] in `CONTEXT.md`.
   "Publish" was avoided (it means agent versioning in TurnCall) and so was
   "export" (it implies one-time, and this is continuous).
+- **A [[Linked repo]] outlives the connection that made it.** The repo row keeps
+  working as a link and a clone target even when its owning connection is gone;
+  only pushing stops.
 
 ## Status
 

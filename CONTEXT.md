@@ -140,18 +140,23 @@ per-tool handler bodies are LLM-authored and dropped into it.
 _Avoid_: template, boilerplate
 
 **GitHub connection**:
-A [[Workspace]]'s GitHub App installation — what lets its [[Agent Backend]]s
-push. Workspace-scoped and admin-only: the repos belong to the business, and a
-per-user connection breaks when that person leaves. Issues short-lived
-installation tokens rather than storing a durable credential. See ADR-0013.
-_Avoid_: GitHub account, integration, OAuth (it is an App, not OAuth)
+One [[User]]'s GitHub App installation — what lets them push an [[Agent
+Backend]]. Per-user, not per-[[Workspace]]: an installation is authorized by a
+person against an account they control, and pushes are attributed to them on
+GitHub. Issues short-lived installation tokens rather than storing a durable
+credential. See ADR-0013.
+_Avoid_: GitHub account, integration, OAuth (it is an App, not OAuth),
+"the workspace's GitHub" (there is no such thing)
 
 **Linked repo**:
-The GitHub repository an [[Agent Backend]] pushes to — one per backend, owned by
-whichever account or org the App was installed on. The *local* generated repo
-stays the source of truth; pushes are one-way and never forced, so an edit made
-on GitHub causes a push to fail loudly rather than be clobbered. Deleting the
-agent leaves the Linked repo alone.
+The GitHub repository an [[Agent Backend]] pushes to — one per backend, under
+whichever account or org the App was installed on. It records the [[GitHub
+connection]] that owns it: the one that first linked it and whose token later
+pushes use. The *local* generated repo stays the source of truth; pushes are
+one-way and never forced, so an edit made on GitHub causes a push to fail loudly
+rather than be clobbered. A Linked repo outlives its owning connection — when
+that connection goes, pushing stops and another user can take it over, but
+nothing is deleted. Deleting the agent leaves it alone too.
 _Avoid_: publish (means agent versioning in TurnCall), export (implies
 one-time; this is continuous), remote, mirror
 
