@@ -140,13 +140,16 @@ per-tool handler bodies are LLM-authored and dropped into it.
 _Avoid_: template, boilerplate
 
 **GitHub connection**:
-One [[User]]'s GitHub App installation — what lets them push an [[Agent
-Backend]]. Per-user, not per-[[Workspace]]: an installation is authorized by a
-person against an account they control, and pushes are attributed to them on
-GitHub. Issues short-lived installation tokens rather than storing a durable
-credential. See ADR-0013.
-_Avoid_: GitHub account, integration, OAuth (it is an App, not OAuth),
-"the workspace's GitHub" (there is no such thing)
+One [[User]]'s GitHub credential — what lets them push an [[Agent Backend]].
+Per-user, not per-[[Workspace]]: it is authorized by a person against an account
+they control, and pushes are attributed to them on GitHub. Currently a
+fine-grained personal access token, scoped to chosen repositories with
+`contents: write` and an expiry; stored encrypted, since it is the first
+credential the builder must read back rather than hash. A GitHub App may replace
+how the credential is obtained later without changing anything else. See
+ADR-0013.
+_Avoid_: GitHub account, integration, OAuth, "the workspace's GitHub" (there is
+no such thing), "GitHub App" (not what this is today)
 
 **Linked repo**:
 Where an [[Agent Backend]] pushes: an organisation, an existing repository, a

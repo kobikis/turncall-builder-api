@@ -4,9 +4,9 @@ An [[Agent Backend]] is generated code the user cannot currently take with them:
 it lives in the builder's Docker environment and is only reachable through the
 console. This records how it gets to their GitHub, and why each choice was made.
 
-**Status: accepted, shipping in stages.** The scaffold changes are in. The App
-integration is not built — it cannot be verified without a registered GitHub
-App, which only the operator can create.
+**Status: accepted, shipping in stages.** The scaffold changes are in. The
+token-based connection is designed and not yet built; it needs no operator
+setup, so it is no longer blocked on anything.
 
 ## The point is ownership
 
@@ -35,21 +35,55 @@ faithful history that already distinguishes generated commits from the user's
 own edits. The expensive part of this feature was built long before anyone asked
 for it.
 
-## A GitHub App, not a token
+## A fine-grained token first; a GitHub App later if it earns it
 
-A personal access token is the fast path and puts a long-lived credential to the
-user's repositories in builder-api's database. A GitHub App issues short-lived
-installation tokens, scoped to the repositories the user selects, revocable from
-GitHub's side without touching this system.
+An earlier draft chose a GitHub App, reasoning by analogy with ADR-0016 in the
+engine, where per-agent static AWS keys were gated off in favour of an assumed
+role. **That analogy does not transfer.** There, the better credential was just
+a different field — no ceremony. Here the App costs an app registration, a
+private key for the operator to hold, a callback endpoint and an installation
+flow, and it blocks the entire feature on a manual step only the operator can
+perform. A token ships today.
 
-This is the same decision as ADR-0016 in the engine, where per-agent static AWS
-keys were gated off by default in favour of an assumed role. The reasoning
-transfers exactly: prefer the credential that expires and that the user can
-revoke without asking us.
+**Fine-grained** personal access tokens also close most of the gap that
+argument rested on. They are scoped to selected repositories, can be limited to
+`contents: write`, and carry a mandatory expiry. The objection was really to
+classic tokens — all repositories, no expiry — which is not what this uses.
 
-The cost is real — app registration, a private key to hold, installation
-callbacks — and it is why this ships after the scaffold changes rather than with
-them.
+So: a user pastes a fine-grained token scoped to the repositories they intend to
+push to. Three conditions make that defensible rather than merely convenient.
+
+### 1. It is encrypted at rest
+
+builder-api hashes passwords with argon2id and, today, **stores no third-party
+secret at all**. A token is the first credential it must be able to read back —
+you cannot hash something you need to use. It is therefore a new storage class,
+not an incremental change.
+
+It is encrypted with a key from the environment, in the same spirit as the
+engine's `API_KEY_HASH_SECRET`: a database dump on its own is useless without
+the process's key. Plaintext would mean one dump yields write access to every
+connected user's repositories.
+
+### 2. Its scope is checked, not assumed
+
+On connect, verify the token actually has `contents: write` on the repository
+being linked, and reject it with a clear message otherwise. A token that looks
+connected and fails on first push is the silent-success failure this codebase
+keeps getting bitten by.
+
+### 3. Expiry is surfaced before it bites
+
+This is the real cost of choosing a token, and it is a UX obligation rather than
+a footnote. Fine-grained tokens expire on a schedule the user picked, and an
+expired one means pushes start failing quietly. The connection stores the expiry
+and the console warns ahead of it. A GitHub App would not have this problem.
+
+### Migration
+
+Nothing about [[Linked repo]] depends on which credential pushed. Swapping in an
+App later changes how a token is obtained and nothing else — so this is a "for
+now" that does not have to be undone, only added to.
 
 ## Push-only, and never force
 
@@ -136,8 +170,12 @@ first draft — the first is set up once, the second is set per agent.
   carries the variable names with empty values. A test asserts no secret value
   reaches the committed template, because that file is the one place a
   credential could silently escape.
-- **A new secret to hold.** The GitHub App's private key becomes an operator
-  credential in builder-api's environment, alongside the provider keys.
+- **A new secret to hold, and a new kind.** The encryption key becomes an
+  operator credential in builder-api's environment alongside the provider keys —
+  and rotating it invalidates every stored token, so it is set once and left
+  alone. This is also the first user-supplied third-party credential the builder
+  persists; the threat model changes from "leaks our keys" to "leaks our users'
+  write access to their own repositories".
 - **Divergence is visible, not resolved.** The console will show a failed push;
   resolving it is the user's job in their own repo. That is deliberate — the
   alternative is us guessing whose version wins.
@@ -156,5 +194,6 @@ first draft — the first is set up once, the second is set per agent.
 
 ## Status
 
-Accepted. `.env.example` and the README shipped; the App integration is blocked
-on a registered GitHub App.
+Accepted. `.env.example` and the README shipped. The token-based connection is
+unblocked — it requires no GitHub App registration and no operator setup, which
+is the point of choosing it first.
