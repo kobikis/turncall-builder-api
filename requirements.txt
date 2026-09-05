@@ -12,3 +12,4 @@ uvicorn[standard]>=0.30
 pytest>=8.0
 pytest-asyncio>=0.24
 openai>=1.60
+cryptography>=42
