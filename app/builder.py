@@ -32,7 +32,39 @@ _KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 class BuilderError(RuntimeError):
     """A builder turn failed (vendor API error or malformed tool call).
 
-    Vendor-neutral so callers never import anthropic/openai error types."""
+    Vendor-neutral so callers never import anthropic/openai error types.
+
+    `kind` classifies the failure so the API can tell the operator something
+    actionable without echoing the vendor's raw message back to the browser:
+
+      auth        the provider rejected the builder's API key
+      credit      the account is out of credit / over quota — retrying is futile
+      rate_limit  transient; retrying is exactly right
+      protocol    the model answered without calling the compose tool
+      upstream    anything else
+    """
+
+    def __init__(self, message: str, *, kind: str = "upstream") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def classify_vendor_error(exc: Exception) -> str:
+    """Map a vendor API exception onto a BuilderError kind.
+
+    Status alone is not enough: Anthropic reports an exhausted credit balance as
+    a 400, which is indistinguishable from a malformed request without reading
+    the message.
+    """
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    if any(s in text for s in ("credit balance", "billing", "insufficient_quota", "exceeded your current quota")):
+        return "credit"
+    if status in (401, 403) or "authentication" in text or "invalid api key" in text or "invalid x-api-key" in text:
+        return "auth"
+    if status == 429 or "rate limit" in text:
+        return "rate_limit"
+    return "upstream"
 
 # The trimmed slice of the TurnCall agent schema the builder may set (ADR-0003).
 # Everything else takes TurnCall defaults.
@@ -340,11 +372,11 @@ class AnthropicBuilder:
                 messages=messages,
             )
         except anthropic.APIError as exc:
-            raise BuilderError(str(exc)) from exc
+            raise BuilderError(str(exc), kind=classify_vendor_error(exc)) from exc
         for block in resp.content:
             if block.type == "tool_use" and block.name == "compose":
                 return block.input
-        raise BuilderError("builder did not call the compose tool")
+        raise BuilderError("builder did not call the compose tool", kind="protocol")
 
 
 class OpenAIBuilder:
@@ -374,14 +406,14 @@ class OpenAIBuilder:
                 tool_choice={"type": "function", "name": "compose"},
             )
         except openai.APIError as exc:
-            raise BuilderError(str(exc)) from exc
+            raise BuilderError(str(exc), kind=classify_vendor_error(exc)) from exc
         for item in resp.output or []:
             if getattr(item, "type", None) == "function_call" and item.name == "compose":
                 try:
                     return json.loads(item.arguments)
                 except json.JSONDecodeError as exc:
-                    raise BuilderError("malformed compose tool arguments") from exc
-        raise BuilderError("builder did not call the compose tool")
+                    raise BuilderError("malformed compose tool arguments", kind="protocol") from exc
+        raise BuilderError("builder did not call the compose tool", kind="protocol")
 
 
 _PROVIDERS: dict[str, type[AnthropicBuilder] | type[OpenAIBuilder]] = {
