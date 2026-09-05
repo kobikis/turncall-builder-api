@@ -6,6 +6,12 @@ options instead of a hand-maintained list. Keys come from the builder's own env
 DEEPGRAM_API_KEY; OpenRouter's model list is public). Best-effort: a provider
 with no key / no list API / an error yields [] (the console still allows free
 text), and a stale cache is served over a transient failure. Cached ~1h.
+
+AWS is the exception: listing Bedrock models needs signed SigV4 credentials the
+builder has no reason to hold (they belong to the TurnCall runtime), so its
+catalogs are short curated lists. Model access is per-account and per-region
+anyway, so no list would be accurate for every user — the console allows free
+text, which is what the ARN and inference-profile forms need.
 """
 
 from __future__ import annotations
@@ -72,6 +78,29 @@ _GOOGLE_S2S_VOICES = [
 ]
 
 
+# AWS Bedrock: curated, not fetched (see module docstring). Cross-region
+# inference profiles ("us."/"eu." prefixes) fail over within a geography and are
+# usually the right default in production; direct ids and provisioned-throughput
+# ARNs also work and can be typed in freely.
+_BEDROCK_MODELS = [
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "amazon.nova-lite-v1:0",
+    "amazon.nova-micro-v1:0",
+    "amazon.nova-pro-v1:0",
+    "meta.llama3-3-70b-instruct-v1:0",
+    "mistral.mistral-large-2407-v1:0",
+    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+]
+
+# Amazon Nova Sonic. 2 is the default; v1 is the older model and does not
+# support endpointing_sensitivity.
+_AWS_S2S_MODELS = ["amazon.nova-2-sonic-v1:0", "amazon.nova-sonic-v1:0"]
+_AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
+
+
 async def llm_models(provider: str) -> list[str]:
     return await _cached(f"llm:{provider}", lambda c: _fetch_llm_models(c, provider))
 
@@ -122,6 +151,8 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str) -> list[st
         )
         r.raise_for_status()
         return [m["id"] for m in r.json().get("data", []) if m.get("id")]
+    if provider == "bedrock":
+        return list(_BEDROCK_MODELS)
     return []  # ollama / custom_openai target a per-agent endpoint
 
 
@@ -158,6 +189,8 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str) -> list[st
             if live:
                 return sorted(live)
         return list(_GOOGLE_S2S_MODELS)  # no key / empty — published fallback
+    if provider == "aws":
+        return list(_AWS_S2S_MODELS)
     return []
 
 
@@ -175,6 +208,8 @@ async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str) -> list[di
         return _same(_OPENAI_S2S_VOICES)
     if provider == "google":
         return _same(_GOOGLE_S2S_VOICES)
+    if provider == "aws":
+        return _same(_AWS_S2S_VOICES)
     return []
 
 

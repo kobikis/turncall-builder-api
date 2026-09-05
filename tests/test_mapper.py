@@ -185,3 +185,78 @@ def test_backend_own_url_is_not_external():
         ],
     }
     assert external_tool_names(cfg, "http://backend:9001") == set()
+
+
+# --- AWS Bedrock / Nova Sonic -------------------------------------------------
+
+
+def test_bedrock_llm_passes_through_with_region():
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "llm": {"provider": "bedrock", "model": "anthropic.claude-3-5-sonnet-20241022-v2:0"},
+            "aws": {"region": "eu-west-1"},
+        }
+    )["config"]
+    assert cfg["llm"] == {
+        "provider": "bedrock",
+        "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    }
+    assert cfg["aws"] == {"region": "eu-west-1"}
+
+
+def test_nova_sonic_gets_its_own_defaults():
+    # The OpenAI fallbacks are wrong here — Nova Sonic would reject "alloy".
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "pipeline_mode": "s2s",
+            "s2s": {"provider": "aws"},
+            "aws": {"region": "us-west-2"},
+        }
+    )["config"]
+    assert cfg["s2s"] == {
+        "provider": "aws",
+        "model": "amazon.nova-2-sonic-v1:0",
+        "voice": "matthew",
+    }
+    assert cfg["aws"] == {"region": "us-west-2"}
+
+
+def test_gemini_gets_its_own_defaults():
+    # Regression: a bare google s2s block used to inherit OpenAI's realtime
+    # model id and voice, which Gemini rejects.
+    cfg = to_create_agent_request(
+        {"name": "Bot", "system_prompt": "hi", "pipeline_mode": "s2s", "s2s": {"provider": "google"}}
+    )["config"]
+    assert cfg["s2s"]["model"] == "models/gemini-3.1-flash-live-preview"
+    assert cfg["s2s"]["voice"] == "Charon"
+
+
+def test_aws_block_dropped_when_no_aws_provider_is_used():
+    # A stray region on an OpenAI agent is noise TurnCall would ignore anyway.
+    cfg = to_create_agent_request(
+        {"name": "Bot", "system_prompt": "hi", "aws": {"region": "us-east-1"}}
+    )["config"]
+    assert "aws" not in cfg
+
+
+def test_aws_credentials_are_never_emitted():
+    """Credentials belong to the operator; a generated config must not carry
+    them, and TurnCall stores agent config unencrypted."""
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "llm": {"provider": "bedrock", "model": "amazon.nova-pro-v1:0"},
+            "aws": {
+                "region": "us-east-1",
+                "access_key_id": "AKIALEAK",
+                "secret_access_key": "leaked",
+                "role_arn": "arn:aws:iam::1:role/x",
+            },
+        }
+    )["config"]
+    assert cfg["aws"] == {"region": "us-east-1"}
