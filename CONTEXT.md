@@ -139,6 +139,22 @@ The fixed hand-written template for an Agent Backend (FastAPI bootstrap,
 per-tool handler bodies are LLM-authored and dropped into it.
 _Avoid_: template, boilerplate
 
+**GitHub connection**:
+A [[Workspace]]'s GitHub App installation — what lets its [[Agent Backend]]s
+push. Workspace-scoped and admin-only: the repos belong to the business, and a
+per-user connection breaks when that person leaves. Issues short-lived
+installation tokens rather than storing a durable credential. See ADR-0013.
+_Avoid_: GitHub account, integration, OAuth (it is an App, not OAuth)
+
+**Linked repo**:
+The GitHub repository an [[Agent Backend]] pushes to — one per backend, owned by
+whichever account or org the App was installed on. The *local* generated repo
+stays the source of truth; pushes are one-way and never forced, so an edit made
+on GitHub causes a push to fail loudly rather than be clobbered. Deleting the
+agent leaves the Linked repo alone.
+_Avoid_: publish (means agent versioning in TurnCall), export (implies
+one-time; this is continuous), remote, mirror
+
 **Backend registry**:
 The builder's record of every Agent Backend — the `agent_backends` table mapping
 `agent_id → {port, service_dir, status}`. The builder reads it to route events,
