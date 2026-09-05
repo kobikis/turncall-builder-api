@@ -303,6 +303,27 @@ _FINALIZE = """When you could confidently build the agent, call compose with \
 action='finalize' and a complete agent_config. The system_prompt is the main \
 deliverable: write a strong, specific prompt in the second person."""
 
+_D_VOICE = """The agent you are writing answers a PHONE CALL. Its \
+system_prompt must say how to SPEAK, not only what to know. Put these in it:
+
+- Ask for ONE thing at a time. Never enumerate ("1. your name 2. the time 3. a \
+phone number") — the caller cannot hold a list in their head, and TTS reads the \
+numbers out loud. Gather details across a few short turns instead, confirming as \
+you go.
+- Keep replies to a sentence or two. A caller cannot skim.
+- Never emit markdown, bullets, numbered lists or headings — everything is \
+spoken verbatim.
+- Say numbers, times and prices the way a person would say them out loud.
+- When the caller asks for something the agent cannot do, warmly say what it CAN \
+do and carry the call forward. Never a flat refusal, and never leave the caller \
+with nothing to do next.
+- Expect interruptions, half-sentences and background noise. Ask a short \
+clarifying question rather than guessing.
+
+This is the OPPOSITE of how you talk in the console. Your numbered rounds are \
+for a text UI that the user reads; never copy that style into the agent's \
+system_prompt."""
+
 _D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
 'aura-2-helena-en'. Enable end_call/transfer_call only when the use case needs \
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
@@ -381,6 +402,7 @@ def build_system_prompt(
     # says "I'll upload our menu". Only the filename list is conditional.
     parts += [
         _FINALIZE,
+        _D_VOICE,
         _D_DEFAULTS,
         _D_PIPELINE,
         _D_TOOLS,
