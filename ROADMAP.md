@@ -168,6 +168,18 @@ Contract: request has `phoneNumber.number` (dialed) + `customer.number` (caller)
 response returns `agent_id` (any agent — call-init isn't project-scoped),
 `variables`, `metadata`, `dynamic_data.knowledge_context`. Signed like webhooks.
 
+## Ideas, not scheduled
+
+- **Dry-run a Config before Create** — talk to a finalized Config as text before
+  provisioning anything, so the `system_prompt` can be judged without phoning
+  the agent. Design and open questions in
+  [design-config-dry-run.md](./docs/design-config-dry-run.md). Cheaper than it
+  looks: TurnCall's `complete_text` already takes a config rather than an agent.
+  A static check on the finalized `system_prompt` (numbered lists, markdown)
+  is the cheap subset and worth doing on its own.
+- **Design-tree panel** — showing what the Builder has settled vs what is still
+  open. Considered and dropped; see the same doc for why.
+
 ## Decisions
 
 - ADR-0001 — LLM-driven composer (structured-output loop)
@@ -177,3 +189,8 @@ response returns `agent_id` (any agent — call-init isn't project-scoped),
 - ADR-0005 — Agent Backends own their events; builder is control-plane only
 - ADR-0006 — Management console over per-agent projects
 - ADR-0007 — Call-init support (customer writes the endpoint)
+- ADR-0008 — Managed call-init
+- ADR-0009 — Implicit agent knowledge
+- ADR-0010 — BYO tool server
+- ADR-0011 — Multi-tenant identity in builder
+- ADR-0012 — Interview rounds + composed disciplines
