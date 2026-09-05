@@ -168,6 +168,18 @@ Contract: request has `phoneNumber.number` (dialed) + `customer.number` (caller)
 response returns `agent_id` (any agent — call-init isn't project-scoped),
 `variables`, `metadata`, `dynamic_data.knowledge_context`. Signed like webhooks.
 
+## Partly shipped
+
+- **GitHub integration** — push each Agent Backend to the user's own GitHub so
+  they can run it independently of the builder. Design settled in ADR-0013;
+  connections are per-user, pushes are one-way and never forced. The scaffold
+  half has shipped: a generated repo now emits `.env.example` and a
+  run-it-yourself README, so a clone can actually start. The App integration is
+  **blocked on registering a GitHub App** — an operator step — and until one
+  exists the auth path cannot be verified end to end.
+  Still open: whether an editor may push the workspace's agent code to a GitHub
+  account only they control.
+
 ## Ideas, not scheduled
 
 - **Dry-run a Config before Create** — talk to a finalized Config as text before
@@ -194,3 +206,4 @@ response returns `agent_id` (any agent — call-init isn't project-scoped),
 - ADR-0010 — BYO tool server
 - ADR-0011 — Multi-tenant identity in builder
 - ADR-0012 — Interview rounds + composed disciplines
+- ADR-0013 — Push an Agent Backend to the user's GitHub
