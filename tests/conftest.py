@@ -115,3 +115,26 @@ def backend_row(**over):
     }
     row.update(over)
     return row
+
+
+class FakeStream:
+    """Stand-in for `builder.stream`, which is an async generator.
+
+    Records the call and yields what it was given: ComposeResult / Progress
+    values to emit, or an exception to raise mid-stream.
+    """
+
+    def __init__(self, *events):
+        self.events = events
+        self.args: tuple = ()
+        self.kwargs: dict = {}
+
+    def __call__(self, *args, **kwargs):
+        self.args, self.kwargs = args, kwargs
+        return self._events()
+
+    async def _events(self):
+        for event in self.events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event

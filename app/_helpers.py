@@ -101,3 +101,28 @@ async def _backend_or_404(
     if not b:
         raise HTTPException(status_code=404, detail="agent not found")
     return b
+
+
+KNOWLEDGE_KB_NAME = "builder-knowledge"
+
+
+async def _agent_kb(
+    agent_id: str, api_key: str, create: bool = False
+) -> dict[str, Any] | None:
+    """Resolve the agent's implicit Agent Knowledge KB (ADR-0009). The agent's
+    project holds at most this one KB; created + linked on first upload.
+
+    Shared rather than private to the knowledge router because Create also has
+    to reach it, to forward the documents staged on the Session.
+    """
+    client = runtime.get_client()
+    for kb in await client.list_knowledge_bases(api_key):
+        if kb["name"] == KNOWLEDGE_KB_NAME:
+            return kb
+    if not create:
+        return None
+    kb = await client.create_knowledge_base(KNOWLEDGE_KB_NAME, api_key)
+    # prompt mode: builder KBs are small (menus, FAQs), so inject the full text
+    # into the agent's prompt — always present, never missed by a retrieval query.
+    await client.link_knowledge_base(agent_id, kb["id"], api_key, mode="prompt")
+    return kb

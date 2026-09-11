@@ -1,21 +1,27 @@
 """The builder loop: prompt -> follow-up questions -> finalized TurnCall config.
 
-One LLM call per turn (Anthropic or OpenAI — the Session's Builder model),
-forced to a structured `compose` tool that returns either the next question
-(`ask`) or a complete agent config (`finalize`). See ADR-0001 and ADR-0003.
+A deep agent per turn (ADR-0014). It can read the documents staged on the
+Session and load a skill when one applies, and it must finish by producing a
+`compose` result: either the next question (`ask`) or a complete agent config
+(`finalize`). That contract is unchanged from ADR-0001 — the console is built on
+it — and so is the trimmed config surface of ADR-0003.
+
+Stateless between turns by design: no checkpointer, so the running history the
+caller passes IS the state. See ADR-0014 for why.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
-import anthropic
-import openai
-from anthropic import AsyncAnthropic
-from openai import AsyncOpenAI
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from langchain.agents.structured_output import ToolStrategy
 
 # BUILDER_* is canonical; COMPOSER_* accepted as a legacy fallback (pre-rename).
 DEFAULT_PROVIDER = os.environ.get(
@@ -27,6 +33,16 @@ MODEL = os.environ.get(
 
 # Which env key unlocks each provider — the picker only offers keyed ones.
 _KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+
+# Skills shipped with the builder. Read-only, and mounted at /skills/ inside the
+# agent's backend. Workspace-authored skills are a separate decision (ADR-0014).
+SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
+
+# A turn is one HTTP request the console waits on with no timeout of its own, so
+# the loop is capped on both axes. MAX_STEPS counts LangGraph supersteps, which
+# is roughly two per model call — not a budget, a runaway guard.
+MAX_STEPS = int(os.environ.get("BUILDER_MAX_STEPS", "20"))
+TURN_TIMEOUT_SECONDS = float(os.environ.get("BUILDER_TURN_TIMEOUT", "90"))
 
 
 class BuilderError(RuntimeError):
@@ -56,8 +72,19 @@ def classify_vendor_error(exc: Exception) -> str:
     a 400, which is indistinguishable from a malformed request without reading
     the message.
     """
-    status = getattr(exc, "status_code", None)
-    text = str(exc).lower()
+    # langchain wraps vendor exceptions, so the vendor's own error is usually the
+    # cause rather than the exception itself. Walk the chain and read every link:
+    # dropping this loses the credit-vs-retry distinction the console depends on.
+    chain: list[BaseException] = []
+    cursor: BaseException | None = exc
+    while cursor is not None and cursor not in chain:
+        chain.append(cursor)
+        cursor = cursor.__cause__ or cursor.__context__
+
+    status = next(
+        (s for s in (getattr(link, "status_code", None) for link in chain) if s), None
+    )
+    text = " ".join(str(link) for link in chain).lower()
     if any(s in text for s in ("credit balance", "billing", "insufficient_quota", "exceeded your current quota")):
         return "credit"
     if status in (401, 403) or "authentication" in text or "invalid api key" in text or "invalid x-api-key" in text:
@@ -239,12 +266,20 @@ COMPOSE_TOOL: dict[str, Any] = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["ask", "finalize"]},
+            "action": {"type": "string", "enum": ["ask", "confirm", "finalize"]},
             "question": {
                 "type": "string",
                 "description": "What to ask the user next — one question on the "
                 "opening turn, a short numbered round after that. Plain text, no "
                 "markdown. Required when action='ask'.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "What you understood, for the user to check before "
+                "anything is built. Required when action='confirm'. Plain text, one "
+                "short bullet per decision, starting each line with '- '. Write it in "
+                "the user's own words about their business — not about voice-agent "
+                "configuration. End by inviting a correction.",
             },
             "agent_config": {
                 **_AGENT_CONFIG_SCHEMA,
@@ -254,6 +289,16 @@ COMPOSE_TOOL: dict[str, Any] = {
         "required": ["action"],
     },
 }
+
+# The turn's structured output. ToolStrategy accepts a JSON-Schema dict directly,
+# so this reuses the schema above rather than maintaining a parallel Pydantic
+# mirror of ADR-0003's surface. `title` names the tool the model calls.
+COMPOSE_SCHEMA: dict[str, Any] = {
+    "title": COMPOSE_TOOL["name"],
+    "description": COMPOSE_TOOL["description"],
+    **COMPOSE_TOOL["input_schema"],
+}
+
 
 # --- Disciplines -------------------------------------------------------------
 # The Builder's prompt is assembled from small, separately-editable pieces
@@ -299,9 +344,30 @@ of translating them into generic ones like "customer" or "booking". The agent \
 should sound like it already works there. A term you are unsure of is a good \
 thing to ask about."""
 
-_FINALIZE = """When you could confidently build the agent, call compose with \
-action='finalize' and a complete agent_config. The system_prompt is the main \
-deliverable: write a strong, specific prompt in the second person."""
+_FINALIZE = """When you could confidently build the agent, do NOT build it yet. \
+Call compose with action='confirm' and a summary of what you understood, so the \
+user can catch a misunderstanding before anything is created.
+
+The summary is about THEIR business, not about voice-agent configuration. One \
+short line per decision, each starting with '- ': what the agent is for, what it \
+collects or does, when it transfers or ends a call, what it must not do. Use \
+their words and their numbers. Never list providers, models, voices, tool \
+schemas or pipeline settings — those are not decisions they made. Close by \
+asking them to say what is wrong, or to confirm.
+
+Then read their reply:
+
+- They confirm, or say anything approving ("looks right", "yes", "go ahead"): \
+call compose with action='finalize' and the complete agent_config. Do NOT \
+confirm a second time. A summary the user has already accepted is settled.
+- They correct something: fold the correction in. Confirm again ONLY if the \
+correction opened a genuinely new question; otherwise finalize directly.
+
+Never send the same summary twice. If a summary already appears earlier in this \
+conversation and the user did not reject it, finalize.
+
+The system_prompt is the main deliverable: write a strong, specific prompt in \
+the second person."""
 
 _D_VOICE = """The agent you are writing answers a PHONE CALL. Its \
 system_prompt must say how to SPEAK, not only what to know. Put these in it:
@@ -329,52 +395,14 @@ _D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
 (navigate an IVR, enter a PIN/extension)."""
 
-_D_PIPELINE = """Voice pipeline: default to cascade (leave pipeline_mode unset). \
-Choose s2s ONLY when the user explicitly wants the most natural / real-time / \
-ultra-low-latency voice ("as human as possible", "no lag", "real-time"). For \
-s2s, set pipeline_mode='s2s' and an s2s block: default provider openai with \
-model 'gpt-4o-realtime-preview' and an OpenAI voice (alloy/ash/ballad/coral/\
-echo/sage/shimmer/verse); use google (model \
-'models/gemini-3.1-flash-live-preview' + a Gemini voice like Kore/Puck/Charon) \
-if the user prefers Gemini, or aws (model 'amazon.nova-2-sonic-v1:0' + a Nova \
-Sonic voice like matthew/tiffany/amy) if they want it on their own AWS account. \
-Pick the voice from the chosen provider's set. In s2s the tts block and \
-voicemail detection do not apply — never combine s2s with voicemail.
-
-Voicemail: enable voicemail_detection ONLY for outbound / dialer agents placing \
-calls that may reach voicemail, when the user wants a message left. Set \
-voicemail_detection.enabled=true and a voicemail_message. Cascade only. Leave it \
-off for inbound-only agents."""
-
-_D_TOOLS = """When the agent must perform an external action (book, cancel, look \
-up an order), author a custom_tool for it (snake_case name, description, \
-parameters_schema). Don't ask for a URL — the builder generates a backend and \
-wires it. If the user VOLUNTEERS their own API URL, set server_url (agent-wide \
-base) or a tool's server_url (full URL), but never ask.
-
-When the agent should hand the call to a human, ask ONE question: is the \
-transfer number fixed (and what is it), or does it depend on runtime logic \
-(who's on call, the caller, the topic)? Fixed: enable transfer_call and write \
-the number and the when-to-transfer conditions into the system_prompt. Depends: \
-ALSO author a get_transfer_number custom_tool (description: "Returns the phone \
-number of the human to transfer to right now"; no parameters unless the routing \
-needs them) and instruct the system_prompt to call get_transfer_number first, \
-then transfer_call with the returned number. Either way the system_prompt should \
-tell the agent to announce the transfer (transfer_message) and what to say if \
-the human doesn't answer."""
-
-_D_GUARDRAILS = """Guardrails: when the user wants the agent to stay off certain \
-subjects (no medical/legal/financial advice, no discussing competitors), set \
-guardrails.prohibited_topics to a short list. The platform enforces them as a \
-refusal rule — you don't also need to restate them in the system_prompt."""
+_D_PIPELINE = """Voice pipeline: default to cascade — leave pipeline_mode \
+unset and use the tts block. Anything else (speech-to-speech, voicemail \
+detection) is a departure from the default and has a skill covering it."""
 
 _D_KNOWLEDGE = """Knowledge base: the user can attach documents (a menu, price \
-list, policy, FAQ) to the agent. You CANNOT read them, but the agent gets their \
-full contents at call time. When the user references an attached document, \
-assume the agent will have it: write the system_prompt to answer from its \
-knowledge base, and add any action tool the request implies (e.g. a \
-place_room_service_order tool for ordering from a menu). NEVER ask the user to \
-paste a document's contents."""
+list, policy, FAQ) to the agent, and the agent gets their full contents at call \
+time. NEVER ask the user to paste a document's contents — this holds before \
+anything is attached, which is exactly when someone says "I'll upload our menu"."""
 
 _CLOSING = """Always respond by calling the compose tool."""
 
@@ -400,13 +428,15 @@ def build_system_prompt(
     # _D_KNOWLEDGE is unconditional: "never ask the user to paste a document"
     # has to hold *before* anything is attached — that is exactly when someone
     # says "I'll upload our menu". Only the filename list is conditional.
+    # Tools, guardrails, speech-to-speech and reading attached documents are
+    # skills now: each applies to some agents, so each is loaded when it applies
+    # rather than shipped on every turn. What stays here is what is true of every
+    # agent this builder writes (ADR-0014).
     parts += [
         _FINALIZE,
         _D_VOICE,
         _D_DEFAULTS,
         _D_PIPELINE,
-        _D_TOOLS,
-        _D_GUARDRAILS,
         _D_KNOWLEDGE,
     ]
 
@@ -431,8 +461,10 @@ SYSTEM = build_system_prompt(first_turn=False)
 
 @dataclass(frozen=True)
 class ComposeResult:
-    action: Literal["ask", "finalize"]
+    action: Literal["ask", "confirm", "finalize"]
     question: str | None = None
+    # What the builder understood, shown for approval before anything is built.
+    summary: str | None = None
     agent_config: dict[str, Any] | None = None
 
 
@@ -444,6 +476,11 @@ def _to_result(tool_input: dict[str, Any]) -> ComposeResult:
         if not question:
             raise ValueError("action='ask' requires a question")
         return ComposeResult(action="ask", question=question)
+    if action == "confirm":
+        summary = tool_input.get("summary")
+        if not summary:
+            raise ValueError("action='confirm' requires a summary")
+        return ComposeResult(action="confirm", summary=summary)
     if action == "finalize":
         config = tool_input.get("agent_config")
         if not config:
@@ -465,80 +502,20 @@ rebuild from scratch. Only action='ask' if the requested change is genuinely \
 ambiguous."""
 
 
-class BuilderProvider(Protocol):
-    """One vendor's forced-compose call. Returns the compose tool's input dict."""
+def _backend(documents_dir: str | None) -> CompositeBackend:
+    """Scratch in state; skills and the user's documents read-only on disk.
 
-    async def compose(
-        self, *, model: str, system: str, messages: list[dict[str, str]]
-    ) -> dict[str, Any]: ...
-
-
-class AnthropicBuilder:
-    def __init__(self, client: AsyncAnthropic | None = None) -> None:
-        # Retries cover transient connect/timeout blips before the user sees them.
-        self._client = client or AsyncAnthropic(max_retries=4, timeout=60.0)
-
-    async def compose(
-        self, *, model: str, system: str, messages: list[dict[str, str]]
-    ) -> dict[str, Any]:
-        try:
-            resp = await self._client.messages.create(
-                model=model,
-                max_tokens=4096,
-                system=system,
-                tools=[COMPOSE_TOOL],
-                tool_choice={"type": "tool", "name": "compose"},
-                messages=messages,
-            )
-        except anthropic.APIError as exc:
-            raise BuilderError(str(exc), kind=classify_vendor_error(exc)) from exc
-        for block in resp.content:
-            if block.type == "tool_use" and block.name == "compose":
-                return block.input
-        raise BuilderError("builder did not call the compose tool", kind="protocol")
-
-
-class OpenAIBuilder:
-    def __init__(self, client: AsyncOpenAI | None = None) -> None:
-        self._client = client or AsyncOpenAI(max_retries=4, timeout=60.0)
-
-    async def compose(
-        self, *, model: str, system: str, messages: list[dict[str, str]]
-    ) -> dict[str, Any]:
-        # Responses API, not chat completions: it's the only endpoint that takes
-        # function tools across ALL current OpenAI model families (standard,
-        # reasoning gpt-5.x, and -pro models, which 404 on /v1/chat/completions).
-        tool = {
-            "type": "function",
-            "name": COMPOSE_TOOL["name"],
-            "description": COMPOSE_TOOL["description"],
-            "parameters": COMPOSE_TOOL["input_schema"],
-        }
-        try:
-            resp = await self._client.responses.create(
-                model=model,
-                # Reasoning models spend output budget thinking before the call.
-                max_output_tokens=8192,
-                instructions=system,
-                input=messages,
-                tools=[tool],
-                tool_choice={"type": "function", "name": "compose"},
-            )
-        except openai.APIError as exc:
-            raise BuilderError(str(exc), kind=classify_vendor_error(exc)) from exc
-        for item in resp.output or []:
-            if getattr(item, "type", None) == "function_call" and item.name == "compose":
-                try:
-                    return json.loads(item.arguments)
-                except json.JSONDecodeError as exc:
-                    raise BuilderError("malformed compose tool arguments", kind="protocol") from exc
-        raise BuilderError("builder did not call the compose tool", kind="protocol")
-
-
-_PROVIDERS: dict[str, type[AnthropicBuilder] | type[OpenAIBuilder]] = {
-    "anthropic": AnthropicBuilder,
-    "openai": OpenAIBuilder,
-}
+    A mount appears only when there is something behind it — an empty one costs
+    the agent a turn discovering it is empty.
+    """
+    routes: dict[str, Any] = {
+        "/skills/": FilesystemBackend(root_dir=SKILLS_DIR, virtual_mode=True)
+    }
+    if documents_dir and os.path.isdir(documents_dir):
+        routes["/documents/"] = FilesystemBackend(
+            root_dir=documents_dir, virtual_mode=True
+        )
+    return CompositeBackend(default=StateBackend(), routes=routes)
 
 
 def provider_availability() -> dict[str, bool]:
@@ -551,40 +528,181 @@ def default_choice() -> tuple[str, str]:
     return DEFAULT_PROVIDER, MODEL
 
 
+@dataclass(frozen=True)
+class Progress:
+    """One human-readable thing the turn is doing, for the console to show.
+
+    Derived, not raw: `read_file("/documents/menu.pdf", limit=1000)` is
+    developer output, "Reading menu.pdf" is the product. `skill` carries the
+    skill's own name because a skill's author has no other way to learn whether
+    the description they wrote actually got their skill opened.
+    """
+
+    text: str
+    skill: str | None = None
+
+
+def _progress_for(name: str, args: dict[str, Any]) -> Progress | None:
+    """A tool call the user should see, or None for the rest.
+
+    An allowlist rather than a filter: the agent's scratch writes and its
+    grep over the skills library are noise, and a progress feed that reports
+    everything is a spinner with extra steps.
+    """
+    path = str(args.get("file_path") or args.get("path") or "")
+    if name == "compose":
+        return Progress("Writing the configuration")
+    if name in ("ls", "glob", "grep") and path.startswith("/documents"):
+        return Progress("Looking at what you attached")
+    if name == "read_file" and path.startswith("/documents/"):
+        return Progress(f"Reading {os.path.basename(path)}")
+    if name == "read_file" and "/SKILL.md" in path:
+        skill = path.rsplit("/", 2)[-2]
+        return Progress(f"Using the {skill} skill", skill=skill)
+    return None
+
+
+def _messages_in(update: Any) -> list[Any]:
+    """Pull messages out of a LangGraph `updates` payload — `{node: delta}`.
+
+    Deliberately tolerant: node names belong to the framework and may change,
+    and a progress line is not worth coupling to them. Missing a line degrades
+    the feed; guessing a node name breaks it.
+    """
+    if not isinstance(update, dict):
+        return []
+    found: list[Any] = []
+    for value in update.values():
+        if isinstance(value, dict) and isinstance(value.get("messages"), list):
+            found.extend(value["messages"])
+    return found
+
+
+def _progress_in(update: Any) -> list[Progress]:
+    """Every progress line this update earns, in order."""
+    out = []
+    for message in _messages_in(update):
+        for call in getattr(message, "tool_calls", None) or []:
+            progress = _progress_for(call.get("name", ""), call.get("args") or {})
+            if progress is not None:
+                out.append(progress)
+    return out
+
+
 async def step(
     messages: list[dict[str, str]],
-    client: AsyncAnthropic | None = None,
     *,
     provider: str | None = None,
     model: str | None = None,
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
+    documents_dir: str | None = None,
 ) -> ComposeResult:
     """Run one builder turn. `messages` is the running [{role, content}] history.
 
     `provider`/`model` are the Session's Builder model; both-or-neither, absent
-    means the deployment default. `client` is a test seam: an Anthropic-shaped
-    client that forces the anthropic path. When `current_config` is set the
-    builder edits it (grounded) instead of building from scratch.
-    `knowledge_docs` are filenames in the agent's knowledge base, so the
-    builder knows the agent has that content.
+    means the deployment default. When `current_config` is set the builder edits
+    it (grounded) instead of building from scratch. `knowledge_docs` are the
+    filenames the agent has, and `documents_dir` is where their text can be read
+    — the names alone tell it what exists, the directory lets it look inside.
+
+    The agent may take several steps (reading a document, opening a skill), but
+    the turn is bounded on both axes and there is no state kept between turns:
+    the history passed in is the whole of it.
     """
-    if client is not None:
-        provider, impl = "anthropic", AnthropicBuilder(client)
-    else:
-        provider = provider or DEFAULT_PROVIDER
-        provider_cls = _PROVIDERS.get(provider)
-        if provider_cls is None:
-            raise BuilderError(f"unknown builder provider: {provider!r}")
-        impl = provider_cls()
-    # The opening turn gets one warm question; every turn after it gets a round.
-    first_turn = not any(m.get("role") == "assistant" for m in messages)
-    system = build_system_prompt(
-        first_turn=first_turn,
+    result: ComposeResult | None = None
+    async for event in stream(
+        messages,
+        provider=provider,
+        model=model,
         current_config=current_config,
         knowledge_docs=knowledge_docs,
+        documents_dir=documents_dir,
+    ):
+        if isinstance(event, ComposeResult):
+            result = event
+    if result is None:  # stream() raises rather than finishing empty
+        raise BuilderError("the builder finished without a result", kind="protocol")
+    return result
+
+
+async def stream(
+    messages: list[dict[str, str]],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    current_config: dict[str, Any] | None = None,
+    knowledge_docs: list[str] | None = None,
+    documents_dir: str | None = None,
+) -> AsyncIterator[Progress | ComposeResult]:
+    """One turn, yielding what it is doing and finally what it decided.
+
+    The silence this exists to fill is not the model writing slowly — the
+    compose result is emitted last, after the reading is done. It is the four
+    things it does first, which is why the progress is tool calls rather than
+    tokens.
+    """
+    provider = provider or DEFAULT_PROVIDER
+    if provider not in _KEY_ENV:
+        raise BuilderError(f"unknown builder provider: {provider!r}")
+
+    # The opening turn gets one warm question; every turn after it gets a round.
+    first_turn = not any(m.get("role") == "assistant" for m in messages)
+    agent = create_deep_agent(
+        model=f"{provider}:{model or MODEL}",
+        system_prompt=build_system_prompt(
+            first_turn=first_turn,
+            current_config=current_config,
+            knowledge_docs=knowledge_docs,
+        ),
+        backend=_backend(documents_dir),
+        skills=["/skills/"],
+        response_format=ToolStrategy(COMPOSE_SCHEMA),
     )
-    tool_input = await impl.compose(
-        model=model or MODEL, system=system, messages=messages
-    )
-    return _to_result(tool_input)
+
+    # Two modes: `updates` carries each node's delta, which is where the tool
+    # calls are; `values` carries the whole state, which is where the answer
+    # reliably ends up. Deriving the result from deltas alone would couple us to
+    # which node happens to emit it.
+    final: dict[str, Any] = {}
+    seen: set[str] = set()
+    try:
+        async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
+            async for mode, chunk in agent.astream(
+                # A copy, deliberately. LangGraph coerces the input messages to
+                # BaseMessage objects *in place* — before the first model call,
+                # so even a failed turn does it — and the list the caller passed
+                # is the session history, which has to stay JSON-serialisable.
+                {"messages": [dict(m) for m in messages]},
+                config={"recursion_limit": MAX_STEPS},
+                stream_mode=["updates", "values"],
+            ):
+                if mode == "values":
+                    final = chunk or {}
+                    continue
+                for progress in _progress_in(chunk):
+                    # The same skill read twice is one line; a feed that repeats
+                    # itself reads as a stutter, not as progress.
+                    if progress.text not in seen:
+                        seen.add(progress.text)
+                        yield progress
+    except TimeoutError as exc:
+        raise BuilderError(
+            f"the builder took longer than {TURN_TIMEOUT_SECONDS:.0f}s", kind="timeout"
+        ) from exc
+    except BuilderError:
+        raise
+    except Exception as exc:
+        raise BuilderError(str(exc), kind=classify_vendor_error(exc)) from exc
+
+    result = final.get("structured_response")
+    if result is None:
+        # It ran out of steps, or answered in prose. Either way there is nothing
+        # the console can render, so say so rather than inventing a turn.
+        raise BuilderError("the builder finished without a result", kind="protocol")
+    if not isinstance(result, dict):
+        result = result.model_dump()
+    try:
+        yield _to_result(result)
+    except ValueError as exc:
+        raise BuilderError(str(exc), kind="protocol") from exc

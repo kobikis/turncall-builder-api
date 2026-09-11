@@ -1,9 +1,13 @@
 """Builder session endpoints: /meta, /sessions, messages, config."""
 
+import json
+
 from unittest.mock import AsyncMock
 
 
 from app.routers import sessions
+
+from conftest import FakeStream
 from app.builder import ComposeResult
 
 
@@ -85,7 +89,7 @@ def test_create_session(client, mocks):
 def test_post_message_ask(client, mocks, monkeypatch):
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     monkeypatch.setattr(
-        sessions, "step", AsyncMock(return_value=ComposeResult(action="ask", question="What for?"))
+        sessions, "stream", FakeStream(ComposeResult(action="ask", question="What for?"))
     )
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 200
@@ -97,7 +101,7 @@ def test_post_message_finalize_saves_config(client, mocks, monkeypatch):
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     cfg = {"name": "A", "system_prompt": "hi"}
     monkeypatch.setattr(
-        sessions, "step", AsyncMock(return_value=ComposeResult(action="finalize", agent_config=cfg))
+        sessions, "stream", FakeStream(ComposeResult(action="finalize", agent_config=cfg))
     )
     r = client.post("/sessions/sess-1/messages", json={"message": "done"})
     assert r.status_code == 200
@@ -128,30 +132,30 @@ def test_edit_config_unknown_session_404(client, mocks):
 def test_post_message_grounds_on_session_config(client, mocks, monkeypatch):
     cfg = {"name": "Bob", "system_prompt": "hi"}
     mocks.store.get_session.return_value = {"history": [], "config": cfg, "agent_id": None}
-    fake = AsyncMock(return_value=ComposeResult(action="ask", question="?"))
-    monkeypatch.setattr(sessions, "step", fake)
+    fake = FakeStream(ComposeResult(action="ask", question="?"))
+    monkeypatch.setattr(sessions, "stream", fake)
     client.post("/sessions/sess-1/messages", json={"message": "rename it"})
     # the builder is told to edit the current config, not rebuild
-    assert fake.await_args.kwargs["current_config"] == cfg
+    assert fake.kwargs["current_config"] == cfg
 
 
 def test_post_message_passes_queued_doc_names(client, mocks, monkeypatch):
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
-    fake = AsyncMock(return_value=ComposeResult(action="ask", question="?"))
-    monkeypatch.setattr(sessions, "step", fake)
+    fake = FakeStream(ComposeResult(action="ask", question="?"))
+    monkeypatch.setattr(sessions, "stream", fake)
     client.post(
         "/sessions/sess-1/messages",
         json={"message": "add room service using the menu", "doc_names": ["Menu.pdf"]},
     )
     # the builder learns the agent has this doc so it won't ask for pasted content
-    assert fake.await_args.kwargs["knowledge_docs"] == ["Menu.pdf"]
+    assert fake.kwargs["knowledge_docs"] == ["Menu.pdf"]
 
 
 def test_finalize_on_generated_agent_is_pending_not_applied(client, mocks, monkeypatch):
     mocks.store.get_session.return_value = {"history": [], "config": {}, "agent_id": "a1"}
     cfg = {"name": "A", "system_prompt": "hi"}
     monkeypatch.setattr(
-        sessions, "step", AsyncMock(return_value=ComposeResult(action="finalize", agent_config=cfg))
+        sessions, "stream", FakeStream(ComposeResult(action="finalize", agent_config=cfg))
     )
     applied = AsyncMock()
     monkeypatch.setattr(sessions.agent_update, "apply_update", applied)
@@ -189,7 +193,7 @@ def test_create_session_from_existing_agent_seeds_config(client, mocks):
     assert r.status_code == 200
     assert r.json()["data"]["agent_id"] == "a1"
     # session seeded with the agent's config + its id so the builder can edit it
-    kwargs = mocks.store.create_session.await_args.kwargs
+    kwargs = mocks.store.create_session.call_args.kwargs
     assert kwargs["config"] == cfg
     assert kwargs["agent_id"] == "a1"
 
@@ -282,19 +286,19 @@ def test_post_message_uses_session_builder_choice(client, mocks, monkeypatch):
         "history": [], "config": None, "agent_id": None,
         "builder_provider": "openai", "builder_model": "gpt-test",
     }
-    fake_step = AsyncMock(return_value=ComposeResult(action="ask", question="?"))
-    monkeypatch.setattr(sessions, "step", fake_step)
+    fake_step = FakeStream(ComposeResult(action="ask", question="?"))
+    monkeypatch.setattr(sessions, "stream", fake_step)
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 200
-    assert fake_step.call_args.kwargs["provider"] == "openai"
-    assert fake_step.call_args.kwargs["model"] == "gpt-test"
+    assert fake_step.kwargs["provider"] == "openai"
+    assert fake_step.kwargs["model"] == "gpt-test"
 
 
 def test_post_message_builder_error_is_503(client, mocks, monkeypatch):
     from app.builder import BuilderError
 
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
-    monkeypatch.setattr(sessions, "step", AsyncMock(side_effect=BuilderError("boom")))
+    monkeypatch.setattr(sessions, "stream", FakeStream(BuilderError("boom")))
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 503
 
@@ -307,8 +311,8 @@ def test_out_of_credit_is_502_and_says_retrying_wont_help(client, mocks, monkeyp
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     monkeypatch.setattr(
         sessions,
-        "step",
-        AsyncMock(side_effect=BuilderError("credit balance is too low", kind="credit")),
+        "stream",
+        FakeStream(BuilderError("credit balance is too low", kind="credit")),
     )
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 502
@@ -324,7 +328,7 @@ def test_bad_api_key_names_the_env_var(client, mocks, monkeypatch):
 
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     monkeypatch.setattr(
-        sessions, "step", AsyncMock(side_effect=BuilderError("invalid x-api-key", kind="auth"))
+        sessions, "stream", FakeStream(BuilderError("invalid x-api-key", kind="auth"))
     )
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 502
@@ -336,7 +340,7 @@ def test_rate_limit_stays_retryable(client, mocks, monkeypatch):
 
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     monkeypatch.setattr(
-        sessions, "step", AsyncMock(side_effect=BuilderError("429", kind="rate_limit"))
+        sessions, "stream", FakeStream(BuilderError("429", kind="rate_limit"))
     )
     r = client.post("/sessions/sess-1/messages", json={"message": "hi"})
     assert r.status_code == 503  # 503 = worth retrying, unlike 502 above
@@ -368,3 +372,97 @@ def test_edit_session_ignores_creation_choice_when_unkeyed(client, mocks, monkey
     assert r.status_code == 200
     assert r.json()["data"]["builder_provider"] is None
     assert mocks.store.create_session.call_args.kwargs["builder_provider"] is None
+
+
+# ---- the streamed turn ------------------------------------------------------
+
+
+def _sse(response):
+    return [
+        json.loads(frame[len("data: ") :])
+        for frame in response.text.strip().split("\n\n")
+        if frame.startswith("data: ")
+    ]
+
+
+def test_a_streamed_turn_narrates_then_answers(client, mocks, monkeypatch):
+    """The wait is the reading, not the writing — so the reading is what the
+    console gets to show."""
+    from app.builder import Progress
+
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions,
+        "stream",
+        FakeStream(
+            Progress("Reading menu.pdf"),
+            Progress("Using the takeaway-orders skill", skill="takeaway-orders"),
+            ComposeResult(action="ask", question="How many covers, typically?"),
+        ),
+    )
+    r = client.post("/sessions/s1/messages/stream", json={"message": "hi"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+
+    events = _sse(r)
+    assert [e["type"] for e in events] == ["progress", "progress", "result"]
+    assert events[0]["text"] == "Reading menu.pdf"
+    # Which skill fired is the only feedback a skill's author gets.
+    assert events[1]["skill"] == "takeaway-orders"
+    assert events[-1]["question"] == "How many covers, typically?"
+    mocks.store.save_history.assert_awaited_once()
+
+
+def test_a_failure_mid_stream_travels_as_an_event(client, mocks, monkeypatch):
+    """Once the response has begun the status code is spent, so a 502 has to
+    arrive in the body or not at all."""
+    from app.builder import BuilderError, Progress
+
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions,
+        "stream",
+        FakeStream(
+            Progress("Reading menu.pdf"),
+            BuilderError("credit balance is too low", kind="credit"),
+        ),
+    )
+    r = client.post("/sessions/s1/messages/stream", json={"message": "hi"})
+    assert r.status_code == 200  # ...and the failure is inside it
+
+    events = _sse(r)
+    assert events[0]["type"] == "progress"
+    assert events[-1]["type"] == "error"
+    assert events[-1]["status"] == 502
+    assert "retrying will not help" in events[-1]["detail"]
+    mocks.store.save_history.assert_not_awaited()  # a failed turn is not history
+
+
+def test_streaming_an_unknown_session_is_still_a_404(client, mocks):
+    """The session check runs before the response starts, so the console's
+    expired-session retry keeps working."""
+    mocks.store.get_session.return_value = None
+    assert client.post("/sessions/nope/messages/stream", json={"message": "hi"}).status_code == 404
+
+
+def test_a_turn_confirms_before_anything_is_built(client, mocks, monkeypatch):
+    """Nothing is created until the user has seen what the builder understood."""
+    mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
+    monkeypatch.setattr(
+        sessions,
+        "stream",
+        FakeStream(ComposeResult(action="confirm", summary="- Books appointments")),
+    )
+    r = client.post("/sessions/s1/messages", json={"message": "a dental receptionist"})
+    assert r.status_code == 200
+
+    data = r.json()["data"]
+    assert data["action"] == "confirm"
+    assert data["summary"] == "- Books appointments"
+    assert data["agent_config"] is None
+    mocks.store.save_config.assert_not_called()
+
+    # The summary joins the history, so the next turn can see it was already
+    # offered — which is what stops it being offered again.
+    saved = mocks.store.save_history.call_args.args[2]
+    assert saved[-1] == {"role": "assistant", "content": "- Books appointments"}
