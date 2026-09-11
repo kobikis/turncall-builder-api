@@ -104,6 +104,14 @@ them affordable. Always about how to *build* an agent. Never about what a finish
 agent knows: that is [[Agent Knowledge]], which the voice agent reads to callers.
 _Avoid_: plugin, module, prompt fragment, knowledge (the caller-facing one)
 
+**Workspace skill**:
+A [[Skill]] written by an admin rather than shipped with the builder, mounted
+alongside the built-in ones (ADR-0015). Scoped to the [[Workspace]] — "how we
+build agents here" — and guidance only: it teaches the Builder how to decide,
+never what to pick, because a skill loads only when it looks relevant and a
+default that applies most of the time is worse than none.
+_Avoid_: custom skill, template, override
+
 **Confirm**:
 The Builder turn between the last question and [[Finalize]]: it states what it
 understood, in the user's own words about their business, and waits to be told it
