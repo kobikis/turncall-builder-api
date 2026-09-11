@@ -65,7 +65,9 @@ def external_tool_names(cfg: dict[str, Any], tools_base_url: str | None) -> set[
 # Per-provider S2S fallbacks — the OpenAI defaults are wrong for the others
 # (Nova Sonic would reject "alloy", Gemini would reject a realtime model id).
 _S2S_DEFAULTS = {
-    "openai": ("gpt-4o-realtime-preview", "alloy"),
+    # gpt-4o-realtime-preview is retired; TurnCall's own default is gpt-realtime-2.1.
+    "openai": ("gpt-realtime-2.1", "alloy"),
+    "openai_live": ("gpt-live-1", "alloy"),
     "google": ("models/gemini-3.1-flash-live-preview", "Charon"),
     "aws": ("amazon.nova-2-sonic-v1:0", "matthew"),
 }

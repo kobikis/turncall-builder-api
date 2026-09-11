@@ -78,9 +78,40 @@ def test_s2s_defaults_to_openai_realtime():
     )["config"]
     assert cfg["s2s"] == {
         "provider": "openai",
-        "model": "gpt-4o-realtime-preview",
+        "model": "gpt-realtime-2.1",
         "voice": "alloy",
     }
+
+
+def test_s2s_openai_live_defaults():
+    """gpt-live-1 is full duplex and speaks its own protocol, so it is its own
+    provider rather than another model under `openai`."""
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "pipeline_mode": "s2s",
+            "s2s": {"provider": "openai_live"},
+        }
+    )["config"]
+    assert cfg["s2s"] == {
+        "provider": "openai_live",
+        "model": "gpt-live-1",
+        "voice": "alloy",
+    }
+
+
+def test_s2s_openai_live_respects_explicit_model():
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "pipeline_mode": "s2s",
+            "s2s": {"provider": "openai_live", "model": "gpt-live-1-mini", "voice": "sage"},
+        }
+    )["config"]
+    assert cfg["s2s"]["model"] == "gpt-live-1-mini"
+    assert cfg["s2s"]["voice"] == "sage"
 
 
 def test_voicemail_mapped_when_enabled():
@@ -260,3 +291,21 @@ def test_aws_credentials_are_never_emitted():
         }
     )["config"]
     assert cfg["aws"] == {"region": "us-east-1"}
+
+
+def test_compose_schema_allows_openai_live():
+    """The compose tool's enum is the hard gate: a provider missing from it
+    cannot be emitted by the model at all, however well the skill describes it."""
+    from app.builder import _AGENT_CONFIG_SCHEMA
+
+    enum = _AGENT_CONFIG_SCHEMA["properties"]["s2s"]["properties"]["provider"]["enum"]
+    assert "openai_live" in enum
+    assert enum == ["openai", "openai_live", "google", "aws"]
+
+
+def test_providers_endpoint_offers_openai_live():
+    """The config form's S2S dropdown is fed by this static list, so a provider
+    missing here is invisible in the UI even when everything else knows it."""
+    from app.routers.sessions import _S2S_PROVIDERS
+
+    assert "openai_live" in _S2S_PROVIDERS
