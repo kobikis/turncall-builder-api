@@ -195,16 +195,21 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "Speech-to-speech config. Required when pipeline_mode='s2s'.",
             "properties": {
-                "provider": {"type": "string", "enum": ["openai", "google", "aws"]},
+                "provider": {
+                    "type": "string",
+                    "enum": ["openai", "openai_live", "google", "aws"],
+                },
                 "model": {
                     "type": "string",
-                    "description": "openai: 'gpt-4o-realtime-preview'. "
+                    "description": "openai: 'gpt-realtime-2.1'. "
+                    "openai_live: 'gpt-live-1' (full duplex). "
                     "google: 'models/gemini-3.1-flash-live-preview'. "
                     "aws: 'amazon.nova-2-sonic-v1:0' (Amazon Nova Sonic 2).",
                 },
                 "voice": {
                     "type": "string",
-                    "description": "Must match the provider. openai voices: alloy, ash, "
+                    "description": "Must match the provider. openai and openai_live "
+                    "voices: alloy, ash, "
                     "ballad, coral, echo, sage, shimmer, verse. google voices: Aoede, "
                     "Charon, Fenrir, Kore, Leda, Orus, Puck, Zephyr. aws voices: "
                     "matthew, tiffany, amy, lupe, carlos.",

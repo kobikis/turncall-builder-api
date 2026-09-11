@@ -59,8 +59,14 @@ _STT_MODELS = {
 # is fixed (a subset of the TTS voices). Gemini Live has no key here + a large,
 # growing voice set, so its models are a short fixed list and voices are free text.
 _OPENAI_S2S_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
-# Valid realtime models the account's /v1/models list may omit (older previews).
-_OPENAI_S2S_MODELS = ["gpt-4o-realtime-preview", "gpt-4o-mini-realtime-preview", "gpt-realtime"]
+# Fallback when the account's /v1/models list cannot be fetched. The gpt-4o
+# previews that used to live here are retired — OpenAI no longer serves them,
+# so offering them produced model_not_found at call time.
+_OPENAI_S2S_MODELS = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime"]
+# gpt-live-1 is full duplex and speaks a different protocol from Realtime
+# (/v1/live/sessions, not /v1/realtime), so it is its own provider rather than
+# another model under `openai`.
+_OPENAI_LIVE_MODELS = ["gpt-live-1"]
 # Fallback when no GOOGLE_API_KEY is set to fetch the live model list.
 _GOOGLE_S2S_MODELS = [
     "gemini-3.1-flash-live-preview",
@@ -174,6 +180,21 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str) -> list[st
         skip = ("whisper", "translate", "transcribe")
         dialog = sorted(i for i in ids if "realtime" in i and not any(x in i for x in skip))
         return dialog or list(_OPENAI_S2S_MODELS)  # fallback if the list came back bare
+    if provider == "openai_live":
+        key = os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            return list(_OPENAI_LIVE_MODELS)
+        r = await client.get(
+            "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}
+        )
+        r.raise_for_status()
+        ids = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+        # "live" also matches gpt-live-transcribe, a transcription model the
+        # dialog endpoint rejects — same reason the realtime branch drops
+        # gpt-realtime-whisper.
+        skip = ("whisper", "translate", "transcribe")
+        dialog = sorted(i for i in ids if "live" in i and not any(x in i for x in skip))
+        return dialog or list(_OPENAI_LIVE_MODELS)
     if provider == "google":
         key = os.environ.get("GOOGLE_API_KEY", "")
         if key:
@@ -206,6 +227,11 @@ def _same(values: list[str]) -> list[dict[str, str]]:
 
 async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str) -> list[dict[str, str]]:
     if provider == "openai":
+        return _same(_OPENAI_S2S_VOICES)
+    if provider == "openai_live":
+        # GPT-Live-1 adds voices across more accents and languages, but OpenAI
+        # publishes no list API for them. The realtime set is the subset we can
+        # name with confidence.
         return _same(_OPENAI_S2S_VOICES)
     if provider == "google":
         return _same(_GOOGLE_S2S_VOICES)

@@ -41,7 +41,7 @@ def emitted_config_fields() -> set[str]:
     s2s_probe = {
         **base,
         "pipeline_mode": "s2s",
-        "s2s": {"provider": "openai", "model": "gpt-4o-realtime-preview", "voice": "alloy"},
+        "s2s": {"provider": "openai", "model": "gpt-realtime-2.1", "voice": "alloy"},
     }
     cascade_probe = {
         **base,
