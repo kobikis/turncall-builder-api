@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import mimetypes
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import agent_update, builder, provider_catalog, runtime, store
-from .._helpers import _backend_view, _normalize_config, _validate_agent_config
+from .. import agent_update, builder, provider_catalog, runtime, session_docs, store
+from .._helpers import (
+    _agent_kb,
+    _backend_view,
+    _normalize_config,
+    _validate_agent_config,
+)
 from ..backends import generator, registry, scaffold, toolgen
-from ..deps import AuthContext, require_editor
-from ..builder import ComposeResult, BuilderError, step
+from ..deps import AuthContext, require_editor, require_member
+from ..builder import ComposeResult, BuilderError, stream
 from ..mapper import external_tool_names, to_create_agent_request
 from ..settings import load_settings
 from ..tasks import spawn
@@ -25,8 +34,9 @@ SUBSCRIBED_EVENTS = ["call.started", "call.ended", "call.initializing"]
 
 class TurnRequest(BaseModel):
     message: str
-    # Filenames queued in the browser but not yet uploaded (pre-create), so the
-    # builder knows they're coming even before the agent's KB exists.
+    # Legacy: filenames the browser held but had not uploaded. Documents are now
+    # staged on the Session (POST /sessions/{sid}/documents) and the server reads
+    # the list itself; still accepted so an older console keeps working.
     doc_names: list[str] = []
 
 
@@ -92,7 +102,12 @@ async def _agent_kb_doc_names(agent_id: str, workspace_id: str) -> list[str]:
 
 def _result_payload(r: ComposeResult) -> dict[str, Any]:
     config = _normalize_config(r.agent_config) if r.agent_config else r.agent_config
-    return {"action": r.action, "question": r.question, "agent_config": config}
+    return {
+        "action": r.action,
+        "question": r.question,
+        "summary": r.summary,
+        "agent_config": config,
+    }
 
 
 @router.get("/meta")
@@ -132,6 +147,11 @@ BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
         502,
         "The builder model returned an unusable response. Please retry; if it "
         "persists, try a different builder model.",
+    ),
+    "timeout": (
+        504,
+        "The builder took too long on that turn — please retry. If it keeps "
+        "happening, try a smaller attached document or a different builder model.",
     ),
     "upstream": (503, "The builder is temporarily unavailable — please retry."),
 }
@@ -243,58 +263,164 @@ async def create_session(
     return {"success": True, "data": {"session_id": sid}}
 
 
-@router.post("/sessions/{sid}/messages")
-async def post_message(
-    sid: str, body: TurnRequest, ctx: AuthContext = Depends(require_editor)
-) -> dict[str, Any]:
-    sess = await _session_or_404(sid, ctx.workspace_id)
-    # New list — never mutate the loaded session's history in place (coding-style).
-    history = [*sess["history"], {"role": "user", "content": body.message}]
+async def _turn_events(
+    sid: str, sess: dict[str, Any], ctx: AuthContext, message: str, legacy_docs: list[str]
+) -> AsyncIterator[dict[str, Any]]:
+    """One turn as events: what it is doing, then what it decided.
 
-    # Tell the builder which KB docs the agent has (already uploaded + queued),
-    # so it builds capabilities that use them instead of asking for pasted content.
-    doc_names = list(body.doc_names)
+    Shared by both message endpoints so the history is written in exactly one
+    place — a turn that persists differently depending on how you asked for it
+    is a bug waiting for a slow afternoon.
+    """
+    # New list — never mutate the loaded session's history in place (coding-style).
+    history = [*sess["history"], {"role": "user", "content": message}]
+
+    # Tell the builder which documents the agent has, so it builds capabilities
+    # that use them instead of asking for pasted content.
+    doc_names = [*legacy_docs, *session_docs.names(sid)]
     if sess["agent_id"]:
         doc_names.extend(await _agent_kb_doc_names(sess["agent_id"], ctx.workspace_id))
+    doc_names = list(dict.fromkeys(doc_names))  # de-dupe, keep order
 
-    try:
-        # Ground on the session's current config (if any) so the builder edits
-        # it instead of rebuilding — refine a draft, or change a generated agent.
-        result = await step(
-            history,
-            provider=sess.get("builder_provider"),
-            model=sess.get("builder_model"),
-            current_config=sess["config"],
-            knowledge_docs=doc_names or None,
-        )
-    except BuilderError as exc:
-        # The vendor's raw message never reaches the browser (it carries request
-        # ids and account detail), but the *class* of failure does — telling
-        # someone to retry a request that can never succeed until they top up an
-        # account is worse than saying nothing.
-        logger.warning(
-            "builder turn failed (session %s, kind=%s): %s",
-            sid, getattr(exc, "kind", "upstream"), exc,
-        )
-        status, detail = BUILDER_ERROR_RESPONSES.get(
-            getattr(exc, "kind", "upstream"), BUILDER_ERROR_RESPONSES["upstream"]
-        )
-        raise HTTPException(status_code=status, detail=detail) from exc
+    result: ComposeResult | None = None
+    # Ground on the session's current config (if any) so the builder edits it
+    # instead of rebuilding — refine a draft, or change a generated agent.
+    async for event in stream(
+        history,
+        provider=sess.get("builder_provider"),
+        model=sess.get("builder_model"),
+        current_config=sess["config"],
+        knowledge_docs=doc_names or None,
+        documents_dir=session_docs.text_dir(sid),
+    ):
+        if isinstance(event, ComposeResult):
+            result = event
+        else:
+            yield {"type": "progress", "text": event.text, "skill": event.skill}
 
-    if result.action == "ask":
-        history.append({"role": "assistant", "content": result.question or ""})
+    if result is None:
+        raise BuilderError("the builder finished without a result", kind="protocol")
+
+    if result.action in ("ask", "confirm"):
+        # A confirm is still just something the builder said — it goes into the
+        # history so the next turn can see it was already offered and accepted.
+        history.append(
+            {"role": "assistant", "content": result.question or result.summary or ""}
+        )
     else:
         history.append(
             {"role": "assistant", "content": "Updated the agent configuration."}
         )
         await store.save_config(runtime.get_pool(), sid, result.agent_config or {})
     await store.save_history(runtime.get_pool(), sid, history)
+
     payload = _result_payload(result)
     # For a generated agent, a finalize is a *proposed* edit — confirm-first: the
     # console shows it and calls /apply to push it live (never auto-mutated here).
     if result.action == "finalize" and sess["agent_id"]:
         payload["pending_apply"] = True
-    return {"success": True, "data": payload}
+    yield {"type": "result", **payload}
+
+
+def _builder_failure(sid: str, exc: BuilderError) -> tuple[int, str]:
+    """The vendor's raw message never reaches the browser (it carries request
+    ids and account detail), but the *class* of failure does — telling someone
+    to retry a request that can never succeed until they top up an account is
+    worse than saying nothing."""
+    kind = getattr(exc, "kind", "upstream")
+    logger.warning("builder turn failed (session %s, kind=%s): %s", sid, kind, exc)
+    return BUILDER_ERROR_RESPONSES.get(kind, BUILDER_ERROR_RESPONSES["upstream"])
+
+
+@router.post("/sessions/{sid}/messages")
+async def post_message(
+    sid: str, body: TurnRequest, ctx: AuthContext = Depends(require_editor)
+) -> dict[str, Any]:
+    """One turn, answered when it is finished. The streaming sibling is what the
+    console uses; this stays for anything that just wants the answer."""
+    sess = await _session_or_404(sid, ctx.workspace_id)
+    try:
+        async for event in _turn_events(sid, sess, ctx, body.message, body.doc_names):
+            if event["type"] == "result":
+                return {
+                    "success": True,
+                    "data": {k: v for k, v in event.items() if k != "type"},
+                }
+    except BuilderError as exc:
+        status, detail = _builder_failure(sid, exc)
+        raise HTTPException(status_code=status, detail=detail) from exc
+    status, detail = BUILDER_ERROR_RESPONSES["protocol"]
+    raise HTTPException(status_code=status, detail=detail)
+
+
+@router.post("/sessions/{sid}/messages/stream")
+async def post_message_stream(
+    sid: str, body: TurnRequest, ctx: AuthContext = Depends(require_editor)
+) -> StreamingResponse:
+    """The same turn, narrated.
+
+    The wait is not the model writing slowly — the compose result comes last,
+    after the reading. So what streams is what it is doing: the documents it
+    opens and the skills it loads, which is also the only way a skill's author
+    learns their description worked.
+    """
+    sess = await _session_or_404(sid, ctx.workspace_id)
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            async for event in _turn_events(sid, sess, ctx, body.message, body.doc_names):
+                yield f"data: {json.dumps(event)}\n\n"
+        except BuilderError as exc:
+            # The response has already begun, so the status code is spent. The
+            # failure travels as an event or it does not travel at all.
+            status, detail = _builder_failure(sid, exc)
+            yield f"data: {json.dumps({'type': 'error', 'status': status, 'detail': detail})}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        # no-cache for proxies, X-Accel-Buffering for nginx — a buffered stream
+        # is a slower version of not streaming at all.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/sessions/{sid}/documents")
+async def upload_session_document(
+    sid: str, file: UploadFile, ctx: AuthContext = Depends(require_editor)
+) -> dict[str, Any]:
+    """Stage a document on the Session, before any Agent exists.
+
+    The console used to hold these in the browser until Create. Server-side, the
+    Builder is told what it actually has, and the forward into Agent Knowledge
+    at Create becomes retryable.
+    """
+    await _session_or_404(sid, ctx.workspace_id)
+    try:
+        doc = session_docs.save(sid, file.filename or "document", await file.read())
+    except ValueError as exc:
+        # Size, type and filename are all rejected here — this is the boundary.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"success": True, "data": doc}
+
+
+@router.get("/sessions/{sid}/documents")
+async def list_session_documents(
+    sid: str, ctx: AuthContext = Depends(require_member)
+) -> dict[str, Any]:
+    """What this Session has staged. Read-only, so a viewer may see it."""
+    await _session_or_404(sid, ctx.workspace_id)
+    return {"success": True, "data": {"documents": session_docs.list_documents(sid)}}
+
+
+@router.delete("/sessions/{sid}/documents/{name}")
+async def delete_session_document(
+    sid: str, name: str, ctx: AuthContext = Depends(require_editor)
+) -> dict[str, Any]:
+    await _session_or_404(sid, ctx.workspace_id)
+    if not session_docs.delete(sid, name):
+        raise HTTPException(status_code=404, detail="document not found")
+    return {"success": True, "data": {"deleted": name}}
 
 
 @router.put("/sessions/{sid}/config")
@@ -338,12 +464,20 @@ async def create_agent(
 
     if sess["agent_id"]:
         b = await registry.get_backend(pool, sess["agent_id"], ctx.workspace_id)
+        # Documents left staged mean a previous forward failed part-way. This is
+        # the retry, and it is only possible because the bytes are still here.
+        knowledge = (
+            await _forward_staged_documents(sid, sess["agent_id"], b["api_key"])
+            if b
+            else None
+        )
         return {
             "success": True,
             "data": {
                 "agent_id": sess["agent_id"],
                 "created": False,
                 "backend": _backend_view(b["port"], b["status"]) if b else None,
+                "knowledge": knowledge,
                 "turncall": {"project_id": b["project_id"], "api_key": b["api_key"]}
                 if b
                 else None,
@@ -406,16 +540,63 @@ async def create_agent(
     backend = await _generate_backend(
         pool, agent_id, project_id, key, config, port, secret, ctx.workspace_id
     )
+    knowledge = await _forward_staged_documents(sid, agent_id, key)
     return {
         "success": True,
         "data": {
             "agent_id": agent_id,
             "created": True,
             "backend": backend,
+            "knowledge": knowledge,
             # For a WebRTC/test client: authenticate with this agent's project key.
             "turncall": {"project_id": project_id, "api_key": key},
         },
     }
+
+
+async def _forward_staged_documents(
+    sid: str, agent_id: str, api_key: str
+) -> dict[str, list[str]]:
+    """Move the Session's staged documents into the Agent's Knowledge base.
+
+    Best-effort, like the browser upload it replaces: the Agent exists and is
+    never rolled back over a document. What is new is that anything failing
+    stays staged, so Create can be called again and actually retry it — the
+    browser could only tell the user to go and do it by hand.
+    """
+    docs = session_docs.list_documents(sid)
+    if not docs:
+        return {"uploaded": [], "failed": []}
+
+    try:
+        kb = await _agent_kb(agent_id, api_key, create=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("staged docs: no knowledge base for agent %s", agent_id)
+        return {"uploaded": [], "failed": [d["name"] for d in docs]}
+    if kb is None:  # create=True always returns one; belt and braces
+        return {"uploaded": [], "failed": [d["name"] for d in docs]}
+
+    client = runtime.get_client()
+    uploaded: list[str] = []
+    failed: list[str] = []
+    for doc in docs:
+        name = doc["name"]
+        try:
+            await client.upload_document(
+                kb["id"],
+                name,
+                session_docs.read_raw(sid, name),
+                mimetypes.guess_type(name)[0] or "application/octet-stream",
+                api_key,
+            )
+            uploaded.append(name)
+        except Exception:  # noqa: BLE001
+            logger.exception("staged doc %s failed to upload for agent %s", name, agent_id)
+            failed.append(name)
+
+    if not failed:
+        session_docs.discard(sid)
+    return {"uploaded": uploaded, "failed": failed}
 
 
 async def _rollback_provisioning(

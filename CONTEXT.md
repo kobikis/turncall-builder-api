@@ -92,8 +92,24 @@ _Avoid_: batch, form, questionnaire
 One editable piece of the Builder's system prompt — voice pipeline, tools,
 guardrails, knowledge, defaults, plus the interview and language pieces.
 [[Build mode]] and [[Edit mode]] assemble different sets of them per turn, so a
-turn only carries guidance it can act on.
+turn only carries guidance it can act on. Succeeded by [[Skill]] (ADR-0014).
 _Avoid_: section, rule, prompt fragment
+
+**Skill**:
+A named piece of the Builder's own expertise, loaded on demand: a description the
+Builder always sees, and instructions it reads only once that description matches
+what it is doing. Succeeds [[Discipline]] — the same guidance, but a turn pays for
+a skill's full text only when it needs it, which is what makes a large library of
+them affordable. Always about how to *build* an agent. Never about what a finished
+agent knows: that is [[Agent Knowledge]], which the voice agent reads to callers.
+_Avoid_: plugin, module, prompt fragment, knowledge (the caller-facing one)
+
+**Confirm**:
+The Builder turn between the last question and [[Finalize]]: it states what it
+understood, in the user's own words about their business, and waits to be told it
+is right (ADR-0016). Nothing is built until the user accepts it. Distinct from the
+[[Console]]'s Apply, which confirms a change to an agent that already exists.
+_Avoid_: approve, review, summary (that's the field, not the turn)
 
 **Finalize**:
 The Builder turn where it stops asking questions and emits a complete Config.
@@ -241,6 +257,15 @@ the Agent's project on first document upload and auto-linked for retrieval.
 The Console's Knowledge tab shows only its documents; the underlying
 knowledge-base machinery stays invisible. See ADR-0009.
 _Avoid_: KB, knowledge base (in console copy), corpus
+
+**Staged document**:
+A file attached during a [[Session]] before its Agent exists. The builder holds
+it, not the browser, for the length of the interview — so the [[Builder]] is told
+what is really there and can read it. At [[Create]] it is forwarded into
+[[Agent Knowledge]] and the staged copy dropped; anything that fails to forward
+stays staged, so Create can be pressed again to retry. Distinct from an Agent
+Knowledge document, which belongs to a live Agent and is TurnCall's to hold.
+_Avoid_: queued doc, attachment, upload
 
 **Call record**:
 A call as TurnCall recorded it — direction, numbers, status, ended reason,
