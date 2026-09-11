@@ -12,7 +12,15 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import agent_update, builder, provider_catalog, runtime, session_docs, store
+from .. import (
+    agent_update,
+    builder,
+    provider_catalog,
+    runtime,
+    session_docs,
+    store,
+    workspace_skills,
+)
 from .._helpers import (
     _agent_kb,
     _backend_view,
@@ -292,6 +300,11 @@ async def _turn_events(
         current_config=sess["config"],
         knowledge_docs=doc_names or None,
         documents_dir=session_docs.text_dir(sid),
+        # Rebuilt every turn, so an edited skill lands on the next message of a
+        # conversation already in progress.
+        workspace_skills_dir=await workspace_skills.materialize(
+            runtime.get_pool(), ctx.workspace_id
+        ),
     ):
         if isinstance(event, ComposeResult):
             result = event

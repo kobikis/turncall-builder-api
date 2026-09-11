@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, create_autospec
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth_store, deps, main, runtime, store
+from app import auth_store, deps, main, runtime, store, workspace_skills
 from app.backends import generator, phones, registry, scaffold, toolgen
 from app.turncall_client import TurnCallClient
 
@@ -40,6 +40,7 @@ def mocks(monkeypatch):
         scaffold=create_autospec(scaffold),
         toolgen=create_autospec(toolgen),
         auth_store=create_autospec(auth_store),
+        workspace_skills=create_autospec(workspace_skills),
         client=AsyncMock(spec=TurnCallClient),
     )
     # Patch each function ON THE SOURCE MODULE so every importer sees the mock —
@@ -52,6 +53,7 @@ def mocks(monkeypatch):
         (generator, m.generator),
         (scaffold, m.scaffold),
         (toolgen, m.toolgen),
+        (workspace_skills, m.workspace_skills),
     ]:
         for attr in vars(mock_mod):
             if not attr.startswith("_"):
@@ -73,6 +75,9 @@ def mocks(monkeypatch):
     # sync helpers used to build URLs/slugs — give them real-ish values.
     m.registry.backend_url.side_effect = lambda port: f"http://host.docker.internal:{port}"
     m.scaffold.slugify.side_effect = lambda name: name.lower().replace(" ", "-")
+    # No workspace skills unless a test says otherwise — materialize returns the
+    # directory to mount, and None means "this workspace has none".
+    m.workspace_skills.materialize.return_value = None
     runtime.set_runtime(object(), m.client)
     yield m
     runtime.clear_runtime()
