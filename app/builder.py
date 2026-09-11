@@ -502,7 +502,12 @@ rebuild from scratch. Only action='ask' if the requested change is genuinely \
 ambiguous."""
 
 
-def _backend(documents_dir: str | None) -> CompositeBackend:
+WORKSPACE_SKILLS_MOUNT = "/workspace-skills/"
+
+
+def _backend(
+    documents_dir: str | None, workspace_skills_dir: str | None = None
+) -> CompositeBackend:
     """Scratch in state; skills and the user's documents read-only on disk.
 
     A mount appears only when there is something behind it — an empty one costs
@@ -515,7 +520,22 @@ def _backend(documents_dir: str | None) -> CompositeBackend:
         routes["/documents/"] = FilesystemBackend(
             root_dir=documents_dir, virtual_mode=True
         )
+    if workspace_skills_dir and os.path.isdir(workspace_skills_dir):
+        routes[WORKSPACE_SKILLS_MOUNT] = FilesystemBackend(
+            root_dir=workspace_skills_dir, virtual_mode=True
+        )
     return CompositeBackend(default=StateBackend(), routes=routes)
+
+
+def _skill_sources(workspace_skills_dir: str | None) -> list[str]:
+    """Built-in first, the workspace's own second. deepagents resolves a name
+    clash last-wins, so the order would let a workspace shadow a built-in — the
+    name check at write time is what actually prevents it, and this order means
+    a mistake there degrades into an override rather than a hard failure."""
+    sources = ["/skills/"]
+    if workspace_skills_dir and os.path.isdir(workspace_skills_dir):
+        sources.append(WORKSPACE_SKILLS_MOUNT)
+    return sources
 
 
 def provider_availability() -> dict[str, bool]:
@@ -597,6 +617,7 @@ async def step(
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
+    workspace_skills_dir: str | None = None,
 ) -> ComposeResult:
     """Run one builder turn. `messages` is the running [{role, content}] history.
 
@@ -618,6 +639,7 @@ async def step(
         current_config=current_config,
         knowledge_docs=knowledge_docs,
         documents_dir=documents_dir,
+        workspace_skills_dir=workspace_skills_dir,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -634,6 +656,7 @@ async def stream(
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
+    workspace_skills_dir: str | None = None,
 ) -> AsyncIterator[Progress | ComposeResult]:
     """One turn, yielding what it is doing and finally what it decided.
 
@@ -655,8 +678,8 @@ async def stream(
             current_config=current_config,
             knowledge_docs=knowledge_docs,
         ),
-        backend=_backend(documents_dir),
-        skills=["/skills/"],
+        backend=_backend(documents_dir, workspace_skills_dir),
+        skills=_skill_sources(workspace_skills_dir),
         response_format=ToolStrategy(COMPOSE_SCHEMA),
     )
 
