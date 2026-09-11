@@ -169,7 +169,7 @@ BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
 _LLM_PROVIDERS = ["openai", "anthropic", "openrouter", "ollama", "custom_openai", "bedrock"]
 _TTS_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
 _STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
-_S2S_PROVIDERS = ["openai", "google", "aws"]
+_S2S_PROVIDERS = ["openai", "openai_live", "google", "aws"]
 
 
 @router.get("/providers")

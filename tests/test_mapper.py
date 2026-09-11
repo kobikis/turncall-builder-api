@@ -301,3 +301,11 @@ def test_compose_schema_allows_openai_live():
     enum = _AGENT_CONFIG_SCHEMA["properties"]["s2s"]["properties"]["provider"]["enum"]
     assert "openai_live" in enum
     assert enum == ["openai", "openai_live", "google", "aws"]
+
+
+def test_providers_endpoint_offers_openai_live():
+    """The config form's S2S dropdown is fed by this static list, so a provider
+    missing here is invisible in the UI even when everything else knows it."""
+    from app.routers.sessions import _S2S_PROVIDERS
+
+    assert "openai_live" in _S2S_PROVIDERS
