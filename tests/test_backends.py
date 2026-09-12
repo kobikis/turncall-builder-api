@@ -307,3 +307,144 @@ def test_the_backend_asks_the_builder_for_a_pipedream_token():
     assert "expires_at" in app_py
     # And no Pipedream credential is ever baked in.
     assert "PIPEDREAM_CLIENT_SECRET" not in app_py
+
+
+# --- call-init with attached apps (ADR-0018/0020, #27) ------------------------
+
+
+def _call_init(monkeypatch, tmp_path, *, builder=None, **env):
+    """Drive the generated /call-init, with `builder` standing in for builder-api.
+
+    `builder` is called instead of the HTTP POST — None means the backend has no
+    builder configured at all.
+    """
+    import hashlib
+    import hmac
+    import json as json_mod
+    import time
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AGENT_ID", "agent-123")
+    monkeypatch.setenv("CALL_INIT_SECRET", "cisecret")
+    monkeypatch.setenv("BUILDER_URL", env.get("builder_url", "http://builder:8000"))
+    monkeypatch.setenv("BUILDER_TOKEN", env.get("builder_token", "bt-1"))
+    monkeypatch.chdir(tmp_path)
+
+    files = scaffold.render(slug="x-1", port=9001, tools=[], agent_id="agent-123")
+    ns: dict = {}
+    exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
+    if builder is not None:
+        monkeypatch.setitem(ns, "httpx", _FakeHttpx(builder))
+
+    body = json_mod.dumps({"payload": {"customer": {"number": "+14445556666"}}})
+    ts = str(int(time.time()))
+    sig = "v1=" + hmac.new(b"cisecret", f"{ts}.{body}".encode(), hashlib.sha256).hexdigest()
+    return TestClient(ns["app"]).post(
+        "/call-init",
+        content=body,
+        headers={"X-TurnCall-Signature": sig, "X-TurnCall-Timestamp": ts},
+    )
+
+
+class _FakeHttpx:
+    """Stands in for the httpx module the generated backend imports."""
+
+    def __init__(self, respond):
+        self._respond = respond
+
+    def AsyncClient(self, **kw):  # noqa: N802 — mirrors httpx's own name
+        respond = self._respond
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, **kw):
+                return respond(url, **kw)
+
+        return _Client()
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def test_an_agent_with_attached_apps_answers_with_an_inline_config(monkeypatch, tmp_path):
+    """TurnCall never templates MCP headers and a Pipedream token lives an hour,
+    so credentials can only reach a call this way (ADR-0020)."""
+    agent = {"system_prompt": "hi", "mcp_servers": [{"name": "pipedream_slack_v2"}]}
+    r = _call_init(
+        monkeypatch, tmp_path, builder=lambda url, **kw: _Resp({"data": {"agent": agent}})
+    )
+    data = r.json()
+    assert data["agent"] == agent
+    # Exactly one: TurnCall ignores an inline agent whenever agent_id is present,
+    # so sending both would silently drop the credentials.
+    assert "agent_id" not in data
+
+
+def test_an_agent_with_no_attached_apps_still_answers_with_its_id(monkeypatch, tmp_path):
+    r = _call_init(monkeypatch, tmp_path, builder=lambda url, **kw: _Resp({"data": {"agent": None}}))
+    assert r.json()["agent_id"] == "agent-123"
+    assert "agent" not in r.json()
+
+
+def test_a_minting_failure_costs_the_tools_and_never_the_call(monkeypatch, tmp_path):
+    def _boom(url, **kw):
+        raise RuntimeError("pipedream is down")
+
+    r = _call_init(monkeypatch, tmp_path, builder=_boom)
+    assert r.status_code == 200
+    assert r.json()["agent_id"] == "agent-123"
+    # The caller still gets a call, and still gets their own context.
+    assert "+14445556666" in r.json()["dynamic_data"]["knowledge_context"]
+
+
+def test_a_builder_error_response_is_also_survivable(monkeypatch, tmp_path):
+    r = _call_init(monkeypatch, tmp_path, builder=lambda url, **kw: _Resp({}, status=503))
+    assert r.status_code == 200
+    assert r.json()["agent_id"] == "agent-123"
+
+
+def test_a_backend_with_no_builder_configured_behaves_as_before(monkeypatch, tmp_path):
+    r = _call_init(monkeypatch, tmp_path, builder=lambda url, **kw: _Resp({}), builder_token="")
+    assert r.json()["agent_id"] == "agent-123"
+
+
+def test_the_call_init_request_carries_this_backends_own_credential(monkeypatch, tmp_path):
+    seen = {}
+
+    def _capture(url, **kw):
+        seen["url"] = url
+        seen["headers"] = kw.get("headers", {})
+        return _Resp({"data": {"agent": None}})
+
+    _call_init(monkeypatch, tmp_path, builder=_capture)
+    assert seen["url"].endswith("/integrations/call-config")
+    assert seen["headers"]["Authorization"] == "Bearer bt-1"
+
+
+def test_no_pipedream_credential_is_in_the_pushed_file_set():
+    """ADR-0018: the builder never puts a third-party credential in a repo, and
+    the one credential this backend does hold lives only in the gitignored .env."""
+    files = scaffold.render(
+        slug="x-1", port=9001, tools=[], builder_token="bt-secret-value"
+    )
+    pushed = {name: body for name, body in files.items() if name != ".env"}
+    for name, body in pushed.items():
+        assert "bt-secret-value" not in body, f"{name} carries the backend credential"
+        assert "PIPEDREAM_CLIENT_SECRET" not in body, name
+    assert ".env" in files[".gitignore"]

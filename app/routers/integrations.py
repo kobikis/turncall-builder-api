@@ -24,7 +24,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, field_validator
 
 from .. import agent_update, pipedream, pipedream_store, runtime
-from .._helpers import _backend_or_404
+from .._helpers import _backend_or_404, _normalize_config
+from ..mapper import to_create_agent_request
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..settings import load_settings
@@ -279,3 +280,44 @@ async def mint_token(backend: dict = Depends(_calling_backend)) -> dict[str, Any
             "environment": cred.environment,
         },
     }
+
+
+@router.post("/call-config")
+async def call_config(backend: dict = Depends(_calling_backend)) -> dict[str, Any]:
+    """The agent Config to run one call with, credentials included (ADR-0020).
+
+    TurnCall's `render_agent_config()` templates the prompt, the first message and
+    tool descriptions — it never touches `mcp_servers.headers` — and a Pipedream
+    token lives an hour. So a stored Config cannot carry a working credential, and
+    the only way in is call-init returning an inline agent. This builds it.
+
+    `agent` is null when the Agent has no attached apps: there is nothing to
+    inline, and an inline agent costs the call its `active_agent_id`. The backend
+    then answers call-init with its `agent_id` exactly as it did before.
+    """
+    config = backend.get("config") or {}
+    if not (config.get("integrations") or []):
+        return {"success": True, "data": {"agent": None}}
+
+    cred = await _credential()
+    port = backend["port"]
+    try:
+        payload = to_create_agent_request(
+            _normalize_config(config, port),
+            registry.backend_url(port),
+            tools_secret=backend.get("webhook_secret") or None,
+            pipedream_target=await pipedream_store.mcp_target(
+                runtime.get_pool(), backend.get("workspace_id")
+            ),
+        )
+        servers = payload["config"].get("mcp_servers")
+        if servers:
+            minted = await pipedream.access_token(cred)
+            payload["config"]["mcp_servers"] = pipedream.authorize(servers, minted.token)
+    except pipedream.PipedreamError as exc:
+        raise _fail(exc) from exc
+    except ValueError as exc:
+        # A config the mapper refuses (a bad tool name) must not read as a server
+        # fault — the backend falls back to agent_id and the call still happens.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"success": True, "data": {"agent": payload["config"]}}

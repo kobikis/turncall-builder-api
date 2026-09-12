@@ -364,3 +364,21 @@ def mcp_servers_for(
             }
         )
     return servers
+
+
+def authorize(servers: list[dict[str, Any]], token: str) -> list[dict[str, Any]]:
+    """Return a NEW server list with a bearer token on every Pipedream entry.
+
+    Identified by URL, not by name: the name is ours to choose and a hand-written
+    server could borrow it, but only a Pipedream entry points at Pipedream's MCP.
+
+    This is the one place a credential enters an agent config, and it happens per
+    call — the token lives an hour, so it is minted for the call and travels with
+    it. Nothing stored ever carries it.
+    """
+    return [
+        {**s, "headers": {**s.get("headers", {}), "Authorization": f"Bearer {token}"}}
+        if s.get("url") == MCP_URL
+        else s
+        for s in servers
+    ]

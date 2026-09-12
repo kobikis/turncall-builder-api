@@ -220,17 +220,49 @@ async def call_tool(name: str, request: Request) -> dict:
     return result
 
 
+async def _inline_agent() -> dict | None:
+    """This agent\'s config with Pipedream credentials minted for this call.
+
+    None when the agent has no attached apps, or when anything at all goes wrong.
+    Deliberately swallowing: an integration that cannot be credentialed costs the
+    agent its tools, and must never cost the caller their call (ADR-0020).
+    """
+    if not (BUILDER_URL and BUILDER_TOKEN):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.post(
+                BUILDER_URL.rstrip("/") + "/integrations/call-config",
+                headers={{"Authorization": "Bearer " + BUILDER_TOKEN}},
+            )
+        r.raise_for_status()
+        return r.json()["data"]["agent"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"call-init: no inline agent ({{exc}}) — falling back to agent_id")
+        return None
+
+
 @app.post("/call-init")
 async def call_init(request: Request) -> dict:
     """Managed call-init (ADR-0008): TurnCall asks which agent answers this call
-    and what context to load. Returns this agent + caller info for the prompt."""
+    and what context to load. Returns this agent + caller info for the prompt.
+
+    An agent with attached apps (Slack, Google Calendar) answers with an *inline*
+    config instead of its agent_id: TurnCall never templates MCP headers and a
+    Pipedream token lives an hour, so a credential can only reach a call this way
+    (ADR-0018/0020). Without attached apps — or if minting fails — it answers with
+    agent_id exactly as it always did.
+    """
     raw = await _verified_body(request, CALL_INIT_SECRET)
     payload = json.loads(raw).get("payload", {{}})
     caller = (payload.get("customer") or {{}}).get("number") or "unknown"
     # ponytail: stub lookup — replace with your CRM/database lookup for this caller.
     context = f"The caller\'s phone number is {{caller}}. No CRM record loaded (stub)."
+    agent = await _inline_agent()
     return {{
-        "agent_id": AGENT_ID,
+        # Exactly one of these: TurnCall ignores an inline agent when agent_id is
+        # present, so sending both would silently drop the credentials.
+        **({{"agent": agent}} if agent else {{"agent_id": AGENT_ID}}),
         "variables": {{"caller_number": caller}},
         "metadata": {{}},
         "dynamic_data": {{"knowledge_context": context}},
