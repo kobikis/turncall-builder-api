@@ -12,6 +12,7 @@ import logging
 import os
 from typing import Any
 
+from . import pipedream_store
 from ._helpers import _normalize_config
 from .backends import generator, registry, scaffold, toolgen
 from .backends.diff import tools_changed
@@ -32,6 +33,7 @@ async def apply_update(
         new_config,
         registry.backend_url(port),
         tools_secret=backend.get("webhook_secret") or None,
+        pipedream_target=await pipedream_store.mcp_target(pool, backend.get("workspace_id")),
     )
     await client.update_agent(backend["agent_id"], payload, backend["api_key"])
 
@@ -68,6 +70,7 @@ async def _run_regen(pool: Any, backend: dict, config: dict) -> None:
             tool_bodies=bodies,
             agent_id=backend["agent_id"],
             webhook_secret=backend.get("webhook_secret") or "",
+            builder_token=backend.get("builder_token") or "",
         )
         if os.path.exists(os.path.join(backend["service_dir"], ".env")):
             # Never clobber a live .env — a bind may have added CALL_INIT_SECRET.

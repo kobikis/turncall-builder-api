@@ -243,13 +243,19 @@ def test_env_example_is_committed_alongside_the_gitignored_env():
 
 
 def test_env_example_carries_no_secret_values():
-    """It is in git — a value here is a leaked credential."""
+    """It is in git — a secret's value here is a leaked credential.
+
+    Keyed on the variable name rather than an allowlist of literals: a non-secret
+    default (an origin, a URL) is useful to ship, and a SECRET/TOKEN/KEY with a
+    value is the thing that must never appear.
+    """
     files = _rendered()
     for line in files[".env.example"].splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         key, _, value = line.partition("=")
-        assert value in ("", "http://localhost:5173"), f"{key} has a value"
+        if any(word in key for word in ("SECRET", "TOKEN", "KEY", "PASSWORD")):
+            assert value == "", f"{key} has a value"
     assert "supersecret" not in files[".env.example"]
     assert "ci-secret" not in files[".env.example"]
 
@@ -262,9 +268,42 @@ def test_the_real_env_still_gets_the_secrets():
 
 def test_env_example_names_every_variable_the_app_reads():
     files = _rendered()
-    for var in ("AGENT_ID", "WEBHOOK_SECRET", "CALL_INIT_SECRET", "CONSOLE_ORIGIN"):
+    for var in (
+        "AGENT_ID",
+        "WEBHOOK_SECRET",
+        "CALL_INIT_SECRET",
+        "CONSOLE_ORIGIN",
+        "BUILDER_URL",
+        "BUILDER_TOKEN",
+    ):
         assert f"{var}=" in files[".env.example"]
 
 
 def test_readme_tells_you_how_to_run_a_clone():
     assert "cp .env.example .env" in _rendered()["README.md"]
+
+
+def test_the_backend_token_is_not_the_webhook_secret(tmp_path):
+    """ADR-0019. TurnCall holds WEBHOOK_SECRET — it signs TurnCall's requests
+    *into* this backend. Reusing it outbound would let TurnCall mint Pipedream
+    tokens for every Workspace it serves."""
+    env = scaffold.render(
+        slug="a",
+        port=9001,
+        tools=[],
+        webhook_secret="supersecret",
+        builder_token="bt-distinct",
+    )[".env"]
+    assert "BUILDER_TOKEN=bt-distinct" in env
+    assert "WEBHOOK_SECRET=supersecret" in env
+
+
+def test_the_backend_asks_the_builder_for_a_pipedream_token():
+    """It holds no Pipedream credential of its own (ADR-0018)."""
+    app_py = scaffold.render(slug="a", port=9001, tools=[])["app.py"]
+    assert "/integrations/token" in app_py
+    assert "BUILDER_TOKEN" in app_py
+    # Cached: Pipedream tokens live an hour, a call is not the unit of anything.
+    assert "expires_at" in app_py
+    # And no Pipedream credential is ever baked in.
+    assert "PIPEDREAM_CLIENT_SECRET" not in app_py

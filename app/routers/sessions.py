@@ -657,7 +657,12 @@ async def _generate_backend(
         workspace_id,
     )
     await registry.set_webhook_secret(pool, agent_id, secret)
-    spawn(_run_build(pool, agent_id, row["slug"], row["service_dir"], config, port, secret))
+    spawn(
+        _run_build(
+            pool, agent_id, row["slug"], row["service_dir"], config, port, secret,
+            row.get("builder_token") or "",
+        )
+    )
     return _backend_view(port, "generating")
 
 
@@ -669,6 +674,7 @@ async def _run_build(
     config: dict[str, Any],
     port: int,
     secret: str,
+    builder_token: str = "",
 ) -> None:
     """Background worker: render the repo, docker-build it, record the outcome.
     Best-effort — a failure is recorded as 'failed' for the UI, never raised."""
@@ -694,6 +700,7 @@ async def _run_build(
             tool_bodies=bodies,
             agent_id=agent_id,
             webhook_secret=secret,
+            builder_token=builder_token,
         )
         ok, _ = await generator.materialize_and_run(service_dir, files)
         # Degraded: container is up, but with no signing secret every verified

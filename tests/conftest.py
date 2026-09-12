@@ -15,11 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 # Settings are process-cached and read at app import, so deployment config the
-# tests depend on has to be in the environment before the imports below.
+# tests depend on has to be in the environment before the imports below. The
+# encryption key also signs the connect state, which the callback tests round
+# trip for real — set here rather than in one test module, so any module can run
+# on its own.
 os.environ.setdefault("PIPEDREAM_REDIRECT_URI", "https://api.test/integrations/callback")
+os.environ.setdefault("PIPEDREAM_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 from app import (
     auth_store,

@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import runtime
+from .. import pipedream_store, runtime
 from .._helpers import _backend_or_404, _turncall_http_error
 from ..backends import registry
 from ..deps import AuthContext, require_editor, require_member
@@ -45,6 +45,11 @@ async def _set_agent_takeaways(b: dict[str, Any], takeaway_ids: list[str]) -> No
         config,
         registry.backend_url(b["port"]),
         tools_secret=b.get("webhook_secret") or None,
+        # Without this, attaching a takeaway would silently drop the agent's
+        # attached apps — the exact failure ADR-0017 opens on.
+        pipedream_target=await pipedream_store.mcp_target(
+            runtime.get_pool(), b.get("workspace_id")
+        ),
     )
     await runtime.get_client().update_agent(b["agent_id"], payload, b["api_key"])
     await registry.update_config(runtime.get_pool(), b["agent_id"], config)
