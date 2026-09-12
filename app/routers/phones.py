@@ -108,6 +108,46 @@ async def _sync_call_init_secret(backend: dict[str, Any] | None, secret: str | N
         await generator.restart(backend["service_dir"])
 
 
+async def _bind_in_turncall(
+    payload: dict[str, Any], api_key: str, e164: str
+) -> dict[str, Any]:
+    """Bind in TurnCall with a clean failure mode, as the unbind path has.
+
+    A conflict is the one worth naming: TurnCall's uniqueness is global on the
+    number, not scoped to a project, so a number bound outside the builder —
+    by an example script, or another workspace — is invisible to our mirror
+    until this fires. Without the mapping it surfaced as an ASGI stack trace.
+    """
+    try:
+        return await runtime.get_client().bind_phone_number(payload, api_key)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            raise HTTPException(status_code=409, detail=_conflict_detail(exc, e164)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"TurnCall rejected the bind: {exc.response.text[:200]}",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="TurnCall is unreachable — nothing was changed; retry in a moment",
+        ) from exc
+
+
+def _conflict_detail(exc: httpx.HTTPStatusError, e164: str) -> str:
+    """Say which project holds the number, so the fix is obvious."""
+    owner = None
+    try:
+        owner = (exc.response.json().get("details") or {}).get("existing_project_id")
+    except ValueError:
+        pass
+    where = f" by TurnCall project {owner}" if owner else " in TurnCall"
+    return (
+        f"{e164} is already bound{where}. Unbind it there before binding it "
+        "here — a number can only be bound once, across every project."
+    )
+
+
 async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]:
     """Bind a number in the right project and mirror it. Returns the mirror row.
     An unassigned number ('none') is only mirrored locally — TurnCall's bind needs
@@ -134,7 +174,7 @@ async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]
         "sms_enabled": body.sms_enabled,
         **routing["fields"],
     }
-    data = await runtime.get_client().bind_phone_number(payload, routing["api_key"])
+    data = await _bind_in_turncall(payload, routing["api_key"], body.e164)
     secret = data.get("server_url_secret")
     if body.routing_type == "agent_call_init":
         await _sync_call_init_secret(routing["backend"], secret)
