@@ -156,3 +156,70 @@ def test_delete_treats_turncall_404_as_already_unbound(client, mocks):
     r = client.delete("/phone-numbers/pn-1")
     assert r.status_code == 200  # already gone in TurnCall = success
     mocks.phones.delete_number.assert_awaited_once()
+
+
+def _conflict(project_id: str = "p-other") -> httpx.HTTPStatusError:
+    """TurnCall's 409 when the e164 is already bound — anywhere, in any project.
+    Its uniqueness is global on the number, not scoped to the caller's project."""
+    resp = httpx.Response(
+        409,
+        json={
+            "success": False,
+            "error": "Phone number +15551234567 is already bound",
+            "code": "conflict",
+            "details": {"existing_project_id": project_id},
+        },
+        request=httpx.Request("POST", "http://tc/v1/phone-numbers"),
+    )
+    return httpx.HTTPStatusError("conflict", request=resp.request, response=resp)
+
+
+def test_bind_conflict_is_a_409_not_a_500(client, mocks):
+    """A number bound outside the builder used to surface as an ASGI stack
+    trace: _bind called raise_for_status() with nothing catching it."""
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.side_effect = _conflict()
+
+    r = client.post("/phone-numbers", json=_bind_body())
+
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "+15551234567" in detail
+    assert "p-other" in detail, "the operator needs to know which project holds it"
+
+
+def test_bind_maps_turncall_unreachable_to_502(client, mocks):
+    """Matches the unbind path, which already does this."""
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.side_effect = httpx.ConnectError("down")
+
+    r = client.post("/phone-numbers", json=_bind_body())
+    assert r.status_code == 502
+
+
+def test_bind_other_turncall_error_is_502_with_its_message(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    resp = httpx.Response(400, text="bad routing target", request=httpx.Request("POST", "http://tc/x"))
+    mocks.client.bind_phone_number.side_effect = httpx.HTTPStatusError(
+        "bad", request=resp.request, response=resp
+    )
+
+    r = client.post("/phone-numbers", json=_bind_body())
+    assert r.status_code == 502
+    assert "bad routing target" in r.json()["detail"]
+
+
+def test_update_of_a_number_turncall_already_holds_explains_itself(client, mocks):
+    """The reported bug. The mirror says 'none', so the in-place PUT path is
+    skipped and so is the unbind — then the bind hits TurnCall's conflict,
+    because a number bound outside the builder is invisible to the mirror."""
+    mocks.phones.get_number.return_value = _phone(
+        routing_type="none", agent_id=None, project_id=None
+    )
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.side_effect = _conflict()
+
+    r = client.put("/phone-numbers/pn-1", json=_bind_body())
+
+    assert r.status_code == 409
+    mocks.client.unbind_phone_number.assert_not_called()
