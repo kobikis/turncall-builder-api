@@ -545,3 +545,35 @@ def test_the_client_secret_is_not_in_the_calls_config(client, mocks):
         token="pd_minted", expires_at=1.0
     )
     assert SECRET not in _call_config(client).text
+
+
+def test_the_mint_response_names_the_connected_accounts(client, mocks):
+    """An Automation has to name the account it acts through. Ids, not
+    credentials — and not a second round trip."""
+    _configured(mocks)
+    _backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_live_token", expires_at=1.0
+    )
+    mocks.pipedream.list_accounts.return_value = [_account(id="apn_1")]
+
+    data = _mint(client).json()["data"]
+
+    assert data["accounts"] == [{"id": "apn_1", "app": "slack_v2"}]
+    assert mocks.pipedream.list_accounts.await_args.kwargs["workspace_id"] == (
+        TEST_WORKSPACE_ID
+    )
+
+
+def test_a_listing_failure_does_not_cost_the_backend_its_token(client, mocks):
+    _configured(mocks)
+    _backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_live_token", expires_at=1.0
+    )
+    mocks.pipedream.list_accounts.side_effect = pipedream.PipedreamError("listing down")
+
+    data = _mint(client).json()["data"]
+
+    assert data["access_token"] == "pd_live_token"
+    assert data["accounts"] == []

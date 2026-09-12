@@ -448,3 +448,176 @@ def test_no_pipedream_credential_is_in_the_pushed_file_set():
         assert "bt-secret-value" not in body, f"{name} carries the backend credential"
         assert "PIPEDREAM_CLIENT_SECRET" not in body, name
     assert ".env" in files[".gitignore"]
+
+
+# --- the call.ended Automation (ADR-0018, #28) --------------------------------
+
+
+def _events(monkeypatch, tmp_path, *, event="call.ended", payload=None, channel="",
+            responses=None):
+    """Drive the generated /events with a signed envelope.
+
+    `responses` stands in for every outbound HTTP call the backend makes (the
+    builder's mint endpoint, then Pipedream); it records them and is what the
+    assertions read.
+    """
+    import hashlib
+    import hmac
+    import json as json_mod
+    import time
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AGENT_ID", "agent-123")
+    monkeypatch.setenv("WEBHOOK_SECRET", "evsecret")
+    monkeypatch.setenv("BUILDER_URL", "http://builder:8000")
+    monkeypatch.setenv("BUILDER_TOKEN", "bt-1")
+    monkeypatch.chdir(tmp_path)
+
+    files = scaffold.render(slug="x-1", port=9001, tools=[], agent_id="agent-123")
+    ns: dict = {}
+    exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
+    ns["SLACK_CHANNEL"] = channel
+    calls: list = []
+
+    def _respond(url, **kw):
+        calls.append({"url": url, **kw})
+        if responses is not None:
+            return responses(url, **kw)
+        if url.endswith("/integrations/token"):
+            return _Resp({"data": {
+                "access_token": "pd_tok",
+                "expires_at": 9_999_999_999.0,
+                "external_user_id": "ws-1",
+                "project_id": "proj_1",
+                "environment": "development",
+                "accounts": [{"id": "apn_slack", "app": "slack_v2"}],
+            }})
+        return _Resp({"ok": True})
+
+    monkeypatch.setitem(ns, "httpx", _FakeHttpx(_respond))
+
+    body = json_mod.dumps({
+        "event": event,
+        "payload": payload if payload is not None else {"summary": "Booked a demo"},
+    })
+    ts = str(int(time.time()))
+    sig = "v1=" + hmac.new(b"evsecret", f"{ts}.{body}".encode(), hashlib.sha256).hexdigest()
+    resp = TestClient(ns["app"]).post(
+        "/events",
+        content=body,
+        headers={"X-TurnCall-Signature": sig, "X-TurnCall-Timestamp": ts},
+    )
+    return resp, calls
+
+
+def test_the_scaffold_ships_a_call_ended_automation_with_the_action_filled_in():
+    app_py = scaffold.render(slug="a", port=9001, tools=[])["app.py"]
+    assert "async def on_call_ended" in app_py
+    # The Action is pre-filled; only the target is left to the developer.
+    assert "slack_v2-post-message" in app_py
+    assert 'SLACK_CHANNEL = ""' in app_py
+    assert "TODO" in app_py
+
+
+def test_a_call_ending_posts_the_summary(monkeypatch, tmp_path):
+    resp, calls = _events(
+        monkeypatch,
+        tmp_path,
+        channel="#sales-calls",
+        payload={
+            "summary": "Booked a demo",
+            "from_number": "+15550001111",
+            "to_number": "+15552223333",
+            "duration_ms": 92_000,
+            "ended_reason": "customer_ended_call",
+        },
+    )
+
+    assert resp.status_code == 200
+    run = next(c for c in calls if "actions/run" in c["url"])
+    body = run["json"]
+    assert body["id"] == "slack_v2-post-message"
+    assert body["external_user_id"] == "ws-1"
+    # The account rides under the app slug; the action's inputs are its siblings.
+    assert body["configured_props"]["slack_v2"] == {"authProvisionId": "apn_slack"}
+    assert body["configured_props"]["channel"] == "#sales-calls"
+    text = body["configured_props"]["text"]
+    # It receives the whole call.ended payload, not just a summary string.
+    assert "Booked a demo" in text
+    assert "+15550001111" in text and "+15552223333" in text
+    assert "92s" in text and "customer_ended_call" in text
+
+
+def test_it_holds_no_credential_and_asks_the_builder_for_a_token(monkeypatch, tmp_path):
+    _, calls = _events(monkeypatch, tmp_path, channel="#c")
+    mint = next(c for c in calls if c["url"].endswith("/integrations/token"))
+    assert mint["headers"]["Authorization"] == "Bearer bt-1"
+    run = next(c for c in calls if "actions/run" in c["url"])
+    assert run["headers"]["Authorization"] == "Bearer pd_tok"
+    assert run["headers"]["X-PD-Environment"] == "development"
+
+
+def test_an_untouched_automation_does_nothing(monkeypatch, tmp_path):
+    """An agent whose handler was never edited must post nothing and fail no call."""
+    resp, calls = _events(monkeypatch, tmp_path, channel="")
+    assert resp.status_code == 200
+    assert calls == []
+
+
+def test_it_fires_on_the_event_not_on_every_event(monkeypatch, tmp_path):
+    resp, calls = _events(monkeypatch, tmp_path, event="call.started", channel="#c")
+    assert resp.status_code == 200
+    assert calls == []
+
+
+def test_a_failed_post_never_becomes_the_calls_problem(monkeypatch, tmp_path):
+    """The call has already ended. Log and move on (ADR-0018)."""
+
+    def _explode(url, **kw):
+        if "actions/run" in url:
+            raise RuntimeError("pipedream is down")
+        return _Resp({"data": {
+            "access_token": "pd_tok", "expires_at": 9_999_999_999.0,
+            "external_user_id": "ws-1", "project_id": "p", "environment": "development",
+            "accounts": [{"id": "apn_slack", "app": "slack_v2"}],
+        }})
+
+    resp, _ = _events(monkeypatch, tmp_path, channel="#c", responses=_explode)
+    assert resp.status_code == 200
+
+
+def test_a_workspace_with_no_slack_connected_is_skipped_not_crashed(monkeypatch, tmp_path):
+    def _no_accounts(url, **kw):
+        if url.endswith("/integrations/token"):
+            return _Resp({"data": {
+                "access_token": "pd_tok", "expires_at": 9_999_999_999.0,
+                "external_user_id": "ws-1", "project_id": "p",
+                "environment": "development", "accounts": [],
+            }})
+        return _Resp({"ok": True})
+
+    resp, calls = _events(monkeypatch, tmp_path, channel="#c", responses=_no_accounts)
+    assert resp.status_code == 200
+    assert not any("actions/run" in c["url"] for c in calls)
+
+
+def test_the_event_is_stored_even_when_the_automation_blows_up(monkeypatch, tmp_path):
+    """An Automation failing must not cost us the record that triggered it.
+
+    Proves the outcome, not the ordering: the handler swallows its own failures,
+    so store-before-run is defence against a future edit rather than something
+    this test can distinguish.
+    """
+    import json as json_mod
+    import sqlite3
+
+    def _explode(url, **kw):
+        raise RuntimeError("everything is on fire")
+
+    resp, _ = _events(monkeypatch, tmp_path, channel="#c", responses=_explode)
+    assert resp.status_code == 200
+    rows = sqlite3.connect(tmp_path / "events.db").execute(
+        "SELECT payload FROM events"
+    ).fetchall()
+    assert json_mod.loads(rows[0][0])["event"] == "call.ended"

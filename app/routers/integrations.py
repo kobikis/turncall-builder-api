@@ -268,6 +268,19 @@ async def mint_token(backend: dict = Depends(_calling_backend)) -> dict[str, Any
         minted = await pipedream.access_token(cred)
     except pipedream.PipedreamError as exc:
         raise _fail(exc) from exc
+    # Which accounts this Workspace has connected, so an Automation can name the
+    # one it acts through without a second round trip. Ids, not credentials.
+    # Best-effort: the token is useful without them, and a listing failure must
+    # not cost the backend its token.
+    try:
+        accounts = [
+            {"id": a["id"], "app": a["app"]}
+            for a in await pipedream.list_accounts(
+                cred, workspace_id=backend["workspace_id"]
+            )
+        ]
+    except pipedream.PipedreamError:
+        accounts = []
     return {
         "success": True,
         "data": {
@@ -278,6 +291,7 @@ async def mint_token(backend: dict = Depends(_calling_backend)) -> dict[str, Any
             "external_user_id": backend["workspace_id"],
             "project_id": cred.project_id,
             "environment": cred.environment,
+            "accounts": accounts,
         },
     }
 

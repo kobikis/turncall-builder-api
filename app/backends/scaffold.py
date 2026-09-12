@@ -197,6 +197,81 @@ app.add_middleware(
 )
 
 
+# --- Automations (ADR-0018) ---
+
+# An Automation runs because an event arrived, not because a model chose to call
+# a tool. That is the whole reason it lives here rather than in the agent's MCP
+# servers: "post the summary when the call ends" is a delivery guarantee, and
+# routing it through tool selection would turn it into an outcome.
+
+# TODO: your channel, e.g. "#sales-calls". Empty means this Automation does
+# nothing — which is exactly what an untouched backend should do.
+SLACK_CHANNEL = ""
+
+
+async def run_pipedream_action(action_id: str, app: str, props: dict) -> dict | None:
+    """Run one Pipedream action as this Workspace. None on any failure.
+
+    Holds no credential of its own: the access token comes from the builder
+    (ADR-0019), and the account it acts through is named by id, never by secret.
+    """
+    try:
+        pd = await pipedream_token()
+        account = next((a for a in pd.get("accounts", []) if a["app"] == app), None)
+        if account is None:
+            print(f"automation: no connected {{app}} account — skipping {{action_id}}")
+            return None
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"https://api.pipedream.com/v1/connect/{{pd['project_id']}}/actions/run",
+                headers={{
+                    "Authorization": "Bearer " + pd["access_token"],
+                    "X-PD-Environment": pd["environment"],
+                }},
+                json={{
+                    "id": action_id,
+                    "external_user_id": pd["external_user_id"],
+                    # The account rides under the app slug; the action's own
+                    # inputs are its siblings.
+                    "configured_props": {{
+                        app: {{"authProvisionId": account["id"]}},
+                        **props,
+                    }},
+                }},
+            )
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        # ponytail: log and move on. Retry policy and failure surfacing are
+        # deliberately out of scope (ADR-0018) — the call has already ended, and
+        # a failed post must never become its problem.
+        print(f"automation: {{action_id}} failed ({{exc}})")
+        return None
+
+
+async def on_call_ended(payload: dict) -> None:
+    """Post the call summary to Slack when a call ends.
+
+    `payload` is the full call.ended body: summary, analysis, duration_ms,
+    ended_reason, from_number, to_number, direction, transcript, recording_url.
+    Edit freely — this file is yours.
+    """
+    if not SLACK_CHANNEL:
+        return
+    seconds = round((payload.get("duration_ms") or 0) / 1000)
+    text = (
+        f"*Call ended* — {{payload.get('from_number') or 'unknown'}}"
+        f" → {{payload.get('to_number') or 'unknown'}}\\n"
+        f"{{payload.get('summary') or '(no summary)'}}\\n"
+        f"_{{seconds}}s · {{payload.get('ended_reason') or 'unknown'}}_"
+    )
+    await run_pipedream_action(
+        "slack_v2-post-message",
+        "slack_v2",
+        {{"channel": SLACK_CHANNEL, "text": text}},
+    )
+
+
 # --- tool handlers (bodies authored by the builder) ---
 
 {tool_functions}
@@ -271,11 +346,24 @@ async def call_init(request: Request) -> dict:
 
 @app.post("/events")
 async def receive_event(request: Request) -> dict:
-    """Receive a TurnCall event directly, verify its signature, store it."""
+    """Receive a TurnCall event directly, verify its signature, store it, and
+    run any Automation bound to it.
+
+    Stored before the Automation runs. The handler below swallows its own
+    failures, so today the order does not change the outcome — it is here so a
+    future edit that lets an exception escape cannot cost us the record of the
+    event that triggered it.
+    """
     raw = await _verified_body(request, WEBHOOK_SECRET)
     with closing(_db()) as conn:
         conn.execute("INSERT INTO events (payload) VALUES (?)", (raw,))
         conn.commit()
+    try:
+        body = json.loads(raw)
+        if body.get("event") == "call.ended":
+            await on_call_ended(body.get("payload") or {{}})
+    except Exception as exc:  # noqa: BLE001
+        print(f"automation dispatch failed ({{exc}})")
     return {{"success": True}}
 
 
@@ -348,7 +436,9 @@ TurnCall events directly, and serves managed call-init.
 - Runs on host port **{port}** (TurnCall reaches it at `host.docker.internal:{port}`,
   the browser at `localhost:{port}`).
 - `POST /tools/<name>` — tool webhooks (called by TurnCall, HMAC-verified).
-- `POST /events` — TurnCall event sink (HMAC-verified).
+- `POST /events` — TurnCall event sink (HMAC-verified). Runs `on_call_ended()`
+  when a call ends: an **Automation**, which fires because the event arrived and
+  not because a model chose it. Set `SLACK_CHANNEL` in `app.py` to switch it on.
 - `POST /call-init` — managed call-init: picks this agent + loads caller info
   (HMAC-verified with this number's call-init secret).
 - `GET  /events` — stored events (the console polls this; CORS pinned to it).
