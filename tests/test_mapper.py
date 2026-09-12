@@ -309,3 +309,79 @@ def test_providers_endpoint_offers_openai_live():
     from app.routers.sessions import _S2S_PROVIDERS
 
     assert "openai_live" in _S2S_PROVIDERS
+
+
+def _with_servers(servers):
+    return to_create_agent_request(
+        {"name": "Bot", "system_prompt": "hi", "mcp_servers": servers}
+    )["config"]
+
+
+class TestMCPServers:
+    """ADR-0014 left "exposing mcp_servers in the Console" open. This is the
+    answer: it reaches TurnCall, but only from the console — never from the
+    interview."""
+
+    def test_http_and_sse_servers_reach_turncall(self):
+        servers = [
+            {"name": "crm", "transport": "http", "url": "https://mcp.acme.com/mcp"},
+            {"name": "docs", "transport": "sse", "url": "https://mcp.acme.com/sse"},
+        ]
+
+        assert _with_servers(servers)["mcp_servers"] == servers
+
+    def test_headers_survive_because_that_is_how_the_feature_authenticates(self):
+        servers = [
+            {
+                "name": "crm",
+                "transport": "http",
+                "url": "https://mcp.acme.com/mcp",
+                "headers": {"Authorization": "Bearer t"},
+            }
+        ]
+
+        assert _with_servers(servers)[
+            "mcp_servers"
+        ][0]["headers"] == {"Authorization": "Bearer t"}
+
+    def test_stdio_is_refused(self):
+        """It runs a subprocess on the TurnCall host. TurnCall gates that behind
+        MCP_STDIO_ENABLED, but a builder-authored config should not be the thing
+        asking for it."""
+        config = _with_servers(
+            [{"name": "local", "transport": "stdio", "command": "python"}]
+        )
+
+        assert "mcp_servers" not in config
+
+    def test_a_stdio_server_does_not_take_the_others_with_it(self):
+        config = _with_servers(
+            [
+                {"name": "local", "transport": "stdio", "command": "python"},
+                {"name": "crm", "transport": "http", "url": "https://mcp.acme.com/mcp"},
+            ]
+        )
+
+        assert [s["name"] for s in config["mcp_servers"]] == ["crm"]
+
+    def test_nothing_configured_means_no_key_at_all(self):
+        """An empty list must not overwrite an agent's existing servers on
+        update — the same reason analysis is only emitted when present."""
+        assert "mcp_servers" not in _with_servers([])
+        assert "mcp_servers" not in to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi"}
+        )["config"]
+
+    def test_junk_is_dropped_rather_than_forwarded(self):
+        assert "mcp_servers" not in _with_servers(["not-a-server", None, 42])
+
+
+def test_the_interview_cannot_compose_an_mcp_server():
+    """Not in the compose schema, deliberately: an LLM building an agent from a
+    conversation must not invent outbound URLs, and a bearer token has no
+    business in a chat transcript that gets stored and pushed to GitHub."""
+    import json
+
+    from app.builder import COMPOSE_TOOL
+
+    assert "mcp_servers" not in json.dumps(COMPOSE_TOOL)
