@@ -18,7 +18,7 @@ import logging
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import builder, runtime, schema_check
+from . import builder, pipedream_store, runtime, schema_check
 from .backends import generator, registry
 from .db import create_pool
 from .routers import (
@@ -26,6 +26,7 @@ from .routers import (
     auth,
     calls,
     github,
+    integrations,
     knowledge,
     members,
     phones,
@@ -62,6 +63,28 @@ async def _reap_orphan_backends(pool) -> None:
         logger.exception("startup orphan reap failed")
 
 
+async def _store_pipedream_credential(pool, settings) -> None:
+    """Env configures the Pipedream credential; the encrypted row is what the
+    mint path reads back (ADR-0018). Never blocks startup — without it the
+    integrations endpoints 503 with what to set, which is the actionable failure."""
+    if not (
+        settings.pipedream_client_id
+        and settings.pipedream_client_secret
+        and settings.pipedream_project_id
+    ):
+        return
+    try:
+        await pipedream_store.save_credential(
+            pool,
+            client_id=settings.pipedream_client_id,
+            client_secret=settings.pipedream_client_secret,
+            project_id=settings.pipedream_project_id,
+            environment=settings.pipedream_environment,
+        )
+    except Exception:
+        logger.exception("could not store the Pipedream credential — integrations are off")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
@@ -77,6 +100,7 @@ async def lifespan(app: FastAPI):
             "no builder API key configured (%s) — the builder cannot run",
             " / ".join(builder._KEY_ENV.values()),
         )
+    await _store_pipedream_credential(pool, settings)
     await _reap_orphan_backends(pool)
     await schema_check.check_drift(client)
     try:
@@ -96,6 +120,6 @@ app.add_middleware(
 
 for _router in (
     sessions, agents, phones, calls, knowledge, takeaways, auth, workspaces,
-    members, github, skills,
+    members, github, skills, integrations,
 ):
     app.include_router(_router.router)

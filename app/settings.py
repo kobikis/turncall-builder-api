@@ -35,6 +35,19 @@ class Settings:
     # TurnCall); once TurnCall is gated, a missing/mismatched value fails the
     # bootstrap with an actionable error (see turncall_client).
     platform_api_key: str
+    # Pipedream Connect (ADR-0018). Empty client secret disables integrations —
+    # the endpoints then 503 with what to set rather than failing at Pipedream.
+    # The secret is stored encrypted (pipedream_credentials); env is what
+    # configures it, and a restart is what applies a change.
+    pipedream_client_id: str
+    pipedream_client_secret: str
+    pipedream_project_id: str
+    # Where Pipedream sends the admin back — this API's own public
+    # /integrations/callback, not the console's URL (PUBLIC_BASE_URL is the
+    # console). Same shape and the same reason as google_redirect_uri.
+    pipedream_redirect_uri: str
+    # development is free and is where this stays until launch (ADR-0018).
+    pipedream_environment: str
 
 
 @lru_cache(maxsize=1)
@@ -61,4 +74,15 @@ def load_settings() -> Settings:
         google_redirect_uri=os.environ.get("GOOGLE_REDIRECT_URI", ""),
         session_secret=session_secret or secrets.token_urlsafe(32),
         platform_api_key=os.environ.get("PLATFORM_API_KEY", ""),
+        pipedream_client_id=os.environ.get("PIPEDREAM_CLIENT_ID", ""),
+        pipedream_client_secret=os.environ.get("PIPEDREAM_CLIENT_SECRET", ""),
+        pipedream_project_id=os.environ.get("PIPEDREAM_PROJECT_ID", ""),
+        pipedream_redirect_uri=os.environ.get("PIPEDREAM_REDIRECT_URI", ""),
+        # Anything else would go straight into X-PD-Environment and be rejected
+        # by Pipedream with nothing pointing back at this variable.
+        pipedream_environment=(
+            "production"
+            if os.environ.get("PIPEDREAM_ENVIRONMENT", "").strip() == "production"
+            else "development"
+        ),
     )
