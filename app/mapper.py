@@ -185,6 +185,24 @@ def to_create_agent_request(
     if cfg.get("analysis"):
         config["analysis"] = cfg["analysis"]
 
+    # MCP servers pass through the same way, and for the same reason: the
+    # console sets them, not the interview (ADR-0014 left that open; this is
+    # the answer). They are deliberately absent from the compose schema — an
+    # LLM composing an agent from a conversation must not be inventing
+    # outbound URLs, and a bearer token has no business being typed into a
+    # chat transcript that is then stored and pushed to GitHub.
+    #
+    # stdio is refused: it runs a subprocess on the TurnCall host. TurnCall
+    # gates it behind MCP_STDIO_ENABLED too, but a builder-authored config
+    # should not be the thing asking.
+    servers = [
+        server
+        for server in (cfg.get("mcp_servers") or [])
+        if isinstance(server, dict) and server.get("transport") in ("http", "sse")
+    ]
+    if servers:
+        config["mcp_servers"] = servers
+
     return {
         "name": cfg["name"],
         "environment": "development",
