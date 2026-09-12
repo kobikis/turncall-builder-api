@@ -46,6 +46,14 @@ class PipedreamError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class AccessToken:
+    """A Pipedream access token and when it stops working."""
+
+    token: str
+    expires_at: float
+
+
+@dataclass(frozen=True)
 class Credential:
     """The deployment's Pipedream client credential, decrypted for use."""
 
@@ -135,7 +143,7 @@ def load_state(state: str) -> tuple[str, str]:
 # Access tokens live an hour. Cached per credential so a burst of calls costs one
 # grant; expiry is trimmed so we never present one mid-flight. The secret is part
 # of the key — rotating it must not keep serving the token it superseded.
-_token_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+_token_cache: dict[tuple[str, str, str], AccessToken] = {}
 
 
 async def _request(
@@ -163,12 +171,12 @@ async def _request(
     return r.json() if r.content else {}
 
 
-async def access_token(cred: Credential) -> str:
+async def access_token(cred: Credential) -> AccessToken:
     """A Pipedream access token, minted on demand and reused until it expires."""
     key = (cred.client_id, cred.client_secret, cred.environment)
     cached = _token_cache.get(key)
-    if cached and cached[1] > time.time():
-        return cached[0]
+    if cached and cached.expires_at > time.time():
+        return cached
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
             f"{_API}/oauth/token",
@@ -188,8 +196,12 @@ async def access_token(cred: Credential) -> str:
     if not token:
         raise PipedreamError("Pipedream returned no access token.")
     # 60s of slack so a token minted here is still valid when the call lands.
-    _token_cache[key] = (token, time.time() + max(int(body.get("expires_in", 3600)) - 60, 0))
-    return token
+    minted = AccessToken(
+        token=token,
+        expires_at=time.time() + max(int(body.get("expires_in", 3600)) - 60, 0),
+    )
+    _token_cache[key] = minted
+    return minted
 
 
 async def connect_link(
@@ -201,7 +213,7 @@ async def connect_link(
     learns which Workspace and which app from us, never from the query string.
     """
     state = sign_state(workspace_id=workspace_id, app=app)
-    token = await access_token(cred)
+    token = (await access_token(cred)).token
     body = await _request(
         "POST",
         f"{_API}/connect/{cred.project_id}/tokens",
@@ -223,7 +235,7 @@ async def list_accounts(
     cred: Credential, *, workspace_id: str, app: str | None = None
 ) -> list[dict[str, Any]]:
     """This Workspace's Connected apps, as Pipedream sees them."""
-    token = await access_token(cred)
+    token = (await access_token(cred)).token
     params = {"external_user_id": workspace_id}
     if app:
         params["app"] = app
@@ -241,7 +253,7 @@ async def list_accounts(
 
 
 async def delete_account(cred: Credential, account_id: str) -> None:
-    token = await access_token(cred)
+    token = (await access_token(cred)).token
     await _request(
         "DELETE",
         f"{_API}/connect/{cred.project_id}/accounts/{account_id}",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from typing import Any
 
 import asyncpg
@@ -26,12 +27,16 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
     for col in ("config", "tool_statuses"):
         if col in d:
             d[col] = json.loads(d[col]) if d[col] else None
+    # uuid -> str so callers can compare and serialize it without knowing the
+    # column type.
+    if d.get("workspace_id") is not None:
+        d["workspace_id"] = str(d["workspace_id"])
     return d
 
 
 _COLS = (
     "agent_id, project_id, api_key, slug, port, service_dir, status, config, "
-    "webhook_secret, tool_statuses"
+    "webhook_secret, tool_statuses, workspace_id, builder_token"
 )
 
 
@@ -68,6 +73,22 @@ async def update_config(pool: asyncpg.Pool, agent_id: str, config: dict) -> None
     )
 
 
+async def get_backend_by_builder_token(
+    pool: asyncpg.Pool, token: str
+) -> dict[str, Any] | None:
+    """Which Agent Backend holds this token (ADR-0019). An empty token matches
+    nothing — a backend generated before the column existed must not be able to
+    authenticate by presenting nothing."""
+    if not token:
+        return None
+    return _row(
+        await pool.fetchrow(
+            f"SELECT {_COLS} FROM agent_backends WHERE builder_token = $1 AND NOT deleted",
+            token,
+        )
+    )
+
+
 async def next_port(pool: asyncpg.Pool) -> int:
     # ponytail: max+1, single-tenant dev — no concurrent-create contention worth locking.
     top = await pool.fetchval("SELECT max(port) FROM agent_backends")
@@ -86,14 +107,15 @@ async def record_backend(
 ) -> dict[str, Any]:
     """Insert the registry row once the agent exists. Idempotent. Stores the
     agent's project key (for a WebRTC client) and trimmed config (for edit diffs).
-    workspace_id scopes the agent to its owning Workspace (#31)."""
+    workspace_id scopes the agent to its owning Workspace (#31); builder_token is
+    how the generated backend later proves which Agent it is (ADR-0019)."""
     slug = f"{slugify(agent_name)}-{agent_id[:8]}"
     service_dir = f"{GENERATED_DIR}/turncall-agent-{slug}"
     await pool.execute(
         """INSERT INTO agent_backends
              (agent_id, project_id, api_key, slug, port, service_dir, status, config,
-              workspace_id)
-           VALUES ($1, $2, $3, $4, $5, $6, 'generating', $7::jsonb, $8)
+              workspace_id, builder_token)
+           VALUES ($1, $2, $3, $4, $5, $6, 'generating', $7::jsonb, $8, $9)
            ON CONFLICT (agent_id) DO NOTHING""",
         agent_id,
         project_id,
@@ -103,6 +125,9 @@ async def record_backend(
         service_dir,
         json.dumps(config or {}),
         workspace_id,
+        # ON CONFLICT DO NOTHING, so a re-registration keeps the token the
+        # backend's .env already carries.
+        secrets.token_urlsafe(32),
     )
     return await get_backend(pool, agent_id)  # type: ignore[return-value]
 

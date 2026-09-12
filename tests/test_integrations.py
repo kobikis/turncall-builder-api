@@ -258,3 +258,71 @@ def test_a_viewer_may_still_see_what_is_connected(gate_client, mocks):
     gate_client.cookies.set(COOKIE, "live")
     r = gate_client.get("/integrations", headers=WS_HEADER)
     assert r.status_code == 200
+
+
+# --- minting for an Agent Backend (ADR-0019, #25) -----------------------------
+
+BACKEND_TOKEN = "bt_" + "z" * 40
+
+
+def _backend(mocks, **over):
+    row = {"agent_id": "a1", "workspace_id": TEST_WORKSPACE_ID, "slug": "agent"}
+    row.update(over)
+    mocks.registry.get_backend_by_builder_token.return_value = row
+    return row
+
+
+def _mint(client, token=BACKEND_TOKEN):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return client.post("/integrations/token", headers=headers)
+
+
+def test_a_backend_exchanges_its_token_for_a_pipedream_one(client, mocks):
+    _configured(mocks)
+    _backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_live_token", expires_at=1_800_000_000.0
+    )
+
+    r = _mint(client)
+
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["access_token"] == "pd_live_token"
+    assert data["expires_at"] == 1_800_000_000.0
+    # The tenant is the Workspace that owns the Agent — the backend never names one.
+    assert data["external_user_id"] == TEST_WORKSPACE_ID
+    assert mocks.registry.get_backend_by_builder_token.await_args.args[1] == BACKEND_TOKEN
+
+
+def test_no_token_no_mint(client, mocks):
+    _configured(mocks)
+    r = _mint(client, token=None)
+    assert r.status_code == 401
+    mocks.pipedream.access_token.assert_not_called()
+
+
+def test_an_unknown_backend_gets_nothing(client, mocks):
+    _configured(mocks)
+    mocks.registry.get_backend_by_builder_token.return_value = None
+    r = _mint(client, token="bt_guessed")
+    assert r.status_code == 401
+    mocks.pipedream.access_token.assert_not_called()
+
+
+def test_a_session_cookie_is_not_a_backend_credential(gate_client, mocks):
+    """The caller is a container, not a person — a logged-in admin is not it."""
+    _configured(mocks)
+    _login_as(mocks, "admin")
+    gate_client.cookies.set(COOKIE, "live")
+    r = gate_client.post("/integrations/token", headers=WS_HEADER)
+    assert r.status_code == 401
+
+
+def test_the_mint_response_never_carries_the_client_secret(client, mocks):
+    _configured(mocks)
+    _backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_live_token", expires_at=1.0
+    )
+    assert SECRET not in _mint(client).text

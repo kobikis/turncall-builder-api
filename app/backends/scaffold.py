@@ -64,6 +64,7 @@ def render(
     agent_id: str = "",
     webhook_secret: str = "",
     call_init_secret: str = "",
+    builder_token: str = "",
 ) -> dict[str, str]:
     """Return {relative_path: file_contents} for the whole Agent Backend repo.
 
@@ -72,9 +73,13 @@ def render(
     """
     tool_bodies = tool_bodies or {}
     console_origin = os.environ.get("CONSOLE_ORIGIN", "http://localhost:5173")
+    # Where this backend asks for a Pipedream token (ADR-0019). Container-to-
+    # container, so the host gateway — not the console's origin.
+    builder_url = os.environ.get("BUILDER_URL", "http://host.docker.internal:8000")
     return {
         "app.py": render_app_py(tools, tool_bodies),
-        "requirements.txt": "fastapi>=0.115\nuvicorn[standard]>=0.30\n",
+        # httpx: this backend calls builder-api for a Pipedream access token.
+        "requirements.txt": "fastapi>=0.115\nuvicorn[standard]>=0.30\nhttpx>=0.27\n",
         "Dockerfile": _DOCKERFILE,
         "docker-compose.yml": _COMPOSE.format(slug=slug, port=port),
         ".env": _ENV.format(
@@ -82,6 +87,8 @@ def render(
             webhook_secret=webhook_secret,
             call_init_secret=call_init_secret,
             console_origin=console_origin,
+            builder_token=builder_token,
+            builder_url=builder_url,
         ),
         ".env.example": _ENV_EXAMPLE,
         ".gitignore": "__pycache__/\n*.pyc\nevents.db\n.env\n",
@@ -102,8 +109,10 @@ import hmac
 import json
 import os
 import sqlite3
+import time
 from contextlib import closing
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -112,6 +121,37 @@ AGENT_ID = os.environ.get("AGENT_ID", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")      # signs events + tool calls
 CALL_INIT_SECRET = os.environ.get("CALL_INIT_SECRET", "")  # set when a number binds with caller info
 CONSOLE_ORIGIN = os.environ.get("CONSOLE_ORIGIN", "http://localhost:5173")
+BUILDER_URL = os.environ.get("BUILDER_URL", "")       # where to ask for a Pipedream token
+BUILDER_TOKEN = os.environ.get("BUILDER_TOKEN", "")   # this backend's own credential
+
+
+# Cached until it expires — Pipedream tokens live an hour and a call is not the
+# unit of anything here.
+_pd_token = {{"access_token": "", "expires_at": 0.0}}
+
+
+async def pipedream_token() -> dict:
+    """A Pipedream access token, plus the tenant fields its headers need.
+
+    This backend deliberately holds no Pipedream credential of its own: one
+    revocable copy lives in the builder (ADR-0018/0019), and this exchanges
+    BUILDER_TOKEN for a short-lived access token.
+    """
+    if _pd_token["access_token"] and _pd_token["expires_at"] > time.time() + 30:
+        return _pd_token
+    if not (BUILDER_URL and BUILDER_TOKEN):
+        raise RuntimeError(
+            "BUILDER_URL / BUILDER_TOKEN are not set — integrations are off for "
+            "this backend. The builder writes both when it generates .env."
+        )
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            BUILDER_URL.rstrip("/") + "/integrations/token",
+            headers={{"Authorization": "Bearer " + BUILDER_TOKEN}},
+        )
+    r.raise_for_status()
+    _pd_token.update(r.json()["data"])
+    return _pd_token
 
 
 def _db():
@@ -252,12 +292,19 @@ WEBHOOK_SECRET=
 CALL_INIT_SECRET=
 # Origin allowed to read GET /events. The console, or your own dashboard.
 CONSOLE_ORIGIN=http://localhost:5173
+# Where to ask for a Pipedream access token, and this backend's own credential
+# for asking (ADR-0019). This backend holds no Pipedream credential of its own.
+# Distinct from WEBHOOK_SECRET on purpose: that one is shared with TurnCall.
+BUILDER_URL=http://host.docker.internal:8000
+BUILDER_TOKEN=
 """
 
 _ENV = """AGENT_ID={agent_id}
 WEBHOOK_SECRET={webhook_secret}
 CALL_INIT_SECRET={call_init_secret}
 CONSOLE_ORIGIN={console_origin}
+BUILDER_URL={builder_url}
+BUILDER_TOKEN={builder_token}
 """
 
 _README = """# turncall-agent-{slug}

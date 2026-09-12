@@ -9,6 +9,7 @@ The HTTP-visible guarantee (the secret never appears in a response) is a
 different one, asserted in test_integrations.py.
 """
 
+import asyncio
 import os
 
 import pytest
@@ -88,3 +89,72 @@ class TestConnectState:
     def test_garbage_is_rejected(self):
         with pytest.raises(pipedream.PipedreamError):
             pipedream.load_state("not-a-state")
+
+
+@pytest.mark.unit
+class TestAccessTokenCache:
+    """Pipedream tokens live an hour, so a burst of calls must cost one grant —
+    and the hour ending must cost exactly one more (ADR-0019, #25)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        pipedream._token_cache.clear()
+        yield
+        pipedream._token_cache.clear()
+
+    @staticmethod
+    def _cred(secret="s"):
+        return pipedream.Credential(
+            client_id="cid", client_secret=secret, project_id="p", environment="development"
+        )
+
+    @staticmethod
+    def _grants(monkeypatch, expires_in=3600):
+        """Count grants without a network: stand in for httpx.AsyncClient."""
+        calls = []
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"access_token": f"tok{len(calls)}", "expires_in": expires_in}
+
+        class _Client:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, **kw):
+                calls.append(url)
+                return _Response()
+
+        monkeypatch.setattr(pipedream.httpx, "AsyncClient", _Client)
+        return calls
+
+    def test_a_burst_of_calls_costs_one_grant(self, monkeypatch):
+        calls = self._grants(monkeypatch)
+        cred = self._cred()
+        first = asyncio.run(pipedream.access_token(cred))
+        second = asyncio.run(pipedream.access_token(cred))
+        assert first.token == second.token
+        assert len(calls) == 1
+
+    def test_an_expired_token_is_re_minted(self, monkeypatch):
+        calls = self._grants(monkeypatch, expires_in=0)
+        cred = self._cred()
+        first = asyncio.run(pipedream.access_token(cred))
+        second = asyncio.run(pipedream.access_token(cred))
+        assert first.token != second.token
+        assert len(calls) == 2
+
+    def test_a_rotated_secret_is_not_served_the_old_token(self, monkeypatch):
+        calls = self._grants(monkeypatch)
+        asyncio.run(pipedream.access_token(self._cred("old")))
+        asyncio.run(pipedream.access_token(self._cred("new")))
+        assert len(calls) == 2

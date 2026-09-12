@@ -68,6 +68,7 @@ async def _run_regen(pool: Any, backend: dict, config: dict) -> None:
             tool_bodies=bodies,
             agent_id=backend["agent_id"],
             webhook_secret=backend.get("webhook_secret") or "",
+            builder_token=backend.get("builder_token") or "",
         )
         if os.path.exists(os.path.join(backend["service_dir"], ".env")):
             # Never clobber a live .env — a bind may have added CALL_INIT_SECRET.
