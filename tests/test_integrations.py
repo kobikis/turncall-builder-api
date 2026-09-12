@@ -446,3 +446,102 @@ def test_attaching_a_takeaway_does_not_drop_the_attached_apps(client, mocks):
 
     assert r.status_code == 200
     assert _sent_config(mocks)["mcp_servers"][0]["headers"]["x-pd-app-slug"] == "slack_v2"
+
+
+# --- the config one call runs with (ADR-0020, #27) ----------------------------
+
+
+def _call_config(client, token=BACKEND_TOKEN):
+    return client.post(
+        "/integrations/call-config", headers={"Authorization": f"Bearer {token}"}
+    )
+
+
+def _agent_backend(mocks, **over):
+    row = {
+        "agent_id": AGENT,
+        "workspace_id": TEST_WORKSPACE_ID,
+        "port": 9001,
+        "webhook_secret": "s" * 16,
+        "config": {"name": "A", "system_prompt": "hi", "integrations": ["google_calendar"]},
+    }
+    row.update(over)
+    mocks.registry.get_backend_by_builder_token.return_value = row
+    return row
+
+
+def test_the_calls_config_carries_a_freshly_minted_credential(client, mocks):
+    _configured(mocks)
+    _target(mocks)
+    _agent_backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_minted", expires_at=1.0
+    )
+
+    r = _call_config(client)
+
+    assert r.status_code == 200
+    server = r.json()["data"]["agent"]["mcp_servers"][0]
+    assert server["headers"]["Authorization"] == "Bearer pd_minted"
+    assert server["headers"]["x-pd-app-slug"] == "google_calendar"
+    assert server["tool_filter"]
+
+
+def test_an_agent_with_no_attached_apps_has_nothing_to_inline(client, mocks):
+    """An inline agent costs the call its active_agent_id, so it is not the
+    default — only what an attached app requires."""
+    _configured(mocks)
+    _agent_backend(mocks, config={"name": "A", "system_prompt": "hi"})
+    r = _call_config(client)
+    assert r.json()["data"]["agent"] is None
+    mocks.pipedream.access_token.assert_not_called()
+
+
+def test_only_pipedream_servers_are_given_the_token(client, mocks):
+    """A hand-written MCP server has its own auth — ours must not be sent to it."""
+    _configured(mocks)
+    _target(mocks)
+    raw = {"name": "crm", "transport": "http", "url": "https://mcp.acme.com/mcp"}
+    _agent_backend(
+        mocks,
+        config={
+            "name": "A",
+            "system_prompt": "hi",
+            "integrations": ["google_calendar"],
+            "mcp_servers": [raw],
+        },
+    )
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_minted", expires_at=1.0
+    )
+
+    servers = _call_config(client).json()["data"]["agent"]["mcp_servers"]
+
+    assert servers[0]["name"] == "crm"
+    assert "Authorization" not in servers[0].get("headers", {})
+    assert servers[1]["headers"]["Authorization"] == "Bearer pd_minted"
+
+
+def test_an_unknown_backend_gets_no_config(client, mocks):
+    _configured(mocks)
+    mocks.registry.get_backend_by_builder_token.return_value = None
+    assert _call_config(client, token="guessed").status_code == 401
+
+
+def test_a_minting_failure_is_an_error_the_backend_can_fall_back_from(client, mocks):
+    _configured(mocks)
+    _target(mocks)
+    _agent_backend(mocks)
+    mocks.pipedream.access_token.side_effect = pipedream.PipedreamError("down")
+    r = _call_config(client)
+    assert r.status_code == 400  # not a 500 — the backend logs it and uses agent_id
+
+
+def test_the_client_secret_is_not_in_the_calls_config(client, mocks):
+    _configured(mocks)
+    _target(mocks)
+    _agent_backend(mocks)
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_minted", expires_at=1.0
+    )
+    assert SECRET not in _call_config(client).text
