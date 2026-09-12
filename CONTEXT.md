@@ -295,3 +295,40 @@ The per-Number secret TurnCall generates on bind and uses to HMAC-sign call-init
 requests. The builder mirrors it and shows it on the Number's page so the
 customer's endpoint can verify signatures.
 _Avoid_: webhook secret (that's the Agent Backend's event secret), token
+
+## Integrations
+
+**Connected app**:
+A [[Workspace]]'s standing authorization to act on a third party — a Slack
+workspace, a Google account. Held by Pipedream, never by the builder: what
+builder-api stores is the Pipedream client credential (encrypted, like a
+[[GitHub connection]]), and what identifies the tenant to Pipedream is the
+Workspace id as its `external_user_id`. An admin authorizes one through
+Pipedream's hosted Connect Link — the builder redirects and never sees the
+third party's consent screen or its tokens. Belongs to the business using the
+builder, **not** to the caller on the phone and not to that business's own
+customers. See ADR-0018.
+_Avoid_: "connection" unqualified (that reads as [[GitHub connection]]),
+"integration" (the same word [[GitHub connection]] avoids), "OAuth app"
+
+**Action**:
+One invocable operation on a [[Connected app]] — post a Slack message, create a
+calendar event. The shared unit both integration paths reach: in-call it is
+surfaced to the LLM as an ordinary TurnCall tool over MCP, post-call it is run
+directly by an [[Automation]]. Named by Pipedream's action slug.
+_Avoid_: tool (TurnCall's word, and only half of what an Action is), operation,
+endpoint
+
+**Automation**:
+An [[Action]] bound to an [[Event]], run by the [[Agent Backend]] when that event
+arrives — "post the summary to #sales when the call ends". Deterministic and
+retriable, which is the whole point of it not being a tool: an LLM may decline to
+call a tool, and "send the message" is not a decision the model should be making.
+Lives as a handler in the backend's [[Scaffold]] — generated as a stub with the
+[[Action]] pre-filled and the target marked TODO, then edited in the repo the
+user owns. Deliberately **not** a [[Console]] field: unlike an in-call
+integration, nothing about an Automation has to reach TurnCall, so nothing has
+to leave the backend. Unconditional. Distinct from an in-call integration, which
+*is* a tool and may legitimately not fire.
+_Avoid_: post-call hook, trigger, workflow, "action" alone (that's the operation
+it runs)
