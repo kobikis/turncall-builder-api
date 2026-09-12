@@ -31,7 +31,7 @@ def _configured(mocks) -> None:
 def _account(**over):
     row = {
         "id": "apn_1",
-        "app": "slack",
+        "app": "slack_v2",
         "name": "Slack",
         "account_name": "acme.slack.com",
         "healthy": True,
@@ -48,13 +48,13 @@ def test_admin_starts_a_connect_flow(client, mocks):
     _configured(mocks)
     mocks.pipedream.connect_link.return_value = "https://pipedream.com/_static/connect.html?token=t&app=slack"
 
-    r = client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
 
     assert r.status_code == 200
     assert r.json()["data"]["connect_link_url"].startswith("https://pipedream.com/")
     kw = mocks.pipedream.connect_link.await_args.kwargs
     assert kw["workspace_id"] == TEST_WORKSPACE_ID  # the tenant Pipedream is told about
-    assert kw["app"] == "slack"
+    assert kw["app"] == "slack_v2"
 
 
 def test_connect_rejects_an_app_outside_the_catalog(client, mocks):
@@ -66,7 +66,7 @@ def test_connect_rejects_an_app_outside_the_catalog(client, mocks):
 
 def test_connect_without_pipedream_configured_says_so(client, mocks):
     mocks.pipedream_store.get_credential.return_value = None
-    r = client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert r.status_code == 503
     assert "PIPEDREAM" in r.json()["detail"]
 
@@ -81,7 +81,7 @@ def test_connect_without_a_redirect_uri_says_which_one(client, mocks, monkeypatc
 
     settings = replace(load_settings(), pipedream_redirect_uri="")
     monkeypatch.setattr(integrations, "load_settings", lambda: settings)
-    r = client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert r.status_code == 503
     assert "PIPEDREAM_REDIRECT_URI" in r.json()["detail"]
     mocks.pipedream.connect_link.assert_not_called()
@@ -90,7 +90,7 @@ def test_connect_without_a_redirect_uri_says_which_one(client, mocks, monkeypatc
 def test_connect_sends_pipedream_this_apis_callback(client, mocks):
     _configured(mocks)
     mocks.pipedream.connect_link.return_value = "https://pipedream.com/c?token=t"
-    client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert (
         mocks.pipedream.connect_link.await_args.kwargs["callback_url"]
         == load_settings().pipedream_redirect_uri
@@ -111,7 +111,7 @@ def test_a_rotated_encryption_key_says_so_rather_than_500ing(client, mocks):
 def test_pipedream_failure_is_reported_not_swallowed(client, mocks):
     _configured(mocks)
     mocks.pipedream.connect_link.side_effect = pipedream.PipedreamError("Pipedream is down")
-    r = client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert r.status_code == 400
     assert "Pipedream is down" in r.json()["detail"]
 
@@ -119,7 +119,7 @@ def test_pipedream_failure_is_reported_not_swallowed(client, mocks):
 # --- coming back --------------------------------------------------------------
 
 
-def _callback(client, mocks, *, workspace_id=TEST_WORKSPACE_ID, app="slack", error=None):
+def _callback(client, mocks, *, workspace_id=TEST_WORKSPACE_ID, app="slack_v2", error=None):
     state = pipedream.sign_state(workspace_id=workspace_id, app=app)
     params = {"state": state}
     if error:
@@ -134,7 +134,7 @@ def test_successful_return_lands_on_a_connected_app(client, mocks):
     r = _callback(client, mocks)
 
     assert r.status_code == 303
-    assert parse_qs(urlparse(r.headers["location"]).query)["connected"] == ["slack"]
+    assert parse_qs(urlparse(r.headers["location"]).query)["connected"] == ["slack_v2"]
     # The Workspace is read off our own signed state, not off the query string.
     assert mocks.pipedream.list_accounts.await_args.kwargs["workspace_id"] == TEST_WORKSPACE_ID
 
@@ -175,7 +175,7 @@ def test_listing_is_scoped_to_the_callers_workspace(client, mocks):
     r = client.get("/integrations", headers=WS_HEADER)
 
     assert r.status_code == 200
-    assert r.json()["data"][0]["app"] == "slack"
+    assert r.json()["data"][0]["app"] == "slack_v2"
     assert mocks.pipedream.list_accounts.await_args.kwargs["workspace_id"] == TEST_WORKSPACE_ID
 
 
@@ -209,7 +209,7 @@ def test_no_response_ever_carries_the_client_secret(client, mocks):
     mocks.pipedream.list_accounts.return_value = [_account()]
 
     bodies = [
-        client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER).text,
+        client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER).text,
         client.get("/integrations", headers=WS_HEADER).text,
         client.get("/integrations/catalog", headers=WS_HEADER).text,
     ]
@@ -228,7 +228,7 @@ def test_editor_cannot_connect(gate_client, mocks):
     _configured(mocks)
     _login_as(mocks, "editor")
     gate_client.cookies.set(COOKIE, "live")
-    r = gate_client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = gate_client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert r.status_code == 403
     mocks.pipedream.connect_link.assert_not_called()
 
@@ -247,7 +247,7 @@ def test_admin_may_connect(gate_client, mocks):
     _login_as(mocks, "admin")
     mocks.pipedream.connect_link.return_value = "https://pipedream.com/c?token=t"
     gate_client.cookies.set(COOKIE, "live")
-    r = gate_client.post("/integrations/connect", json={"app": "slack"}, headers=WS_HEADER)
+    r = gate_client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS_HEADER)
     assert r.status_code == 200
 
 
@@ -326,3 +326,123 @@ def test_the_mint_response_never_carries_the_client_secret(client, mocks):
         token="pd_live_token", expires_at=1.0
     )
     assert SECRET not in _mint(client).text
+
+
+# --- attaching an app to an Agent (ADR-0018, #26) -----------------------------
+
+AGENT = "a1"
+
+
+def _agent(mocks, **over):
+    row = {
+        "agent_id": AGENT,
+        "workspace_id": TEST_WORKSPACE_ID,
+        "project_id": "p1",
+        "api_key": "tc_key",
+        "slug": "agent",
+        "port": 9001,
+        "status": "running",
+        "config": {"name": "Agent", "system_prompt": "hi"},
+        "webhook_secret": "s" * 16,
+        "service_dir": "/srv/agent",
+    }
+    row.update(over)
+    mocks.registry.get_backend.return_value = row
+    return row
+
+
+def _sent_config(mocks) -> dict:
+    """The agent Config that actually reached TurnCall."""
+    return mocks.client.update_agent.await_args.args[1]["config"]
+
+
+def _target(mocks) -> None:
+    mocks.pipedream_store.mcp_target.return_value = {
+        "project_id": "proj_1",
+        "environment": "development",
+        "external_user_id": TEST_WORKSPACE_ID,
+    }
+
+
+def test_an_editor_attaches_an_app_and_it_reaches_turncall(client, mocks):
+    _configured(mocks)
+    _target(mocks)
+    _agent(mocks)
+
+    r = client.put(
+        f"/integrations/agents/{AGENT}", json={"apps": ["slack_v2"]}, headers=WS_HEADER
+    )
+
+    assert r.status_code == 200
+    servers = _sent_config(mocks)["mcp_servers"]
+    assert servers[0]["headers"]["x-pd-app-slug"] == "slack_v2"
+    assert servers[0]["tool_filter"]
+    # And the choice is remembered on the agent, so a later prompt edit keeps it.
+    assert mocks.registry.update_config.await_args.args[2]["integrations"] == ["slack_v2"]
+
+
+def test_detaching_everything_sends_a_config_with_no_servers(client, mocks):
+    _configured(mocks)
+    _target(mocks)
+    _agent(mocks, config={"name": "A", "system_prompt": "hi", "integrations": ["slack_v2"]})
+
+    r = client.put(f"/integrations/agents/{AGENT}", json={"apps": []}, headers=WS_HEADER)
+
+    assert r.status_code == 200
+    assert "mcp_servers" not in _sent_config(mocks)
+
+
+def test_attached_apps_are_readable(client, mocks):
+    _agent(mocks, config={"name": "A", "integrations": ["google_calendar"]})
+    r = client.get(f"/integrations/agents/{AGENT}", headers=WS_HEADER)
+    assert r.json()["data"]["apps"] == ["google_calendar"]
+
+
+def test_an_unknown_app_is_refused_rather_than_attached(client, mocks):
+    _configured(mocks)
+    _agent(mocks)
+    r = client.put(
+        f"/integrations/agents/{AGENT}", json={"apps": ["dropbox"]}, headers=WS_HEADER
+    )
+    assert r.status_code == 422
+    mocks.client.update_agent.assert_not_called()
+
+
+def test_another_workspaces_agent_is_not_attachable(client, mocks):
+    _configured(mocks)
+    mocks.registry.get_backend.return_value = None  # scoped lookup finds nothing
+    r = client.put(
+        f"/integrations/agents/{AGENT}", json={"apps": ["slack_v2"]}, headers=WS_HEADER
+    )
+    assert r.status_code == 404
+
+
+def test_a_viewer_cannot_attach(gate_client, mocks):
+    _configured(mocks)
+    _login_as(mocks, "viewer")
+    _agent(mocks)
+    gate_client.cookies.set(COOKIE, "live")
+    r = gate_client.put(
+        f"/integrations/agents/{AGENT}", json={"apps": ["slack_v2"]}, headers=WS_HEADER
+    )
+    assert r.status_code == 403
+    mocks.client.update_agent.assert_not_called()
+
+
+def test_attaching_a_takeaway_does_not_drop_the_attached_apps(client, mocks):
+    """The silent-drop failure ADR-0017 opens on: a config path that rebuilds the
+    TurnCall payload without knowing about integrations sends an agent that
+    quietly loses its tools."""
+    _configured(mocks)
+    _target(mocks)
+    _agent(mocks, config={"name": "A", "system_prompt": "hi", "integrations": ["slack_v2"]})
+    mocks.client.create_takeaway.return_value = {"id": "tk1", "name": "outcome"}
+
+    r = client.post(
+        f"/agents/{AGENT}/takeaways",
+        json={"name": "outcome", "schema": {"type": "object"}},
+        headers=WS_HEADER,
+    )
+
+    assert r.status_code == 200
+    assert _sent_config(mocks)["mcp_servers"][0]["headers"]["x-pd-app-slug"] == "slack_v2"

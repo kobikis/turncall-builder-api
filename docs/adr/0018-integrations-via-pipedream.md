@@ -62,16 +62,27 @@ deterministic post-call path. This is that decision.
   inline agent with freshly minted headers instead. **No change to TurnCall.**
 
 - **`tool_filter` is mandatory on catalog-added servers.** Pipedream generates MCP
-  tools from an app's whole pre-built action registry — dozens for Slack. TurnCall
-  caps at 50 per server and 100 total, and every advertised tool rides in every
-  LLM request for the length of the call, so an unfiltered server costs latency
+  tools from an app's whole pre-built action registry. Measured against
+  `PipedreamHQ/pipedream`: **50 actions for Slack, 17 for Google Calendar**.
+  TurnCall caps a server at 50 tools and an agent at 100, so unfiltered Slack
+  alone lands exactly on one cap and eats half the other — and every advertised
+  tool rides in every LLM request for the length of the call, so it costs latency
   and tool-selection quality, not just tokens. The catalog pins an explicit
   allowlist per app; the raw MCP form leaves it optional, where the caps are the
   only guard.
 
+  *(This number was an estimate when the ADR was written and is now a
+  measurement. It came out at the cap rather than near it, which is the only
+  reason this bullet is a rule and not a recommendation.)*
+
 - **v1 catalog is Slack and Google Calendar.** The two that were actually asked
   for. A third app is added when a customer asks for one, not when we guess.
   ADR-0017's raw MCP form stays the escape hatch for everything else.
+
+  Slack's Pipedream app slug is **`slack_v2`**, not `slack` — the registry
+  package was versioned and the slug went with it, and the slug is also the
+  prefix of every tool name the app generates. `slack` is not the name of
+  anything current.
 
 ## Trace of what gets built
 

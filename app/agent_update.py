@@ -12,6 +12,7 @@ import logging
 import os
 from typing import Any
 
+from . import pipedream_store
 from ._helpers import _normalize_config
 from .backends import generator, registry, scaffold, toolgen
 from .backends.diff import tools_changed
@@ -32,6 +33,7 @@ async def apply_update(
         new_config,
         registry.backend_url(port),
         tools_secret=backend.get("webhook_secret") or None,
+        pipedream_target=await pipedream_store.mcp_target(pool, backend.get("workspace_id")),
     )
     await client.update_agent(backend["agent_id"], payload, backend["api_key"])
 

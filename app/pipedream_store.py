@@ -12,9 +12,13 @@ ciphertext.
 
 from __future__ import annotations
 
+import logging
+
 import asyncpg
 
 from . import pipedream
+
+logger = logging.getLogger("turncall_builder")
 
 # Singleton: a CHECK on the table keeps it that way.
 _ID = 1
@@ -68,3 +72,27 @@ async def get_credential(pool: asyncpg.Pool) -> pipedream.Credential | None:
         project_id=row["project_id"],
         environment=row["environment"],
     )
+
+
+async def mcp_target(pool: asyncpg.Pool, workspace_id: str | None) -> dict | None:
+    """What a catalog-added `mcp_servers` entry points at, for this Workspace.
+
+    None when integrations are unconfigured, when the agent predates Workspace
+    scoping, or when the credential cannot be read. Never raises: an unreadable
+    Pipedream credential must not be able to block an unrelated prompt edit — the
+    attached apps drop out of the config and everything else still applies.
+    """
+    if not workspace_id:
+        return None
+    try:
+        cred = await get_credential(pool)
+    except pipedream.PipedreamError:
+        logger.exception("pipedream credential unreadable — attached apps dropped")
+        return None
+    if cred is None:
+        return None
+    return {
+        "project_id": cred.project_id,
+        "environment": cred.environment,
+        "external_user_id": workspace_id,
+    }

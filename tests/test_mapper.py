@@ -385,3 +385,90 @@ def test_the_interview_cannot_compose_an_mcp_server():
     from app.builder import COMPOSE_TOOL
 
     assert "mcp_servers" not in json.dumps(COMPOSE_TOOL)
+
+
+class TestAttachedApps:
+    """Catalog apps attached to an Agent become mcp_servers entries (ADR-0018).
+
+    Pipedream serves every app from one MCP URL and routes by header, so two
+    attached apps are two entries sharing a URL and differing by app slug.
+    """
+
+    TARGET = {
+        "project_id": "proj_1",
+        "environment": "development",
+        "external_user_id": "ws-1",
+    }
+
+    def _config(self, apps, **over):
+        cfg = {"name": "Bot", "system_prompt": "hi", "integrations": apps, **over}
+        return to_create_agent_request(cfg, pipedream_target=self.TARGET)["config"]
+
+    def test_two_apps_share_a_url_and_differ_by_app_slug(self):
+        servers = self._config(["slack_v2", "google_calendar"])["mcp_servers"]
+        assert len({s["url"] for s in servers}) == 1
+        assert [s["headers"]["x-pd-app-slug"] for s in servers] == [
+            "slack_v2",
+            "google_calendar",
+        ]
+
+    def test_the_tenant_and_project_ride_in_the_headers(self):
+        headers = self._config(["slack_v2"])["mcp_servers"][0]["headers"]
+        assert headers["x-pd-project-id"] == "proj_1"
+        assert headers["x-pd-environment"] == "development"
+        assert headers["x-pd-external-user-id"] == "ws-1"
+
+    def test_no_credential_rides_in_the_config(self):
+        """The access token lives an hour — it is minted per call (#27), never
+        stored in an agent config."""
+        headers = self._config(["slack_v2"])["mcp_servers"][0]["headers"]
+        assert not any(h.lower() == "authorization" for h in headers)
+
+    def test_every_entry_carries_a_pinned_tool_filter(self):
+        for server in self._config(["slack_v2", "google_calendar"])["mcp_servers"]:
+            assert server["tool_filter"], f"{server['name']} has no tool_filter"
+            # Pipedream names a tool for its app — a filter naming another app's
+            # tools would silently match nothing.
+            slug = server["headers"]["x-pd-app-slug"]
+            assert all(t.startswith(f"{slug}-") for t in server["tool_filter"])
+
+    def test_an_app_with_no_pinned_filter_is_not_sent(self, monkeypatch):
+        """Unfiltered, Slack alone lands on TurnCall's 50-tools-per-server cap."""
+        from app import pipedream
+
+        monkeypatch.setitem(
+            pipedream.CATALOG,
+            "slack_v2",
+            pipedream.CatalogApp(slug="slack_v2", name="Slack", tools=()),
+        )
+        assert "mcp_servers" not in self._config(["slack_v2"])
+
+    def test_without_a_target_they_are_dropped_not_half_emitted(self):
+        """A server the agent cannot authenticate to costs a discovery timeout at
+        the start of every call — worse than no server."""
+        config = to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "integrations": ["slack_v2"]}
+        )["config"]
+        assert "mcp_servers" not in config
+
+    def test_hand_written_servers_are_unaffected_and_come_first(self):
+        raw = {"name": "crm", "transport": "http", "url": "https://mcp.acme.com/mcp"}
+        servers = self._config(["slack_v2"], mcp_servers=[raw])["mcp_servers"]
+        assert servers[0] == raw
+        assert servers[1]["name"] == "pipedream_slack_v2"
+
+    def test_stdio_is_still_refused_alongside_attached_apps(self):
+        servers = self._config(
+            ["slack_v2"],
+            mcp_servers=[{"name": "local", "transport": "stdio", "command": "python"}],
+        )["mcp_servers"]
+        assert [s["name"] for s in servers] == ["pipedream_slack_v2"]
+
+    def test_an_agent_with_no_attached_apps_is_untouched(self):
+        assert to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi"}, pipedream_target=self.TARGET
+        ) == to_create_agent_request({"name": "Bot", "system_prompt": "hi"})
+
+    def test_an_unknown_app_does_not_take_the_rest_of_the_list_with_it(self):
+        servers = self._config(["slack_v2", "dropbox"])["mcp_servers"]
+        assert [s["headers"]["x-pd-app-slug"] for s in servers] == ["slack_v2"]

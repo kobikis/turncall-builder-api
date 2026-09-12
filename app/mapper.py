@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import pipedream
 from .backends.scaffold import validate_tool_names
 
 _BUILTIN_DESCRIPTIONS = {
@@ -77,6 +78,7 @@ def to_create_agent_request(
     cfg: dict[str, Any],
     tools_base_url: str | None = None,
     tools_secret: str | None = None,
+    pipedream_target: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Trimmed agent_config -> the body for POST /v1/agents.
 
@@ -200,6 +202,18 @@ def to_create_agent_request(
         for server in (cfg.get("mcp_servers") or [])
         if isinstance(server, dict) and server.get("transport") in ("http", "sse")
     ]
+    # Attached catalog apps (ADR-0018) become further entries, after the raw
+    # ones so a hand-written server always wins a name collision. They carry a
+    # pinned tool_filter and no Authorization header — the access token lives an
+    # hour and is minted per call through call-init.
+    #
+    # Dropped rather than half-emitted when there is no target: integrations
+    # unconfigured, or the credential unreadable. A server the agent cannot
+    # authenticate to is worse than no server — it costs a discovery timeout at
+    # the start of every call.
+    apps = [a for a in (cfg.get("integrations") or []) if isinstance(a, str)]
+    if apps and pipedream_target:
+        servers += pipedream.mcp_servers_for(apps, **pipedream_target)
     if servers:
         config["mcp_servers"] = servers
 
