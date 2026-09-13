@@ -47,6 +47,18 @@ Generates a TurnCall agent config — editable before you commit to it
 Creates it in TurnCall, binds a number, streams the events its calls produce
 ```
 
+### Connected apps
+
+A workspace admin authorizes Slack or Google Calendar once, through the
+provider's own consent screen — the builder never sees the third party's tokens.
+Each agent then chooses when an app runs: **during a call**, where its tools are
+offered to the model, or **when a call ends**, where one action runs because the
+event arrived rather than because the model decided to. Credentials are minted
+per call and expire within the hour; nothing durable lives in an agent's config.
+
+Anything outside that small curated list is still reachable as a raw MCP server.
+See `docs/adr/0018`, `0021` and `0022`.
+
 Frontend lives in
 [`turncall-builder-web`](https://github.com/kobikis/turncall-builder-web).
 The voice runtime it targets is the MIT-licensed
