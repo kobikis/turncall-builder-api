@@ -9,7 +9,6 @@ exactly the same path.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from . import pipedream_store
@@ -74,13 +73,21 @@ async def _run_regen(pool: Any, backend: dict, config: dict) -> None:
             tools=internal_tools,
             tool_bodies=bodies,
             integrations=config.get("integrations"),
+            # Carried through regeneration so a backend older than the column can
+            # acquire one — merge_env only fills what the render actually gives.
+            call_init_secret=backend.get("call_init_secret") or "",
             agent_id=backend["agent_id"],
             webhook_secret=backend.get("webhook_secret") or "",
             builder_token=backend.get("builder_token") or "",
         )
-        if os.path.exists(os.path.join(backend["service_dir"], ".env")):
-            # Never clobber a live .env — a bind may have added CALL_INIT_SECRET.
-            files.pop(".env", None)
+        # A live .env keeps every value it has — a bind may have added
+        # CALL_INIT_SECRET — but gains any key the scaffold has grown since, so a
+        # backend generated before a credential existed can still acquire it.
+        gained = generator.merge_env(backend["service_dir"], files.pop(".env", ""))
+        if gained:
+            logger.info(
+                "added %s to %s's .env", ", ".join(gained), backend["agent_id"]
+            )
         ok, _ = await generator.materialize_and_run(backend["service_dir"], files)
         secret = backend.get("webhook_secret")
         status = "degraded" if ok and not secret else "running" if ok else "failed"

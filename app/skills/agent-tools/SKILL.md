@@ -7,8 +7,16 @@ description: Use when the agent must DO something outside the conversation — b
 
 ## Actions the agent performs
 
-When the agent must perform an external action (book, cancel, look up an
-order), author a custom_tool for it: snake_case name, description,
+**First: is a Connected app already doing this?** Putting a calendar event on
+Google Calendar, posting to Slack — those have real integrations, and a custom
+tool written beside one has no credentials, so it can only pretend to succeed
+while competing with the real tool for the model's attention. That is not
+hypothetical: a `schedule_google_calendar_event` tool authored from this page
+sat next to the Calendar integration and won. Open the connected-apps skill
+instead, and record the requirement in `needs_integrations`.
+
+Otherwise, when the agent must perform an external action (book, cancel, look up
+an order), author a custom_tool for it: snake_case name, description,
 parameters_schema.
 
 Don't ask for a URL — the builder generates a backend and wires it. If the user

@@ -111,10 +111,10 @@ class TestValidation:
 
     def test_an_entry_with_no_trigger_is_refused(self):
         """It would read as attached while exposing nothing and posting nothing."""
-        assert "no trigger" in self._reject([{"app": "slack_v2"}])
+        assert "set to do nothing" in self._reject([{"app": "slack_v2"}])
 
     def test_an_unknown_app_is_refused(self):
-        assert "unknown app" in self._reject([{"app": "notion", "mid_call": True}])
+        assert "not an app this build can connect" in self._reject([{"app": "notion", "mid_call": True}])
 
     def test_an_action_the_app_does_not_have_is_refused(self):
         """The handler logs and drops, so a wrong action looks exactly like a
@@ -122,13 +122,56 @@ class TestValidation:
         detail = self._reject(
             [{"app": "slack_v2", "call_ended": {"action": "slack_v2-delete-everything", "summary_arg": "text"}}]
         )
-        assert "is not an action of" in detail
+        assert "cannot do that when a call ends" in detail
 
     def test_another_apps_action_is_refused(self):
         detail = self._reject(
             [{"app": "slack_v2", "call_ended": {"action": "google_calendar-create-event", "summary_arg": "text"}}]
         )
-        assert "is not an action of" in detail
+        assert "cannot do that when a call ends" in detail
+
+    def test_a_mid_call_tool_is_not_automatically_an_end_of_call_action(self):
+        """`list-channels` is worth calling during a call and meaningless after
+        one. The two menus are different questions."""
+        detail = self._reject(
+            [{"app": "slack_v2", "call_ended": {"action": "slack_v2-list-channels", "summary_arg": "text"}}]
+        )
+        assert "cannot do that when a call ends" in detail
+
+    def test_an_app_that_offers_no_automation_says_so(self):
+        """Google Calendar has none: create-event needs a start and an end, and
+        a call.ended payload cannot supply them."""
+        detail = self._reject(
+            [
+                {
+                    "app": "google_calendar",
+                    "call_ended": {"action": "google_calendar-create-event", "summary_arg": "summary"},
+                }
+            ]
+        )
+        assert "offers nothing to run" in detail
+
+    def test_a_missing_input_names_the_input(self):
+        """"Needs a Channel" is actionable; a schema path is not."""
+        detail = self._reject(
+            [
+                {
+                    "app": "slack_v2",
+                    "call_ended": {"action": "slack_v2-post-message", "args": {}, "summary_arg": "text"},
+                }
+            ]
+        )
+        assert "needs a Channel" in detail
+
+    def test_a_refusal_never_leaks_the_validator(self):
+        """The message is read by a person in a form, not by a developer in a
+        traceback. Class names, union branch tags, the offending value echoed
+        back, and a link to pydantic's docs are all noise they cannot act on —
+        and the union that produced two errors for one mistake is gone."""
+        detail = self._reject([{"app": "slack_v2"}])
+        for leak in ("pydantic", "_AgentConfigShape", "_IntegrationShape",
+                     "function-after", "type=", "input_value", "validation error"):
+            assert leak not in detail, f"{leak!r} leaked into a user-facing message"
 
     def test_a_legacy_bare_slug_is_not_checked_against_the_catalog(self):
         """Validating it now would 422 an edit to a working agent over a field
@@ -176,10 +219,61 @@ class TestRegeneration:
         assert not automations_changed({"integrations": [a]}, {"integrations": [b]})
 
     def test_attachment_order_is_not_a_change(self):
-        cal = {"app": "google_calendar", "call_ended": {"action": "google_calendar-create-event", "args": {}, "summary_arg": "summary"}}
+        # A second automation; the diff never validates, so any shape will do.
+        cal = {"app": "google_calendar", "call_ended": {"action": "x", "args": {}, "summary_arg": "s"}}
         old = {"integrations": [SLACK_SUMMARY, cal]}
         new = {"integrations": [cal, SLACK_SUMMARY]}
         assert not automations_changed(old, new)
 
     def test_a_legacy_config_reads_as_no_automations(self):
         assert not automations_changed({"integrations": ["slack_v2"]}, {"integrations": ["slack_v2"]})
+
+
+class TestNeedsIntegrations:
+    """A request, not an attachment."""
+
+    def _reject(self, config):
+        with pytest.raises(HTTPException) as exc:
+            _validate_agent_config({"name": "Bot", **config})
+        assert exc.value.status_code == 422
+        return str(exc.value.detail)
+
+    def test_an_agent_can_record_what_it_needs(self):
+        _validate_agent_config({"name": "Bot", "needs_integrations": ["google_calendar"]})
+
+    def test_it_exposes_no_tool_by_itself(self):
+        """Only `integrations` puts something in front of the model. Needing an
+        app and having one are different states, and the difference is the
+        Workspace's decision."""
+        config = to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "needs_integrations": ["google_calendar"]},
+            pipedream_target=TARGET,
+        )["config"]
+        assert "mcp_servers" not in config
+
+    def test_an_app_nobody_can_connect_is_refused(self):
+        assert "not an app this build can connect" in self._reject(
+            {"needs_integrations": ["notion"]}
+        )
+
+    def test_a_custom_tool_that_shadows_an_integration_is_refused(self):
+        """The failure this backstops: a `book_table` tool described as saving to
+        Google Calendar, which has no credentials and can only pretend."""
+        detail = self._reject({
+            "custom_tools": [{
+                "name": "book_table",
+                "description": "Saves a confirmed reservation to the restaurant's "
+                "Google Calendar so floor staff can see it.",
+            }]
+        })
+        assert "has no Google Calendar credentials" in detail
+        assert "Integrations page" in detail
+
+    def test_an_ordinary_custom_tool_is_untouched(self):
+        _validate_agent_config({
+            "name": "Bot",
+            "custom_tools": [{
+                "name": "create_reservation",
+                "description": "Records a reservation in the restaurant's book.",
+            }],
+        })

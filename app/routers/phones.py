@@ -102,9 +102,16 @@ async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dic
 
 async def _sync_call_init_secret(backend: dict[str, Any] | None, secret: str | None) -> None:
     """Write the number's call-init secret into the backend's .env and recreate
-    the container so /call-init verifies against it (managed call-init only)."""
+    the container so /call-init verifies against it (managed call-init only).
+
+    The registry follows. An agent is created with a builder-minted secret so a
+    browser test call can reach call-init at all; TurnCall mints its own at bind
+    and this one wins, so the stored copy has to move with it or the WebRTC path
+    keeps signing with a secret the backend has forgotten.
+    """
     if backend and secret:
         generator.set_env_value(backend["service_dir"], "CALL_INIT_SECRET", secret)
+        await registry.set_call_init_secret(runtime.get_pool(), backend["agent_id"], secret)
         await generator.restart(backend["service_dir"])
 
 

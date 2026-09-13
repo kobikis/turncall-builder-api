@@ -36,7 +36,7 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
 
 _COLS = (
     "agent_id, project_id, api_key, slug, port, service_dir, status, config, "
-    "webhook_secret, tool_statuses, workspace_id, builder_token"
+    "webhook_secret, tool_statuses, workspace_id, builder_token, call_init_secret"
 )
 
 
@@ -114,8 +114,8 @@ async def record_backend(
     await pool.execute(
         """INSERT INTO agent_backends
              (agent_id, project_id, api_key, slug, port, service_dir, status, config,
-              workspace_id, builder_token)
-           VALUES ($1, $2, $3, $4, $5, $6, 'generating', $7::jsonb, $8, $9)
+              workspace_id, builder_token, call_init_secret)
+           VALUES ($1, $2, $3, $4, $5, $6, 'generating', $7::jsonb, $8, $9, $10)
            ON CONFLICT (agent_id) DO NOTHING""",
         agent_id,
         project_id,
@@ -128,8 +128,27 @@ async def record_backend(
         # ON CONFLICT DO NOTHING, so a re-registration keeps the token the
         # backend's .env already carries.
         secrets.token_urlsafe(32),
+        # Minted here rather than waiting for a phone bind: managed call-init is
+        # the only path a credential reaches a call (ADR-0020), and a browser
+        # test call has no number to mint one. A later bind replaces it with
+        # TurnCall's own and updates this row, so the two never drift.
+        secrets.token_urlsafe(32),
     )
     return await get_backend(pool, agent_id)  # type: ignore[return-value]
+
+
+async def set_call_init_secret(pool: asyncpg.Pool, agent_id: str, secret: str) -> None:
+    """Record the secret the backend's /call-init now verifies against.
+
+    A phone bind mints its own in TurnCall and overwrites the backend's .env; the
+    builder has to follow, or the WebRTC path keeps signing with a secret the
+    backend has already forgotten.
+    """
+    await pool.execute(
+        "UPDATE agent_backends SET call_init_secret = $2 WHERE agent_id = $1",
+        agent_id,
+        secret,
+    )
 
 
 async def set_status(pool: asyncpg.Pool, agent_id: str, status: str) -> None:

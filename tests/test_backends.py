@@ -3,6 +3,7 @@
 import ast
 
 from app.backends import scaffold, toolgen
+from app.backends import generator as scaffold_generator
 from app.backends.diff import tools_changed
 from app.mapper import to_create_agent_request
 
@@ -303,8 +304,12 @@ def test_the_backend_asks_the_builder_for_a_pipedream_token():
     app_py = scaffold.render(slug="a", port=9001, tools=[])["app.py"]
     assert "/integrations/token" in app_py
     assert "BUILDER_TOKEN" in app_py
-    # Cached: Pipedream tokens live an hour, a call is not the unit of anything.
-    assert "expires_at" in app_py
+    # Deliberately NOT cached. The token would keep for an hour, but the accounts
+    # ride in the same response and a reconnect mints a new account id — an
+    # hour-old copy points at one Pipedream has already deleted, and the action
+    # then fails with `not_authed`, which reads like a Slack permission problem.
+    # The builder caches the token, so this costs one local request.
+    assert "_pd_token" not in app_py
     # And no Pipedream credential is ever baked in.
     assert "PIPEDREAM_CLIENT_SECRET" not in app_py
 
@@ -534,7 +539,9 @@ def test_an_agent_with_no_automation_ships_an_empty_list():
     app_py = scaffold.render(slug="a", port=9001, tools=[])["app.py"]
     assert "async def on_call_ended" in app_py
     assert "AUTOMATIONS: list[dict] = []" in app_py
-    assert "slack_v2-post-message" not in app_py
+    # No hardcoded Action. Matched as it would appear in a rendered entry, so a
+    # comment that merely names Slack does not read as one.
+    assert "'action': 'slack_v2-post-message'" not in app_py
     assert "SLACK_CHANNEL" not in app_py
 
 
@@ -617,8 +624,13 @@ def test_a_call_ending_posts_the_summary(monkeypatch, tmp_path):
     body = run["json"]
     assert body["id"] == "slack_v2-post-message"
     assert body["external_user_id"] == "ws-1"
-    # The account rides under the app slug; the action's inputs are its siblings.
-    assert body["configured_props"]["slack_v2"] == {"authProvisionId": "apn_slack"}
+    # The account rides under the component's own prop name — `slack`, not the
+    # `slack_v2` slug. Sending it under the slug leaves the prop unset, so the
+    # action runs unauthenticated and Slack answers `not_authed` while Pipedream
+    # still returns 200. Every end-of-call Automation failed that way until this
+    # was found, and the assertion below is what would have caught it.
+    assert body["configured_props"]["slack"] == {"authProvisionId": "apn_slack"}
+    assert "slack_v2" not in body["configured_props"]
     assert body["configured_props"]["channel"] == "#sales-calls"
     text = body["configured_props"]["text"]
     # It receives the whole call.ended payload, not just a summary string.
@@ -699,3 +711,230 @@ def test_the_event_is_stored_even_when_the_automation_blows_up(monkeypatch, tmp_
         "SELECT payload FROM events"
     ).fetchall()
     assert json_mod.loads(rows[0][0])["event"] == "call.ended"
+
+
+# --- .env on regeneration ------------------------------------------------------
+#
+# Two rules that pull against each other: a live .env must keep what a bind wrote
+# into it, and a backend must still be able to acquire a key the scaffold grew
+# after it was generated. Skipping the file honoured the first and broke the
+# second, silently — an agent older than ADR-0019 had no BUILDER_TOKEN, so every
+# integration failed at the mint call with nothing visible but a Slack message
+# that never arrived.
+
+
+def test_merge_env_adds_a_key_the_scaffold_has_grown(tmp_path):
+    (tmp_path / ".env").write_text("AGENT_ID=a-1\nWEBHOOK_SECRET=s\n")
+
+    added = scaffold_generator.merge_env(
+        str(tmp_path), "AGENT_ID=new\nWEBHOOK_SECRET=new\nBUILDER_TOKEN=bt-1\n"
+    )
+
+    env = (tmp_path / ".env").read_text()
+    assert added == ["BUILDER_TOKEN"]
+    assert "BUILDER_TOKEN=bt-1" in env
+
+
+def test_merge_env_never_touches_a_value_that_is_already_there(tmp_path):
+    """A bind writes CALL_INIT_SECRET; regeneration must not undo it."""
+    (tmp_path / ".env").write_text("AGENT_ID=a-1\nCALL_INIT_SECRET=bound-secret\n")
+
+    scaffold_generator.merge_env(str(tmp_path), "AGENT_ID=regenerated\nCALL_INIT_SECRET=\n")
+
+    env = (tmp_path / ".env").read_text()
+    assert "CALL_INIT_SECRET=bound-secret" in env
+    assert "AGENT_ID=a-1" in env
+    assert "regenerated" not in env
+
+
+def test_merge_env_fills_a_key_that_is_present_but_empty(tmp_path):
+    """A backend predating the column carries the key with no value. Leaving it
+    empty is what kept Connected apps unreachable from the Test tab."""
+    (tmp_path / ".env").write_text("AGENT_ID=a-1\nCALL_INIT_SECRET=\n")
+
+    added = scaffold_generator.merge_env(str(tmp_path), "AGENT_ID=x\nCALL_INIT_SECRET=cis-1\n")
+
+    assert added == ["CALL_INIT_SECRET"]
+    env = (tmp_path / ".env").read_text()
+    assert "CALL_INIT_SECRET=cis-1" in env
+    assert "AGENT_ID=a-1" in env  # a value that exists is still never touched
+
+
+def test_merge_env_does_not_blank_a_value_with_an_empty_render(tmp_path):
+    """The render has nothing to give for an unbound agent; that must not erase
+    a secret a bind already wrote."""
+    (tmp_path / ".env").write_text("CALL_INIT_SECRET=bound-secret\n")
+
+    added = scaffold_generator.merge_env(str(tmp_path), "CALL_INIT_SECRET=\n")
+
+    assert added == []
+    assert "CALL_INIT_SECRET=bound-secret" in (tmp_path / ".env").read_text()
+
+
+def test_merge_env_writes_the_whole_file_when_there_is_none(tmp_path):
+    added = scaffold_generator.merge_env(str(tmp_path), "AGENT_ID=a-1\n")
+
+    assert added == []
+    assert (tmp_path / ".env").read_text() == "AGENT_ID=a-1\n"
+
+
+def test_merge_env_ignores_comments_and_blank_lines(tmp_path):
+    (tmp_path / ".env").write_text("# signs events\nAGENT_ID=a-1\n\n")
+
+    added = scaffold_generator.merge_env(str(tmp_path), "# a comment\nBUILDER_URL=http://b\n")
+
+    assert added == ["BUILDER_URL"]
+    assert "# a comment" not in (tmp_path / ".env").read_text()
+
+
+# Pipedream answers 200 whether or not the Action worked. The run that produced
+# the shape below returned 200 while Slack refused the post with `not_authed`,
+# and the backend logged nothing at all — a summary that never arrived was
+# indistinguishable from one that did.
+_SLACK_REFUSED = {
+    "os": [
+        {
+            "k": "error",
+            "err": {
+                "name": "WebAPIPlatformError",
+                "message": "An API error occurred: not_authed",
+                "data": {"ok": False, "error": "not_authed"},
+            },
+        }
+    ]
+}
+
+
+def _pipedream(result):
+    """Token mint as usual, then `result` from the action run."""
+
+    def responder(url, **kw):
+        if url.endswith("/integrations/token"):
+            return _Resp({"data": {
+                "access_token": "pd_tok",
+                "expires_at": 9_999_999_999.0,
+                "external_user_id": "ws-1",
+                "project_id": "proj_1",
+                "environment": "development",
+                "accounts": [{"id": "apn_slack", "app": "slack_v2"}],
+            }})
+        return _Resp(result)
+
+    return responder
+
+
+def test_an_action_refused_by_slack_is_reported(monkeypatch, tmp_path, capsys):
+    resp, _ = _events(monkeypatch, tmp_path, channel="#calls", responses=_pipedream(_SLACK_REFUSED))
+
+    assert resp.status_code == 200  # the call has ended; this never fails it
+    out = capsys.readouterr().out
+    assert "not_authed" in out
+    assert "slack_v2-post-message" in out
+
+
+def test_a_successful_action_says_nothing(monkeypatch, tmp_path, capsys):
+    """Silence has to keep meaning success, or the log is noise."""
+    _events(monkeypatch, tmp_path, channel="#calls", responses=_pipedream({"os": [], "ret": {"ok": True}}))
+
+    assert "automation:" not in capsys.readouterr().out
+
+
+def test_an_observation_that_is_not_an_error_is_not_treated_as_one(monkeypatch, tmp_path, capsys):
+    """Runs emit stdout observations too; only `k == "error"` is a failure."""
+    logs = {"os": [{"k": "stdout", "o": "posting…"}], "ret": {"ok": True}}
+    _events(monkeypatch, tmp_path, channel="#calls", responses=_pipedream(logs))
+
+    assert "automation:" not in capsys.readouterr().out
+
+
+# --- toolgen must not fabricate a third-party call ----------------------------
+#
+# A generated body that simulates success is worse than no body at all: the
+# console badges it "generated", the caller is told their booking is confirmed,
+# and nothing distinguishes it from a working integration. That is how a
+# `schedule_google_calendar_event` handler returning a made-up event id sat
+# beside a real Google Calendar integration and won the model's choice by name.
+
+
+class _Block:
+    type = "tool_use"
+    name = "tool_bodies"
+
+    def __init__(self, payload):
+        self.input = payload
+
+
+class _Resp2:
+    def __init__(self, payload):
+        self.content = [_Block(payload)]
+
+
+def test_a_tool_needing_a_service_gets_no_body():
+    from app.backends.toolgen import _parse_bodies
+
+    out = _parse_bodies(_Resp2({
+        "bodies": [{"name": "log_note", "body": "return {'ok': True}"}],
+        "needs_a_service_i_cannot_reach": ["schedule_google_calendar_event"],
+    }))
+
+    assert "log_note" in out
+    # Absent from the result means it falls through to the honest stub, and the
+    # console badges it `stub` rather than `generated`.
+    assert "schedule_google_calendar_event" not in out
+
+
+def test_a_declared_refusal_beats_a_body_written_anyway():
+    """A model that both refuses and fabricates meant the refusal."""
+    from app.backends.toolgen import _parse_bodies
+
+    out = _parse_bodies(_Resp2({
+        "bodies": [{"name": "book_it", "body": "return {'success': True, 'id': 'EVT-123'}"}],
+        "needs_a_service_i_cannot_reach": ["book_it"],
+    }))
+
+    assert out == {}
+
+
+def test_the_prompt_does_not_ask_for_a_plausible_result():
+    """It used to say "return a plausible result", which is an instruction to
+    fabricate, and is exactly what the model did."""
+    import inspect
+
+    from app.backends import toolgen
+
+    src = inspect.getsource(toolgen.generate_tool_bodies)
+    assert "plausible result" not in src
+    assert "needs_a_service_i_cannot_reach" in src
+
+
+# --- call-init tells the agent what day it is ---------------------------------
+#
+# An LLM has no clock. Asked for "a table for two today at 7pm" one booked the
+# table for 24 October 2023 — a date from its training data — and reported
+# success, because Google accepted a perfectly valid event in the past. Any rule
+# about opening days ("Tuesday to Sunday") is unenforceable without this too.
+
+
+def test_call_init_carries_todays_date(monkeypatch, tmp_path):
+    from datetime import UTC, datetime
+
+    resp = _call_init(monkeypatch, tmp_path)
+    context = resp.json()["dynamic_data"]["knowledge_context"]
+
+    assert datetime.now(UTC).strftime("%Y-%m-%d") in context
+    assert "never guess one" in context
+
+
+def test_call_init_still_carries_the_caller(monkeypatch, tmp_path):
+    """The date is added to the existing context, not instead of it."""
+    resp = _call_init(monkeypatch, tmp_path)
+
+    assert "phone number" in resp.json()["dynamic_data"]["knowledge_context"]
+
+
+def test_a_broken_timezone_does_not_fail_the_call(monkeypatch, tmp_path):
+    """A call is not the place to discover a typo in an env var."""
+    resp = _call_init(monkeypatch, tmp_path, TIMEZONE="Not/AZone")
+
+    assert resp.status_code == 200
+    assert "(UTC)" in resp.json()["dynamic_data"]["knowledge_context"]

@@ -55,6 +55,63 @@ def set_env_value(service_dir: str, key: str, value: str) -> None:
         fh.write("\n".join(lines) + "\n")
 
 
+def merge_env(service_dir: str, rendered: str) -> list[str]:
+    """Add keys the scaffold has gained since this backend was generated.
+
+    A live `.env` is not ours to rewrite: a phone bind writes CALL_INIT_SECRET
+    into it, and an operator may have edited a value by hand. Regeneration used
+    to skip the file entirely for that reason — but skipping it means a backend
+    can never acquire a key added to the template *after* it was generated.
+
+    That is not hypothetical. An agent created before ADR-0019 has no
+    BUILDER_TOKEN, so every integration it runs fails at the mint call, and the
+    only symptom is a Slack message that never arrives: the handler logs and
+    drops, and there is no Console surface for Automations.
+
+    A key with a value is never touched: a bind writes CALL_INIT_SECRET here and
+    that copy is the live one. A key that is absent, or present but empty, is
+    filled from the render when the render has something to give.
+
+    An earlier version filled only absent keys, on the reasoning that an empty
+    CALL_INIT_SECRET meant "not bound to a number yet" — a real state rather than
+    a gap. That stopped being true when the builder began minting one at creation
+    so a browser test call could reach call-init at all (ADR-0020). Now an empty
+    value is simply a backend that predates the column, and leaving it empty is
+    what keeps Connected apps unreachable from the Test tab.
+
+    Returns the keys written, for the log.
+    """
+    path = os.path.join(service_dir, ".env")
+    if not os.path.exists(path):
+        write_files(service_dir, {".env": rendered})
+        return []
+
+    with open(path) as fh:
+        existing = fh.read()
+    def _pairs(text: str) -> list[tuple[str, str]]:
+        out = []
+        for line in text.splitlines():
+            if "=" not in line or line.lstrip().startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            out.append((key.strip(), value))
+        return out
+
+    have = dict(_pairs(existing))
+    fill = {k: v for k, v in _pairs(rendered) if v.strip() and not have.get(k, "").strip()}
+    if not fill:
+        return []
+
+    kept = [
+        f"{k}={fill[k]}" if k in fill else line
+        for line, k in ((ln, ln.partition("=")[0].strip()) for ln in existing.splitlines())
+    ]
+    appended = [f"{k}={v}" for k, v in fill.items() if k not in have]
+    with open(path, "w") as fh:
+        fh.write("\n".join(kept + appended).rstrip("\n") + "\n")
+    return sorted(fill)
+
+
 async def _commit_all(service_dir: str, message: str) -> None:
     """Best-effort `git add -A && git commit` — a no-op on a clean tree."""
     await _run(_GIT + ["add", "-A"], service_dir)

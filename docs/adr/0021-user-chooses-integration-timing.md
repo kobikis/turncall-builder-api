@@ -33,7 +33,7 @@ objects rather than slugs:
    "mid_call": true,
    "call_ended": {"action": "slack_v2-post-message",
                   "args": {"channel": "#calls"},
-                  "summary_arg": "text"}},
+                  "summary_arg": "text"}},   // from the catalog, not the form
   {"app": "google_calendar", "mid_call": true}
 ]
 ```
@@ -75,14 +75,29 @@ rides in every LLM request for the length of the call. Letting a Workspace narro
 that list is safe but buys little, and it complicates the cap reasoning for no
 stated need. It remains available as a separate change.
 
-**`summary_arg` names where the summary goes, and is required.** The handler
-composes the text from the `call.ended` payload — that is derived, not configured,
-because what varies between Workspaces is where a summary goes rather than what
-it says. But the text has to land in one of the action's own inputs, and those
-are the action's to name: Slack calls it `text`, and nothing says the next catalog
-app will agree. Defaulting it would mean guessing, and a wrong guess runs the
-action with an empty body and reports success — the failure shape this ADR keeps
-refusing to ship. Required, it is a 422 instead.
+**The Workspace names a destination, never a prop.** An end-of-call Action has to
+put the summary in one of its own inputs — Slack's is `text` — so `summary_arg` is
+required in the stored config and an empty one is a 422. But it is the same
+string for every Workspace that ever picks that Action, so it is a fact about the
+Action, not a question for a person. It lives in `CATALOG` beside the pinned tool
+list and the Console fills it in.
+
+An earlier draft made it a required field on the form. It was defensible —
+guessing it would run the action with an empty body and report success, the
+failure shape this ADR keeps refusing to ship — and it was still wrong: not
+guessing does not require making someone else guess. Asking a person to type a
+constant is not configuration, it is an implementation detail that leaked into a
+form. The same reasoning retires the free-form argument editor: an Action's
+inputs are named and labelled in the catalog, so the Console asks for a Channel
+rather than for a key and a value.
+
+**The end-of-call menu is not the mid-call tool list.** `tools` is the allowlist
+the model may call; `actions` is what is worth running once a call is over, and an
+app may have one and not the other. `slack_v2-list-channels` is useful mid-call
+and meaningless afterwards. Google Calendar offers no end-of-call Action at all:
+`create-event` needs a start and an end, and a `call.ended` payload says when a
+*call* finished, not when a meeting should be. Offering it would configure
+cleanly and fail every night, which is worse than not offering it.
 
 **A bare slug still means `mid_call`.** Existing agents carry `["slack_v2"]` and
 must keep working untouched; the reader widens rather than migrating. An
@@ -93,9 +108,14 @@ upgrade turns on underneath it.
 schema for the field, and gains none. Attachment is a human act through the
 Console, and a prompt that asks for Slack cannot produce one.
 
-**Selection lives on its own Console page.** Connecting an app, disconnecting it,
-and choosing its triggers belong together on `/integrations` — which is also the
-landing page the callback already redirects to.
+**Connecting lives on its own Console page; choosing triggers stays with the
+agent.** `/integrations` is where a Workspace authorizes an app and revokes it —
+work that had no Console surface at all, and the landing page the callback
+already redirects to. Which agent uses an app, and when it runs, is written into
+that agent's config, so it belongs on the agent's Configuration tab next to
+everything else that config holds. An earlier draft of this ADR put both on
+`/integrations`; that would have needed an agent picker on a Workspace page to
+edit per-agent state, which is a worse page and a worse seam.
 
 ## This does not reopen #28
 
@@ -132,11 +152,19 @@ actions an app has or what arguments they take. Every such fact lives in the
 `CATALOG` tuple. There is no path from "a Workspace connected an app" to "here is
 what it can do" that does not go through someone editing Python.
 
-**This ADR increases that dependency.** The end-of-call action is chosen from the
-app's pinned tool list, and its arguments need per-action knowledge that exists
-nowhere in the codebase: `{"channel": ...}` works only because the scaffold
-hardcodes `slack_v2-post-message`. Adding a third app was a tuple; under this ADR
-it is a tuple plus a hand-written argument form.
+**This ADR increases that dependency, deliberately.** An end-of-call Action needs
+a label, the input its summary rides in, and its other inputs named and labelled —
+none of which the codebase could previously discover. All of it is now curated in
+`CATALOG` beside the pinned tool list. Adding a third app was a tuple; it is now a
+tuple plus an entry per Action.
+
+That is the trade, taken with open eyes: the alternative was leaving the
+knowledge with the person configuring the agent, which is what the earlier draft
+did, and it produced a form asking for a Pipedream prop name. Curating it is more
+work per app and no work at all for the Workspace. It is also the same *kind* of
+work the tool allowlist already demands, so it adds no new obligation — and when
+introspection arrives it replaces the curation without changing the config or the
+form.
 
 **Decision: keep the catalog curated, and keep the code introspection-ready.**
 The action and its arguments travel as opaque data from config to generated call
@@ -161,9 +189,18 @@ catalog does not carry, unchanged by this ADR.
 
 The automation stops being a constant, so the generator needs the integrations
 list: `render()` takes it, and the block is emitted per `call_ended` entry with
-its action and bound arguments, or not at all. The generated handler still builds
-the summary text itself — that is derived from the `call.ended` payload, not
-configured — so `args` supplies everything else the action needs.
+its action and bound arguments, or not at all.
+
+The message is assembled by the generated handler; the summary inside it is the
+agent's. TurnCall sends a written summary in the `call.ended` payload and the
+handler wraps it with who called whom, how long, and why it ended. Neither half
+is configured — what varies between Workspaces is where the message goes, not
+what it says.
+
+That wrapper is currently Slack-flavoured (`*bold*`, `_italic_`), which is
+invisible today because Slack has the only end-of-call Action. The moment a
+second one arrives it will render as literal punctuation, and the formatting will
+have to move behind the Action rather than sitting in one shared function.
 
 **Regeneration has to widen, or every automation edit is silently a no-op.**
 `PUT /agents/{agent_id}` regenerates the backend *iff `custom_tools` changed*
@@ -177,12 +214,13 @@ work.
 attached app. An end-of-call-only agent has nothing to inline, and an inline
 agent costs the call its `active_agent_id` (ADR-0020).
 
-`ConnectedApps.tsx` goes from `apps: string[]` to the object form — one row per
+`ConnectedApps.tsx` goes from `apps: string[]` to the object form — one card per
 app, with two controls that are deliberately not symmetric: a single *available
 during calls* toggle, with the app's pinned tool list shown read-only beneath it
-so the Workspace can see what the model gets; and a *when a call ends* section
-with an action dropdown over that same tool list, plus argument fields for
-whichever action is chosen.
+so the Workspace can see what the model gets; and a *when a call ends* Action
+picker, labelled from the catalog, followed by that Action's own inputs as
+labelled fields. An app with no end-of-call Action says so in words rather than
+showing an empty dropdown.
 
 ## Sequencing
 

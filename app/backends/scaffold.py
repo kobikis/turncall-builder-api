@@ -14,7 +14,7 @@ import os
 import re
 from typing import Any
 
-from ..pipedream import automations
+from ..pipedream import CATALOG, automations
 
 STUB_BODY = (
     "    # ponytail: stub — echoes args. Replace with real logic (or call your system).\n"
@@ -57,15 +57,22 @@ def _automations_literal(integrations: Any) -> str:
     Keys are written in a fixed order so an unrelated edit does not rewrite the
     file and cost a rebuild.
     """
-    entries = [
-        {
-            "app": i.app,
-            "action": i.call_ended.action,
-            "args": dict(i.call_ended.args),
-            "summary_arg": i.call_ended.summary_arg,
-        }
-        for i in automations(integrations)
-    ]
+    entries = []
+    for i in automations(integrations):
+        app = CATALOG.get(i.app)
+        action = next((a for a in app.actions if a.id == i.call_ended.action), None) if app else None
+        entries.append(
+            {
+                "app": i.app,
+                # Resolved here rather than stored: the prop name is the
+                # component's, identical for every Workspace, and nothing a
+                # config should be able to get wrong.
+                "app_prop": action.app_prop if action else i.app,
+                "action": i.call_ended.action,
+                "args": dict(i.call_ended.args),
+                "summary_arg": i.call_ended.summary_arg,
+            }
+        )
     if not entries:
         return "AUTOMATIONS: list[dict] = []"
     body = "".join(f"    {e!r},\n" for e in entries)
@@ -109,10 +116,13 @@ def render(
     # Where this backend asks for a Pipedream token (ADR-0019). Container-to-
     # container, so the host gateway — not the console's origin.
     builder_url = os.environ.get("BUILDER_URL", "http://host.docker.internal:8000")
+    # One deployment, one clock. Set AGENT_TIMEZONE where the builder runs and
+    # every agent it generates reasons in that zone.
+    timezone = os.environ.get("AGENT_TIMEZONE", "UTC")
     return {
         "app.py": render_app_py(tools, tool_bodies, integrations),
         # httpx: this backend calls builder-api for a Pipedream access token.
-        "requirements.txt": "fastapi>=0.115\nuvicorn[standard]>=0.30\nhttpx>=0.27\n",
+        "requirements.txt": "fastapi>=0.115\nuvicorn[standard]>=0.30\nhttpx>=0.27\ntzdata>=2024.1\n",
         "Dockerfile": _DOCKERFILE,
         "docker-compose.yml": _COMPOSE.format(slug=slug, port=port),
         ".env": _ENV.format(
@@ -122,6 +132,7 @@ def render(
             console_origin=console_origin,
             builder_token=builder_token,
             builder_url=builder_url,
+            timezone=timezone,
         ),
         ".env.example": _ENV_EXAMPLE,
         ".gitignore": "__pycache__/\n*.pyc\nevents.db\n.env\n",
@@ -144,6 +155,8 @@ import os
 import sqlite3
 import time
 from contextlib import closing
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -154,24 +167,26 @@ AGENT_ID = os.environ.get("AGENT_ID", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")      # signs events + tool calls
 CALL_INIT_SECRET = os.environ.get("CALL_INIT_SECRET", "")  # set when a number binds with caller info
 CONSOLE_ORIGIN = os.environ.get("CONSOLE_ORIGIN", "http://localhost:5173")
+TIMEZONE = os.environ.get("TIMEZONE", "UTC")   # the restaurant's clock, not the server's
 BUILDER_URL = os.environ.get("BUILDER_URL", "")       # where to ask for a Pipedream token
 BUILDER_TOKEN = os.environ.get("BUILDER_TOKEN", "")   # this backend's own credential
 
 
-# Cached until it expires — Pipedream tokens live an hour and a call is not the
-# unit of anything here.
-_pd_token = {{"access_token": "", "expires_at": 0.0}}
-
-
 async def pipedream_token() -> dict:
-    """A Pipedream access token, plus the tenant fields its headers need.
+    """A Pipedream access token, the tenant fields its headers need, and the
+    accounts this Workspace has connected.
 
     This backend deliberately holds no Pipedream credential of its own: one
     revocable copy lives in the builder (ADR-0018/0019), and this exchanges
     BUILDER_TOKEN for a short-lived access token.
+
+    Not cached. The token would keep for an hour, but the *accounts* come back in
+    the same response and they do not: reconnecting an app mints a new account id
+    and destroys the old one. Caching them turned a reconnect into an hour of
+    `not_authed` — an error that reads like a Slack permission problem and is
+    really a stale id. The builder caches the token itself, so this costs one
+    local request per Automation.
     """
-    if _pd_token["access_token"] and _pd_token["expires_at"] > time.time() + 30:
-        return _pd_token
     if not (BUILDER_URL and BUILDER_TOKEN):
         raise RuntimeError(
             "BUILDER_URL / BUILDER_TOKEN are not set — integrations are off for "
@@ -183,8 +198,7 @@ async def pipedream_token() -> dict:
             headers={{"Authorization": "Bearer " + BUILDER_TOKEN}},
         )
     r.raise_for_status()
-    _pd_token.update(r.json()["data"])
-    return _pd_token
+    return r.json()["data"]
 
 
 def _db():
@@ -243,7 +257,26 @@ app.add_middleware(
 {automations}
 
 
-async def run_pipedream_action(action_id: str, app: str, props: dict) -> dict | None:
+def _action_error(result: dict) -> str | None:
+    """What the third-party API refused, if it did.
+
+    Pipedream answers 200 whether or not the Action worked — a run that Slack
+    rejected comes back as a successful HTTP call whose observations carry the
+    error. Reading only the status code is why a summary that never arrived
+    looked exactly like one that did.
+    """
+    for observation in result.get("os") or []:
+        if observation.get("k") != "error":
+            continue
+        err = observation.get("err") or {{}}
+        data = err.get("data") or {{}}
+        return str(data.get("error") or err.get("message") or "the action failed")
+    return None
+
+
+async def run_pipedream_action(
+    action_id: str, app: str, app_prop: str, props: dict
+) -> dict | None:
     """Run one Pipedream action as this Workspace. None on any failure.
 
     Holds no credential of its own: the access token comes from the builder
@@ -268,13 +301,21 @@ async def run_pipedream_action(action_id: str, app: str, props: dict) -> dict | 
                     # The account rides under the app slug; the action's own
                     # inputs are its siblings.
                     "configured_props": {{
-                        app: {{"authProvisionId": account["id"]}},
+                        # Keyed by the component's prop name, not the app slug —
+                        # `slack_v2-post-message` declares `slack`, and the wrong
+                        # key means the action runs with no credential at all.
+                        app_prop: {{"authProvisionId": account["id"]}},
                         **props,
                     }},
                 }},
             )
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+        refused = _action_error(result)
+        if refused:
+            print(f"automation: {{app}} refused {{action_id}} ({{refused}})")
+            return None
+        return result
     except Exception as exc:  # noqa: BLE001
         # ponytail: log and move on. Retry policy and failure surfacing are
         # deliberately out of scope (ADR-0018) — the call has already ended, and
@@ -311,6 +352,7 @@ async def on_call_ended(payload: dict) -> None:
         await run_pipedream_action(
             entry["action"],
             entry["app"],
+            entry["app_prop"],
             {{**entry["args"], entry["summary_arg"]: summary}},
         )
 
@@ -360,6 +402,28 @@ async def _inline_agent() -> dict | None:
         return None
 
 
+def _now_line() -> str:
+    """What day it is, for a model that cannot know.
+
+    An LLM has no clock. Asked for "a table for two today at 7pm" it will invent
+    a date from its training data — one booking landed in October 2023 — and any
+    rule about opening days ("Tuesday to Sunday") is unenforceable without this.
+    It belongs in call-init rather than the system prompt because it is true per
+    call, not per agent.
+    """
+    try:
+        now = datetime.now(ZoneInfo(TIMEZONE))
+        zone = TIMEZONE
+    except Exception:  # noqa: BLE001 — a bad or missing zone must not fail a call
+        now = datetime.now(UTC)
+        zone = "UTC"
+    return (
+        f"Right now it is {{now:%A}}, {{now:%d %B %Y}}, {{now:%H:%M}} ({{zone}}). "
+        f"Today's date is {{now:%Y-%m-%d}}. Work out any date the caller implies "
+        f'("today", "tomorrow", "Friday") from this, and never guess one.'
+    )
+
+
 @app.post("/call-init")
 async def call_init(request: Request) -> dict:
     """Managed call-init (ADR-0008): TurnCall asks which agent answers this call
@@ -375,7 +439,10 @@ async def call_init(request: Request) -> dict:
     payload = json.loads(raw).get("payload", {{}})
     caller = (payload.get("customer") or {{}}).get("number") or "unknown"
     # ponytail: stub lookup — replace with your CRM/database lookup for this caller.
-    context = f"The caller\'s phone number is {{caller}}. No CRM record loaded (stub)."
+    context = (
+        _now_line()
+        + f" The caller\'s phone number is {{caller}}. No CRM record loaded (stub)."
+    )
     agent = await _inline_agent()
     return {{
         # Exactly one of these: TurnCall ignores an inline agent when agent_id is
@@ -455,6 +522,9 @@ WEBHOOK_SECRET=
 CALL_INIT_SECRET=
 # Origin allowed to read GET /events. The console, or your own dashboard.
 CONSOLE_ORIGIN=http://localhost:5173
+# The clock the agent reasons in — call-init tells it today's date in this zone.
+# An IANA name, e.g. Asia/Jerusalem. Wrong or missing falls back to UTC.
+TIMEZONE=UTC
 # Where to ask for a Pipedream access token, and this backend's own credential
 # for asking (ADR-0019). This backend holds no Pipedream credential of its own.
 # Distinct from WEBHOOK_SECRET on purpose: that one is shared with TurnCall.
@@ -465,6 +535,7 @@ BUILDER_TOKEN=
 _ENV = """AGENT_ID={agent_id}
 WEBHOOK_SECRET={webhook_secret}
 CALL_INIT_SECRET={call_init_secret}
+TIMEZONE={timezone}
 CONSOLE_ORIGIN={console_origin}
 BUILDER_URL={builder_url}
 BUILDER_TOKEN={builder_token}

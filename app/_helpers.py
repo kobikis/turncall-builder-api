@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import runtime
 from .backends import registry
@@ -21,54 +21,119 @@ class _ToolShape(BaseModel):
     name: str
 
 
-class _CallEndedShape(BaseModel):
-    """The end-of-call half of an attached app (ADR-0021)."""
+def _check_needs_integrations(value: Any) -> None:
+    """`needs_integrations` is a request, not an attachment.
 
-    model_config = ConfigDict(extra="allow")
-    action: str
-    args: dict[str, Any] = Field(default_factory=dict)
-    # Required, not defaulted: the handler composes a summary and has to put it
-    # somewhere. Guessing wrong produces an action that runs with an empty body
-    # and reports success, which is the failure this design keeps refusing to
-    # ship. An explicit name makes a wrong one a 422 instead.
-    summary_arg: str = Field(min_length=1)
+    Validated so a typo surfaces as a 422 instead of a console badge naming an
+    app nobody can connect. It grants nothing: the mapper never forwards it, and
+    only `integrations` puts a tool in front of a model.
+    """
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("The apps an agent needs must be a list of app names.")
+    unknown = [v for v in value if v not in CATALOG]
+    if unknown:
+        known = ", ".join(a.name for a in CATALOG.values())
+        raise ValueError(
+            f"{unknown[0]} is not an app this build can connect. Choose one of: {known}."
+        )
 
 
-class _IntegrationShape(BaseModel):
-    """An attached app in the object form. A bare slug is also accepted (see
-    `_AgentConfigShape.integrations`) and means mid-call only."""
+def _check_custom_tools_do_not_shadow(config: dict[str, Any]) -> None:
+    """Refuse a custom tool that does a Connected app's job.
 
-    model_config = ConfigDict(extra="allow")
-    app: str
-    mid_call: bool = False
-    call_ended: _CallEndedShape | None = None
-
-    @model_validator(mode="after")
-    def _usable(self) -> "_IntegrationShape":
-        # An entry with neither trigger does nothing. Silently storing it would
-        # read to a Workspace as "attached" while no tool is exposed and no
-        # summary is posted, so it is refused at the edge instead.
-        if not self.mid_call and self.call_ended is None:
+    A generated handler holds no third-party credential, so one written for work
+    an integration already does cannot succeed — and it competes with the real
+    tool for the model's attention at call time, usually winning on name. The
+    builder is told to use `needs_integrations` instead; this is what happens
+    when it does it anyway.
+    """
+    for tool in config.get("custom_tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        text = f"{tool.get('name', '')} {tool.get('description', '')}".lower()
+        for app in CATALOG.values():
+            if app.name.lower() not in text:
+                continue
             raise ValueError(
-                f"integration {self.app!r} has no trigger — set mid_call or call_ended"
+                f"The tool {tool.get('name')!r} says it does {app.name}'s work, but a "
+                f"generated tool has no {app.name} credentials and cannot. Connect "
+                f"{app.name} on the Integrations page and attach it to this agent "
+                f"instead."
             )
-        # Only the object form is checked against the catalog: a bare slug is the
-        # legacy shape and validating it now would 422 an edit to an agent that
-        # has been working, over a field the edit did not touch.
-        app = CATALOG.get(self.app)
+
+
+def _check_integrations(value: Any) -> None:
+    """Validate `config.integrations`, in sentences a person can act on.
+
+    Deliberately hand-written rather than a pydantic shape. The field accepts a
+    bare slug or an object, and expressing that as `list[str | Model]` made every
+    mistake report twice — once for the branch that was never going to match —
+    inside a message naming private classes and linking to pydantic's docs. What
+    a Workspace needs to read is which app is wrong and what to do about it.
+    """
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise ValueError("Connected apps must be a list.")
+
+    for position, entry in enumerate(value, start=1):
+        # A bare slug is the legacy shape and is left unchecked: validating it
+        # now would refuse an edit to an agent that has been working, over a
+        # field the edit did not touch.
+        if isinstance(entry, str):
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError(f"Connected app #{position} is not an app.")
+
+        slug = entry.get("app")
+        app = CATALOG.get(slug) if isinstance(slug, str) else None
         if app is None:
+            known = ", ".join(a.name for a in CATALOG.values())
             raise ValueError(
-                f"unknown app {self.app!r} — choose from {sorted(CATALOG)}"
+                f"{slug or f'Connected app #{position}'} is not an app this build "
+                f"can connect. Choose one of: {known}."
             )
-        if self.call_ended and self.call_ended.action not in app.tools:
-            # A wrong action is the one failure this whole change cannot afford
-            # to be quiet about: the handler logs and drops, so it would look
-            # exactly like a call that ended with nothing to say.
+
+        raw = entry.get("call_ended")
+        if not entry.get("mid_call") and raw is None:
             raise ValueError(
-                f"{self.call_ended.action!r} is not an action of {self.app!r} — "
-                f"choose from {sorted(app.tools)}"
+                f"{app.name} is attached but set to do nothing. Turn on "
+                f'"available during calls", pick something for when a call ends, '
+                f"or remove it."
             )
-        return self
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError(f"{app.name}: the end-of-call setting is malformed.")
+
+        action = next((a for a in app.actions if a.id == raw.get("action")), None)
+        if action is None:
+            offered = ", ".join(a.label for a in app.actions)
+            raise ValueError(
+                f"{app.name} cannot do that when a call ends. "
+                + (f"Choose one of: {offered}." if offered else "It offers nothing to run.")
+            )
+        # Unlike the rest, this one is not a typo a Workspace can see: the
+        # Console fills it from the catalog, so an empty one means the form sent
+        # something it should not have.
+        if not str(raw.get("summary_arg") or "").strip():
+            raise ValueError(
+                f'{app.name}: "{action.label}" has nowhere to put the call summary.'
+            )
+        args = raw.get("args") or {}
+        missing = [
+            i.label
+            for i in action.inputs
+            if not str((args or {}).get(i.name) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                f'"{action.label}" needs a {missing[0]} before it can run.'
+                if len(missing) == 1
+                else f'"{action.label}" still needs: {", ".join(missing)}.'
+            )
 
 
 class _AgentConfigShape(BaseModel):
@@ -87,8 +152,7 @@ class _AgentConfigShape(BaseModel):
     stt: dict[str, Any] | None = None
     analysis: dict[str, Any] | None = None
     custom_tools: list[_ToolShape] | None = None
-    # `str` first so a legacy bare slug stays a slug rather than being coerced.
-    integrations: list[str | _IntegrationShape] | None = None
+    integrations: list[Any] | None = None
 
 
 def _validate_agent_config(config: dict[str, Any]) -> None:
@@ -99,7 +163,33 @@ def _validate_agent_config(config: dict[str, Any]) -> None:
     try:
         _AgentConfigShape.model_validate(config)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid agent config: {exc}") from exc
+        raise HTTPException(status_code=422, detail=_readable(exc)) from exc
+    try:
+        _check_integrations(config.get("integrations"))
+        _check_needs_integrations(config.get("needs_integrations"))
+        _check_custom_tools_do_not_shadow(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _readable(exc: ValidationError) -> str:
+    """A pydantic ValidationError as one line a person can act on.
+
+    The default rendering names private model classes, prints the offending
+    value back, and links to pydantic's documentation — three things a Workspace
+    cannot use and should not have to read.
+    """
+    seen: dict[str, None] = {}
+    for err in exc.errors():
+        # Drop pydantic's internal path segments (union tags, `function-after[…]`)
+        # and keep the field names a reader would recognise from the form.
+        path = ".".join(
+            str(part)
+            for part in err["loc"]
+            if not (isinstance(part, str) and ("[" in part or part in {"str", "dict"}))
+        )
+        seen[f"{path}: {err['msg']}" if path else err["msg"]] = None
+    return "; ".join(seen) or "The configuration is not valid."
 
 
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:

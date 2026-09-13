@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from deepagents import create_deep_agent
+
+from .pipedream import CATALOG
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from langchain.agents.structured_output import ToolStrategy
 
@@ -151,6 +153,15 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
             "the user explicitly provides one (custom tools then POST to "
             "{server_url}/tools/{name}). Never ask for it; omit to use the "
             "generated backend.",
+        },
+        "needs_integrations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "App slugs this agent needs a Connected app for, e.g. "
+            "['google_calendar']. This ATTACHES NOTHING — attaching is the "
+            "workspace's decision. It records the requirement so the console can "
+            "tell them what to connect. Use it instead of writing a custom_tool "
+            "for work one of these apps already does.",
         },
         "custom_tools": {
             "type": "array",
@@ -395,6 +406,23 @@ This is the OPPOSITE of how you talk in the console. Your numbered rounds are \
 for a text UI that the user reads; never copy that style into the agent's \
 system_prompt."""
 
+# What every call hands the agent before it says a word. Discovered the hard
+# way: an agent asked for "a table today at seven" booked it into October 2023,
+# because an LLM has no clock and the prompt never told it one was coming.
+_D_CALL_CONTEXT = """Every call starts by handing the agent context it does not \
+have to work out: the current date, the current time, the timezone, and the \
+caller's number when the channel supplies one. Write the system_prompt to USE \
+that.
+
+- An agent that takes a date from a caller ("today", "tomorrow", "Friday") must \
+work it out from the date it was given, and never guess one. Say so in the \
+prompt. Without that line it invents a date from its training data, years in \
+the past, and every booking lands there.
+- Opening days and hours are only enforceable once it knows what day it is — so \
+a prompt with "Tuesday to Sunday" in it needs this line too.
+- Never write today's date, or a year, into the system_prompt. A prompt is \
+written once and the date changes every night."""
+
 _D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
 'aura-2-helena-en'. Enable end_call/transfer_call only when the use case needs \
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
@@ -408,6 +436,48 @@ _D_KNOWLEDGE = """Knowledge base: the user can attach documents (a menu, price \
 list, policy, FAQ) to the agent, and the agent gets their full contents at call \
 time. NEVER ask the user to paste a document's contents — this holds before \
 anything is attached, which is exactly when someone says "I'll upload our menu"."""
+
+def _integrations_directive() -> str:
+    """What the Workspace can connect, so the builder stops reinventing it.
+
+    The builder has no schema for `integrations` and gains none — attaching an
+    app is a human act (ADR-0021) and a prompt must never be able to perform one.
+    But not *seeing* them was its own bug: asked for a restaurant agent, the
+    builder invented a `schedule_google_calendar_event` custom tool, toolgen
+    wrote it a body that simulated success, and it sat next to the real
+    Calendar integration winning the model's choice by name. Read-only knowledge
+    is what stops that; it grants no new power.
+
+    Tools are named in full, prefix included, because the prefix is part of the
+    name the agent actually sees: an agent told to "use create-event" is told to
+    use nothing. That one cost a live call.
+
+    Built from the catalog so a third app needs no edit here.
+    """
+    apps = "; ".join(
+        f"{app.name} ({', '.join(app.tools)})" for app in CATALOG.values()
+    )
+    return (
+        "Connected apps are first-class integrations, not work for you. This build "
+        f"can connect: {apps}. Those are the exact tool names the agent sees at "
+        "call time — when the system_prompt tells it to use one, write the name "
+        "in full, prefix included. A prompt that says \"use create-event\" names "
+        "nothing the agent has. "
+        "When an agent needs one of these, rely on the "
+        "integration and say so in plain language — NEVER write a custom_tool that "
+        "duplicates it. A custom tool cannot reach these services (it has no "
+        "credentials), so one written anyway can only pretend to work, and it will "
+        "compete with the real integration for the model's attention at call time. "
+        "You cannot attach an app yourself: a workspace admin connects it on the "
+        "Integrations page and picks it per agent. When an agent needs one, put its "
+        "slug in `needs_integrations` and say so in plain language — that records "
+        "the requirement for them. Then build the rest of the agent around it. "
+        "Before writing a system_prompt that leans on one of these apps, open the "
+        "connected-apps skill: what the prompt has to say for the app to actually "
+        "work is specific to that app, and leaving it out yields an agent that "
+        "configures cleanly and fails on the call."
+    )
+
 
 _CLOSING = """Always respond by calling the compose tool."""
 
@@ -440,9 +510,11 @@ def build_system_prompt(
     parts += [
         _FINALIZE,
         _D_VOICE,
+        _D_CALL_CONTEXT,
         _D_DEFAULTS,
         _D_PIPELINE,
         _D_KNOWLEDGE,
+        _integrations_directive(),
     ]
 
     if knowledge_docs:
