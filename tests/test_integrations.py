@@ -630,4 +630,8 @@ def test_options_need_no_credential_to_fail_politely(client, mocks):
         "/integrations/google_calendar/options/calendarId", headers=WS_HEADER
     )
     assert resp.status_code == 503
-    assert "PIPEDREAM_CLIENT_ID" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "PIPEDREAM_CLIENT_ID" in detail
+    # It has to say where to go next. "Not configured" alone sends someone
+    # hunting through settings.py for the full list.
+    assert "docs/pipedream-setup.md" in detail

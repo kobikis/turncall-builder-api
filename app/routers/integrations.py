@@ -45,7 +45,9 @@ async def _credential() -> pipedream.Credential:
         raise HTTPException(
             status_code=503,
             detail="Integrations are not configured — set PIPEDREAM_CLIENT_ID, "
-            "PIPEDREAM_CLIENT_SECRET and PIPEDREAM_PROJECT_ID and restart.",
+            "PIPEDREAM_CLIENT_SECRET, PIPEDREAM_PROJECT_ID, "
+            "PIPEDREAM_REDIRECT_URI and PIPEDREAM_ENCRYPTION_KEY, then rebuild "
+            "the api container. See docs/pipedream-setup.md.",
         )
     return cred
 
