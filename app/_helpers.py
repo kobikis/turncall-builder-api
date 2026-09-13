@@ -27,6 +27,11 @@ class _CallEndedShape(BaseModel):
     model_config = ConfigDict(extra="allow")
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
+    # Required, not defaulted: the handler composes a summary and has to put it
+    # somewhere. Guessing wrong produces an action that runs with an empty body
+    # and reports success, which is the failure this design keeps refusing to
+    # ship. An explicit name makes a wrong one a 422 instead.
+    summary_arg: str = Field(min_length=1)
 
 
 class _IntegrationShape(BaseModel):

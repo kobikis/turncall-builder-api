@@ -101,6 +101,10 @@ class CallEnded:
 
     action: str
     args: dict[str, Any]
+    # Which of the action's inputs receives the summary the handler composes.
+    # Named rather than assumed because it is the action's own prop: Slack calls
+    # it `text`, and nothing says the next catalog app will agree.
+    summary_arg: str
 
 
 @dataclass(frozen=True)
@@ -137,8 +141,11 @@ def parse_integrations(value: Any) -> list[Integration]:
         call_ended = None
         if isinstance(raw, dict) and isinstance(raw.get("action"), str) and raw["action"]:
             args = raw.get("args")
+            summary_arg = raw.get("summary_arg")
             call_ended = CallEnded(
-                action=raw["action"], args=args if isinstance(args, dict) else {}
+                action=raw["action"],
+                args=args if isinstance(args, dict) else {},
+                summary_arg=summary_arg if isinstance(summary_arg, str) else "",
             )
         out.append(
             Integration(

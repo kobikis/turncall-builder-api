@@ -19,6 +19,7 @@ SLACK_SUMMARY = {
     "call_ended": {
         "action": "slack_v2-post-message",
         "args": {"channel": "#calls"},
+        "summary_arg": "text",
     },
 }
 
@@ -53,7 +54,7 @@ class TestReader:
     def test_args_default_to_empty_rather_than_none(self):
         """The generated handler splats them; None would be a TypeError at the
         end of a call, where nothing is watching."""
-        [entry] = parse_integrations([{"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message"}}])
+        [entry] = parse_integrations([{"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "summary_arg": "text"}}])
         assert entry.call_ended.args == {}
 
     def test_unreadable_entries_are_skipped_not_raised_on(self):
@@ -119,13 +120,13 @@ class TestValidation:
         """The handler logs and drops, so a wrong action looks exactly like a
         call that ended with nothing to say."""
         detail = self._reject(
-            [{"app": "slack_v2", "call_ended": {"action": "slack_v2-delete-everything"}}]
+            [{"app": "slack_v2", "call_ended": {"action": "slack_v2-delete-everything", "summary_arg": "text"}}]
         )
         assert "is not an action of" in detail
 
     def test_another_apps_action_is_refused(self):
         detail = self._reject(
-            [{"app": "slack_v2", "call_ended": {"action": "google_calendar-create-event"}}]
+            [{"app": "slack_v2", "call_ended": {"action": "google_calendar-create-event", "summary_arg": "text"}}]
         )
         assert "is not an action of" in detail
 
@@ -170,12 +171,12 @@ class TestRegeneration:
         assert not automations_changed(old, new)
 
     def test_arg_key_order_is_not_a_change(self):
-        a = {"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "args": {"channel": "#c", "thread": "1"}}}
-        b = {"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "args": {"thread": "1", "channel": "#c"}}}
+        a = {"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "args": {"channel": "#c", "thread": "1"}, "summary_arg": "text"}}
+        b = {"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "args": {"thread": "1", "channel": "#c"}, "summary_arg": "text"}}
         assert not automations_changed({"integrations": [a]}, {"integrations": [b]})
 
     def test_attachment_order_is_not_a_change(self):
-        cal = {"app": "google_calendar", "call_ended": {"action": "google_calendar-create-event", "args": {}}}
+        cal = {"app": "google_calendar", "call_ended": {"action": "google_calendar-create-event", "args": {}, "summary_arg": "summary"}}
         old = {"integrations": [SLACK_SUMMARY, cal]}
         new = {"integrations": [cal, SLACK_SUMMARY]}
         assert not automations_changed(old, new)

@@ -474,10 +474,27 @@ def _events(monkeypatch, tmp_path, *, event="call.ended", payload=None, channel=
     monkeypatch.setenv("BUILDER_TOKEN", "bt-1")
     monkeypatch.chdir(tmp_path)
 
-    files = scaffold.render(slug="x-1", port=9001, tools=[], agent_id="agent-123")
+    # `channel` configures an Automation now (ADR-0021) rather than being patched
+    # into the rendered module: the whole point is that it comes from config.
+    integrations = (
+        [
+            {
+                "app": "slack_v2",
+                "call_ended": {
+                    "action": "slack_v2-post-message",
+                    "args": {"channel": channel},
+                    "summary_arg": "text",
+                },
+            }
+        ]
+        if channel
+        else None
+    )
+    files = scaffold.render(
+        slug="x-1", port=9001, tools=[], agent_id="agent-123", integrations=integrations
+    )
     ns: dict = {}
     exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
-    ns["SLACK_CHANNEL"] = channel
     calls: list = []
 
     def _respond(url, **kw):
@@ -511,13 +528,74 @@ def _events(monkeypatch, tmp_path, *, event="call.ended", payload=None, channel=
     return resp, calls
 
 
-def test_the_scaffold_ships_a_call_ended_automation_with_the_action_filled_in():
+def test_an_agent_with_no_automation_ships_an_empty_list():
+    """The dispatch is always there; what it runs comes from config (ADR-0021).
+    Before that, every backend carried a hardcoded Slack stub and a TODO."""
     app_py = scaffold.render(slug="a", port=9001, tools=[])["app.py"]
     assert "async def on_call_ended" in app_py
-    # The Action is pre-filled; only the target is left to the developer.
-    assert "slack_v2-post-message" in app_py
-    assert 'SLACK_CHANNEL = ""' in app_py
-    assert "TODO" in app_py
+    assert "AUTOMATIONS: list[dict] = []" in app_py
+    assert "slack_v2-post-message" not in app_py
+    assert "SLACK_CHANNEL" not in app_py
+
+
+def test_a_configured_automation_is_rendered_into_the_list():
+    app_py = scaffold.render(
+        slug="a",
+        port=9001,
+        tools=[],
+        integrations=[
+            {
+                "app": "slack_v2",
+                "call_ended": {
+                    "action": "slack_v2-post-message",
+                    "args": {"channel": "#calls"},
+                    "summary_arg": "text",
+                },
+            }
+        ],
+    )["app.py"]
+    assert "'action': 'slack_v2-post-message'" in app_py
+    assert "'channel': '#calls'" in app_py
+    assert "'summary_arg': 'text'" in app_py
+
+
+def test_a_mid_call_only_attachment_generates_no_automation():
+    """Attaching an app for its tools must not also post at the end of a call."""
+    app_py = scaffold.render(
+        slug="a", port=9001, tools=[], integrations=["slack_v2"]
+    )["app.py"]
+    assert "AUTOMATIONS: list[dict] = []" in app_py
+
+
+def test_an_arg_cannot_break_out_of_the_generated_literal():
+    """The list is rendered as source, so a quote-bearing value is the obvious
+    way to end up with a backend that will not import."""
+    import ast
+
+    app_py = scaffold.render(
+        slug="a",
+        port=9001,
+        tools=[],
+        integrations=[
+            {
+                "app": "slack_v2",
+                "call_ended": {
+                    "action": "slack_v2-post-message",
+                    "args": {"channel": "'; import os  #"},
+                    "summary_arg": "text",
+                },
+            }
+        ],
+    )["app.py"]
+    tree = ast.parse(app_py)  # a broken literal would raise here
+    [assigned] = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AnnAssign)
+        and getattr(n.target, "id", None) == "AUTOMATIONS"
+    ]
+    # The value survives as data — it never becomes syntax.
+    assert ast.literal_eval(assigned)[0]["args"]["channel"] == "'; import os  #"
 
 
 def test_a_call_ending_posts_the_summary(monkeypatch, tmp_path):
@@ -559,7 +637,7 @@ def test_it_holds_no_credential_and_asks_the_builder_for_a_token(monkeypatch, tm
 
 
 def test_an_untouched_automation_does_nothing(monkeypatch, tmp_path):
-    """An agent whose handler was never edited must post nothing and fail no call."""
+    """An agent with no Automation configured must post nothing and fail no call."""
     resp, calls = _events(monkeypatch, tmp_path, channel="")
     assert resp.status_code == 200
     assert calls == []
