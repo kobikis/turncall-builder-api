@@ -577,3 +577,57 @@ def test_a_listing_failure_does_not_cost_the_backend_its_token(client, mocks):
 
     assert data["access_token"] == "pd_live_token"
     assert data["accounts"] == []
+
+
+# --- choosing an input's value rather than typing it --------------------------
+
+
+def test_the_catalog_says_which_inputs_are_chosen(client, mocks):
+    """The Console needs to know before it renders: a picker for the ones with
+    a list behind them, a text field for the rest."""
+    rows = client.get("/integrations/catalog", headers=WS_HEADER).json()["data"]
+    by_app = {r["app"]: r for r in rows}
+    calendar = by_app["google_calendar"]["actions"][0]
+    inputs = {i["name"]: i["options"] for i in calendar["inputs"]}
+    assert inputs["calendarId"] is True
+    assert inputs["summary"] is False, "an event title is typed, not chosen"
+
+
+def test_options_are_fetched_for_this_workspace(client, mocks):
+    _configured(mocks)
+    mocks.pipedream.input_options.return_value = [
+        {"value": "family025@group.calendar.google.com", "label": "Family"}
+    ]
+    resp = client.get(
+        "/integrations/google_calendar/options/calendarId", headers=WS_HEADER
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["label"] == "Family"
+    # Scoped: another Workspace's calendars are not reachable from here.
+    assert mocks.pipedream.input_options.await_args.kwargs["workspace_id"] == (
+        TEST_WORKSPACE_ID
+    )
+
+
+def test_a_failed_lookup_is_a_message_not_a_500(client, mocks):
+    """The Console falls back to a text field on this, so it has to be an
+    answer it can read — not a traceback."""
+    _configured(mocks)
+    mocks.pipedream.input_options.side_effect = pipedream.PipedreamError(
+        "No Google Calendar account is connected yet."
+    )
+    resp = client.get(
+        "/integrations/google_calendar/options/calendarId", headers=WS_HEADER
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "No Google Calendar account is connected yet."
+
+
+def test_options_need_no_credential_to_fail_politely(client, mocks):
+    """Integrations unconfigured: 503 that names the missing settings, the same
+    as every other endpoint here."""
+    resp = client.get(
+        "/integrations/google_calendar/options/calendarId", headers=WS_HEADER
+    )
+    assert resp.status_code == 503
+    assert "PIPEDREAM_CLIENT_ID" in resp.json()["detail"]

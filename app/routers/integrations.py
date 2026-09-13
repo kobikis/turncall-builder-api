@@ -86,7 +86,15 @@ async def catalog(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
                         "label": action.label,
                         "summary_arg": action.summary_arg,
                         "inputs": [
-                            {"name": i.name, "label": i.label, "placeholder": i.placeholder}
+                            {
+                                "name": i.name,
+                                "label": i.label,
+                                "placeholder": i.placeholder,
+                                # Chosen from a list rather than typed. The
+                                # values are per-account, so the Console fetches
+                                # them from /options when it needs them.
+                                "options": bool(i.options_action),
+                            }
                             for i in action.inputs
                         ],
                     }
@@ -96,6 +104,30 @@ async def catalog(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
             for app in pipedream.CATALOG.values()
         ],
     }
+
+
+@router.get("/{app}/options/{prop}")
+async def input_options(
+    app: str, prop: str, ctx: AuthContext = Depends(require_member)
+) -> dict[str, Any]:
+    """What this Workspace may choose for one catalog input.
+
+    Its own endpoint rather than part of `/catalog` because the answer is
+    per-account and per-request: which calendars exist belongs to the Workspace
+    and changes without telling us, while the catalog is the same for everyone.
+
+    A failure here is never fatal — the Console falls back to a text field, so
+    an app the Workspace has not connected yet, or a third party having a bad
+    morning, costs the picker and not the form.
+    """
+    cred = await _credential()
+    try:
+        options = await pipedream.input_options(
+            cred, workspace_id=ctx.workspace_id, app=app, prop=prop
+        )
+    except pipedream.PipedreamError as exc:
+        raise _fail(exc) from exc
+    return {"success": True, "data": options}
 
 
 @router.get("")

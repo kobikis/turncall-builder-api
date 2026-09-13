@@ -47,6 +47,20 @@ class CatalogInput:
     name: str
     label: str
     placeholder: str = ""
+    # An Action that lists the values this input accepts for a connected
+    # account. Set = the Console offers a picker instead of a text field, which
+    # is the only defence against an opaque identifier: a Google calendar ID
+    # differing from the right one by a single character is accepted by the
+    # form, refused by Google, and shows up as an entry that never appears.
+    options_action: str = ""
+    # Where the value and the human-readable name live in each returned item.
+    option_value: str = "id"
+    option_label: str = "name"
+    # The key holding the list, when the Action returns an object rather than
+    # one. Not a guess: `google_calendar-list-calendars` answers with a list and
+    # `slack_v2-list-channels` answers with `{"channels": [...]}`, so two apps
+    # were already enough to need this.
+    option_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,6 +152,9 @@ CATALOG = {
                             name="channel",
                             label="Channel",
                             placeholder="#sales-calls",
+                            options_action="slack_v2-list-channels",
+                            option_root="channels",
+                            option_label="name",
                         ),
                     ),
                 ),
@@ -179,8 +196,10 @@ CATALOG = {
                         # is watching. Ask for the thing it actually wants.
                         CatalogInput(
                             name="calendarId",
-                            label="Calendar ID",
+                            label="Calendar",
                             placeholder="primary, or …@group.calendar.google.com",
+                            options_action="google_calendar-list-calendars",
+                            option_label="summary",
                         ),
                         CatalogInput(
                             name="summary",
@@ -488,6 +507,121 @@ async def list_accounts(
     if not isinstance(data, list):
         raise PipedreamError("Pipedream returned an unexpected account list.")
     return [_account(a) for a in data if isinstance(a, dict)]
+
+
+def _action_error(result: Any) -> str | None:
+    """What the third party refused, if it did.
+
+    Pipedream answers 200 whether or not the Action worked: a run Google
+    rejected is a successful HTTP call whose observations carry the error.
+    Reading only the status code is why a calendar entry that never appeared
+    looked exactly like one that did.
+
+    The generated Agent Backend carries its own copy of this. It is the same
+    knowledge, but it runs in a different repo with no import path back here.
+    """
+    if not isinstance(result, dict):
+        return None
+    for observation in result.get("os") or []:
+        if not isinstance(observation, dict) or observation.get("k") != "error":
+            continue
+        err = observation.get("err") or {}
+        data = err.get("data") or {}
+        return str(data.get("error") or err.get("message") or "the action failed")
+    return None
+
+
+async def run_action(
+    cred: Credential,
+    *,
+    workspace_id: str,
+    action_id: str,
+    app_prop: str,
+    account_id: str,
+    props: dict[str, Any] | None = None,
+) -> Any:
+    """Run one Pipedream Action as this Workspace and return its `ret`.
+
+    The account rides under the component's own prop name, never the app slug —
+    the wrong key runs the Action with no credential and the third party answers
+    a cheerful 200 with nothing done.
+    """
+    token = (await access_token(cred)).token
+    body = await _request(
+        "POST",
+        f"{_API}/connect/{cred.project_id}/actions/run",
+        cred=cred,
+        token=token,
+        json={
+            "id": action_id,
+            "external_user_id": workspace_id,
+            "configured_props": {
+                app_prop: {"authProvisionId": account_id},
+                **(props or {}),
+            },
+        },
+    )
+    refused = _action_error(body)
+    if refused:
+        raise PipedreamError(f"{action_id} was refused: {refused}")
+    return body.get("ret") if isinstance(body, dict) else None
+
+
+async def input_options(
+    cred: Credential, *, workspace_id: str, app: str, prop: str
+) -> list[dict[str, str]]:
+    """The values a catalog input accepts, for this Workspace's connected app.
+
+    Fetched per account and never cached: which calendars exist is the
+    Workspace's business and changes without telling us.
+    """
+    known = CATALOG.get(app)
+    if known is None:
+        raise PipedreamError(f"{app} is not an app this build can connect.")
+    field = next(
+        (
+            (action, i)
+            for action in known.actions
+            for i in action.inputs
+            if i.name == prop and i.options_action
+        ),
+        None,
+    )
+    if field is None:
+        raise PipedreamError(f"{prop} is typed in, not chosen from a list.")
+    action, spec = field
+
+    accounts = await list_accounts(cred, workspace_id=workspace_id, app=app)
+    if not accounts:
+        raise PipedreamError(f"No {known.name} account is connected yet.")
+
+    items = await run_action(
+        cred,
+        workspace_id=workspace_id,
+        action_id=spec.options_action,
+        app_prop=action.app_prop,
+        account_id=accounts[0]["id"],
+    )
+    if spec.option_root and isinstance(items, dict):
+        items = items.get(spec.option_root)
+    if not isinstance(items, list):
+        raise PipedreamError(f"{spec.options_action} returned no list to choose from.")
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(spec.option_value)
+        if not isinstance(value, str) or not value:
+            continue
+        label = item.get(spec.option_label)
+        out.append(
+            {"value": value, "label": label if isinstance(label, str) and label else value}
+        )
+    # Sorted here rather than in the Console: every caller wants the same order,
+    # and a Slack workspace can answer with a hundred channels.
+    # ponytail: whatever one call returns. Paging is a change if a Workspace
+    # ever has more channels than Pipedream returns in one go.
+    return sorted(out, key=lambda o: o["label"].lower())
 
 
 async def delete_account(cred: Credential, account_id: str) -> None:
