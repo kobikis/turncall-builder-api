@@ -389,3 +389,78 @@ class TestCalendarAutomation:
         # `customer_ended_call` has its own underscores; what must be gone is
         # the wrapper's, which is the last line in full.
         assert described.splitlines()[-1] == "92s · customer_ended_call"
+
+
+class TestRedelivery:
+    """TurnCall retries a delivery it did not get an answer to in time, and a
+    Pipedream action is a third-party round trip — the first attempt timed out
+    on TurnCall's side while the action was still running, and the retry ran it
+    again. A second calendar entry for one call is not a cosmetic fault."""
+
+    @staticmethod
+    def _client(tmp_path, monkeypatch):
+        import hashlib
+        import hmac
+        import json
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from app.backends import scaffold
+
+        monkeypatch.setenv("AGENT_ID", "agent-1")
+        monkeypatch.setenv("WEBHOOK_SECRET", "evsecret")
+        monkeypatch.chdir(tmp_path)
+        files = scaffold.render(
+            slug="x-1", port=9001, tools=[], integrations=[SLACK_SUMMARY], agent_id="agent-1"
+        )
+        ns: dict = {}
+        exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
+
+        ran = []
+
+        async def _capture(*args):
+            ran.append(args[0])
+
+        ns["run_pipedream_action"] = _capture
+        client = TestClient(ns["app"])
+
+        def post(event_id):
+            body = json.dumps(
+                {"event": "call.ended", "event_id": event_id, "payload": dict(ENDED)}
+            )
+            ts = str(int(time.time()))
+            sig = "v1=" + hmac.new(
+                b"evsecret", f"{ts}.{body}".encode(), hashlib.sha256
+            ).hexdigest()
+            return client.post(
+                "/events",
+                content=body,
+                headers={"X-TurnCall-Signature": sig, "X-TurnCall-Timestamp": ts},
+            )
+
+        return post, ran
+
+    def test_a_redelivery_runs_the_automation_once(self, tmp_path, monkeypatch):
+        post, ran = self._client(tmp_path, monkeypatch)
+        assert post("evt-1").status_code == 200
+        assert post("evt-1").status_code == 200  # same event_id: TurnCall's retry
+        assert ran == ["slack_v2-post-message"]
+
+    def test_a_different_event_still_runs(self, tmp_path, monkeypatch):
+        post, ran = self._client(tmp_path, monkeypatch)
+        post("evt-1")
+        post("evt-2")
+        assert len(ran) == 2
+
+    def test_a_redelivery_is_still_recorded(self, tmp_path, monkeypatch):
+        """The log says what arrived, including the retry; `handled` says what
+        was acted on. Collapsing the two would hide the redelivery entirely."""
+        import sqlite3
+
+        post, _ = self._client(tmp_path, monkeypatch)
+        post("evt-1")
+        post("evt-1")
+        conn = sqlite3.connect(tmp_path / "events.db")
+        assert conn.execute("select count(*) from events").fetchone()[0] == 2
+        assert conn.execute("select count(*) from handled").fetchone()[0] == 1

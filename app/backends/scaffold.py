@@ -164,7 +164,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 DB = "events.db"
@@ -209,6 +209,12 @@ async def pipedream_token() -> dict:
 def _db():
     conn = sqlite3.connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, payload TEXT)")
+    # Which events have already had their Automation run. Its own table rather
+    # than a column on `events`: an existing backend upgrades by creating it,
+    # with no migration, and the two answer different questions — `events` is
+    # the log of what arrived, including redeliveries, and this is what has
+    # been acted on.
+    conn.execute("CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, tool TEXT, input TEXT, output TEXT)")
     return conn
 
@@ -499,25 +505,43 @@ async def call_init(request: Request) -> dict:
 
 
 @app.post("/events")
-async def receive_event(request: Request) -> dict:
+async def receive_event(request: Request, background: BackgroundTasks) -> dict:
     """Receive a TurnCall event directly, verify its signature, store it, and
     run any Automation bound to it.
 
-    Stored before the Automation runs. The handler below swallows its own
-    failures, so today the order does not change the outcome — it is here so a
-    future edit that lets an exception escape cannot cost us the record of the
-    event that triggered it.
+    Two rules keep a redelivery from costing a second calendar entry:
+
+    The Automation runs *after* this responds. TurnCall retries a delivery it
+    did not get an answer to in time, and a Pipedream action is a third-party
+    round trip — long enough that the first attempt timed out on TurnCall's side
+    while the action was still running, and the retry ran it a second time.
+
+    And it runs once per `event_id`. That is TurnCall's dedupe key, stable
+    across retries, and honouring it is the only guarantee: backgrounding makes
+    a retry unlikely, not impossible. The event itself is stored every time — a
+    redelivery did happen, and the log should say so.
     """
     raw = await _verified_body(request, WEBHOOK_SECRET)
-    with closing(_db()) as conn:
-        conn.execute("INSERT INTO events (payload) VALUES (?)", (raw,))
-        conn.commit()
     try:
         body = json.loads(raw)
-        if body.get("event") == "call.ended":
-            await on_call_ended(body.get("payload") or {{}})
-    except Exception as exc:  # noqa: BLE001
-        print(f"automation dispatch failed ({{exc}})")
+    except ValueError as exc:
+        # Signed, so it came from TurnCall — store it and say so, rather than
+        # 500ing into a retry loop over a body no retry will fix.
+        print(f"event is not JSON; stored, not dispatched ({{exc}})")
+        body = {{}}
+    event_id = body.get("event_id")
+    with closing(_db()) as conn:
+        conn.execute("INSERT INTO events (payload) VALUES (?)", (raw,))
+        # rowcount 0 means this event_id is already there: a redelivery.
+        first_time = not event_id or (
+            conn.execute(
+                "INSERT OR IGNORE INTO handled (event_id) VALUES (?)", (event_id,)
+            ).rowcount
+            == 1
+        )
+        conn.commit()
+    if body.get("event") == "call.ended" and first_time:
+        background.add_task(on_call_ended, body.get("payload") or {{}})
     return {{"success": True}}
 
 

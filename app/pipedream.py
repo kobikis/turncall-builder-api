@@ -173,10 +173,14 @@ CATALOG = {
                     summary_arg="description",
                     app_prop="googleCalendar",
                     inputs=(
+                        # "Calendar" with a placeholder of `primary` reads as
+                        # an invitation to name the calendar, and Google answers
+                        # a display name with 404 Not Found — into a log nobody
+                        # is watching. Ask for the thing it actually wants.
                         CatalogInput(
                             name="calendarId",
-                            label="Calendar",
-                            placeholder="primary",
+                            label="Calendar ID",
+                            placeholder="primary, or …@group.calendar.google.com",
                         ),
                         CatalogInput(
                             name="summary",
