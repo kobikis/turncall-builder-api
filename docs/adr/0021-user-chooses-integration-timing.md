@@ -99,6 +99,32 @@ and meaningless afterwards. Google Calendar offers no end-of-call Action at all:
 *call* finished, not when a meeting should be. Offering it would configure
 cleanly and fail every night, which is worse than not offering it.
 
+> **Amended (2026-09-13): Calendar gets one, and the mechanism generalizes.**
+> The paragraph above is half right and drew the wrong conclusion from it. A
+> `call.ended` payload cannot say when a *meeting* should be — still true — but
+> it says precisely when the *call* ran, and an entry for the call itself is a
+> real thing to want. What was actually missing was a third kind of input.
+>
+> An Action's inputs now come from three places, not two: the form (`args`),
+> the summary (`summary_arg`), and the call (`derived` — prop name to a format
+> template over the payload, e.g. `eventStartDate` from `{started_at}`). Like
+> `summary_arg`, `derived` is a fact about the Action and lives in `CATALOG`;
+> the config shape, the validator and the Console are untouched, and the
+> Workspace sees the same Action picker every other app has.
+>
+> A derived value that the call does not have skips that Automation rather than
+> sending a blank: an unanswered call has no start, and an event spanning
+> nothing is wrong, not merely empty.
+>
+> Scheduling a *follow-up* is still not offered, and this is the line that
+> matters — no template over `call.ended` knows when it should be. That needs
+> takeaway fields (ADR-0013) bound to inputs, which widens `derived` from a
+> catalog constant to a config-time reference. Separate change.
+>
+> This also discharges the consequence flagged below: the summary wrapper was
+> Slack-flavoured, and a calendar description renders `*bold*` as punctuation.
+> `summary_style` moved the markup behind the Action, as predicted.
+
 **A bare slug still means `mid_call`.** Existing agents carry `["slack_v2"]` and
 must keep working untouched; the reader widens rather than migrating. An
 end-of-call trigger is something a Workspace opts into, never something an
@@ -201,6 +227,7 @@ That wrapper is currently Slack-flavoured (`*bold*`, `_italic_`), which is
 invisible today because Slack has the only end-of-call Action. The moment a
 second one arrives it will render as literal punctuation, and the formatting will
 have to move behind the Action rather than sitting in one shared function.
+*(Done, with the amendment above: `CatalogAction.summary_style`.)*
 
 **Regeneration has to widen, or every automation edit is silently a no-op.**
 `PUT /agents/{agent_id}` regenerates the backend *iff `custom_tools` changed*

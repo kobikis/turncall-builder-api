@@ -138,18 +138,38 @@ class TestValidation:
         )
         assert "cannot do that when a call ends" in detail
 
-    def test_an_app_that_offers_no_automation_says_so(self):
-        """Google Calendar has none: create-event needs a start and an end, and
-        a call.ended payload cannot supply them."""
+    def test_the_calendar_action_is_offered_like_any_other(self):
+        """Every catalog app gets the same choice. Calendar's `create-event`
+        needs a start and an end; they come from the call, not the form."""
+        cfg = _config(
+            [
+                {
+                    "app": "google_calendar",
+                    "call_ended": {
+                        "action": "google_calendar-create-event",
+                        "args": {"calendarId": "primary", "summary": "Customer call"},
+                        "summary_arg": "description",
+                    },
+                }
+            ]
+        )
+        # End-of-call only: the model is handed no calendar tool.
+        assert "google_calendar" not in repr(cfg.get("mcp_servers") or [])
+
+    def test_the_calendar_action_still_names_what_it_needs(self):
         detail = self._reject(
             [
                 {
                     "app": "google_calendar",
-                    "call_ended": {"action": "google_calendar-create-event", "summary_arg": "summary"},
+                    "call_ended": {
+                        "action": "google_calendar-create-event",
+                        "args": {"summary": "Customer call"},
+                        "summary_arg": "description",
+                    },
                 }
             ]
         )
-        assert "offers nothing to run" in detail
+        assert "needs a Calendar" in detail
 
     def test_a_missing_input_names_the_input(self):
         """"Needs a Channel" is actionable; a schema path is not."""
@@ -277,3 +297,95 @@ class TestNeedsIntegrations:
                 "description": "Records a reservation in the restaurant's book.",
             }],
         })
+
+
+CALENDAR_ENTRY = {
+    "app": "google_calendar",
+    "call_ended": {
+        "action": "google_calendar-create-event",
+        "args": {"calendarId": "primary", "summary": "Customer call"},
+        "summary_arg": "description",
+    },
+}
+
+
+def _run_automations(integrations, payload, tmp_path, monkeypatch):
+    """Execute the generated backend's `on_call_ended` and report what it sent.
+
+    The seam is the generated file, not the scaffold's internals: what matters
+    is that a real `call.ended` body reaches Pipedream as the right props.
+    """
+    import asyncio
+
+    from app.backends import scaffold
+
+    monkeypatch.setenv("AGENT_ID", "agent-1")
+    monkeypatch.setenv("WEBHOOK_SECRET", "w")
+    monkeypatch.chdir(tmp_path)
+    files = scaffold.render(
+        slug="x-1", port=9001, tools=[], integrations=integrations, agent_id="agent-1"
+    )
+    ns: dict = {}
+    exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
+
+    sent = []
+
+    async def _capture(action_id, app, app_prop, props):
+        sent.append({"action": action_id, "app_prop": app_prop, "props": props})
+
+    ns["run_pipedream_action"] = _capture
+    asyncio.run(ns["on_call_ended"](payload))
+    return sent
+
+
+ENDED = {
+    "from_number": "+15551234567",
+    "to_number": "+15557654321",
+    "duration_ms": 92_000,
+    "ended_reason": "customer_ended_call",
+    "summary": "They asked about pricing.",
+    "started_at": "2026-09-13T10:00:00+00:00",
+    "ended_at": "2026-09-13T10:01:32+00:00",
+}
+
+
+class TestCalendarAutomation:
+    def test_the_event_is_the_call(self, tmp_path, monkeypatch):
+        """The times a Workspace could not have typed come from the payload."""
+        [sent] = _run_automations([CALENDAR_ENTRY], ENDED, tmp_path, monkeypatch)
+        assert sent["action"] == "google_calendar-create-event"
+        # The component declares `googleCalendar`, not the app slug — the wrong
+        # key runs the action with no credential and Google answers 200.
+        assert sent["app_prop"] == "googleCalendar"
+        assert sent["props"]["eventStartDate"] == ENDED["started_at"]
+        assert sent["props"]["eventEndDate"] == ENDED["ended_at"]
+        assert sent["props"]["calendarId"] == "primary"
+        assert sent["props"]["summary"] == "Customer call"
+        assert "They asked about pricing." in sent["props"]["description"]
+
+    def test_a_call_that_never_started_creates_no_event(self, tmp_path, monkeypatch):
+        """An unanswered call has no start. An event spanning nothing is wrong,
+        not merely blank — and `None` in an RFC3339 field is a 400 anyway."""
+        payload = {**ENDED, "started_at": None, "ended_reason": "customer_did_not_answer"}
+        assert _run_automations([CALENDAR_ENTRY], payload, tmp_path, monkeypatch) == []
+
+    def test_one_skipped_automation_does_not_cost_the_others(self, tmp_path, monkeypatch):
+        payload = {**ENDED, "started_at": None}
+        sent = _run_automations(
+            [CALENDAR_ENTRY, SLACK_SUMMARY], payload, tmp_path, monkeypatch
+        )
+        assert [s["action"] for s in sent] == ["slack_v2-post-message"]
+
+    def test_the_summary_is_marked_up_for_where_it_lands(self, tmp_path, monkeypatch):
+        """`*bold*` is Slack's. In a calendar description it is punctuation —
+        ADR-0021 flagged this as due the moment a second Action existed."""
+        sent = _run_automations(
+            [CALENDAR_ENTRY, SLACK_SUMMARY], ENDED, tmp_path, monkeypatch
+        )
+        by_action = {s["action"]: s for s in sent}
+        assert by_action["slack_v2-post-message"]["props"]["text"].startswith("*Call ended*")
+        described = by_action["google_calendar-create-event"]["props"]["description"]
+        assert described.startswith("Call ended —")
+        # `customer_ended_call` has its own underscores; what must be gone is
+        # the wrapper's, which is the last line in full.
+        assert described.splitlines()[-1] == "92s · customer_ended_call"

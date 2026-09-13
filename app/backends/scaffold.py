@@ -71,6 +71,11 @@ def _automations_literal(integrations: Any) -> str:
                 "action": i.call_ended.action,
                 "args": dict(i.call_ended.args),
                 "summary_arg": i.call_ended.summary_arg,
+                # Resolved from the catalog for the same reason as `app_prop`:
+                # which props come from the call, and how the summary is marked
+                # up, are the Action's facts, not the Workspace's.
+                "derived": dict(action.derived) if action else {},
+                "summary_style": action.summary_style if action else "plain",
             }
         )
     if not entries:
@@ -324,16 +329,40 @@ async def run_pipedream_action(
         return None
 
 
-def call_summary(payload: dict) -> str:
+def call_summary(payload: dict, style: str = "plain") -> str:
     """The text an Automation sends. Derived from the event, never configured —
-    what varies between Workspaces is where it goes, not what it says."""
+    what varies between Workspaces is where it goes, not what it says.
+
+    `style` is the destination's markup, not a preference: Slack renders
+    `*bold*`, a calendar description renders it as punctuation.
+    """
     seconds = round((payload.get("duration_ms") or 0) / 1000)
-    return (
-        f"*Call ended* — {{payload.get('from_number') or 'unknown'}}"
-        f" → {{payload.get('to_number') or 'unknown'}}\\n"
-        f"{{payload.get('summary') or '(no summary)'}}\\n"
-        f"_{{seconds}}s · {{payload.get('ended_reason') or 'unknown'}}_"
+    who = (
+        f"{{payload.get('from_number') or 'unknown'}}"
+        f" → {{payload.get('to_number') or 'unknown'}}"
     )
+    how = f"{{seconds}}s · {{payload.get('ended_reason') or 'unknown'}}"
+    if style == "slack":
+        head, foot = f"*Call ended* — {{who}}", f"_{{how}}_"
+    else:
+        head, foot = f"Call ended — {{who}}", how
+    return f"{{head}}\\n{{payload.get('summary') or '(no summary)'}}\\n{{foot}}"
+
+
+def fill(template: str, payload: dict) -> str:
+    """A value an Automation takes from the call itself — when it started, when
+    it ended — rather than from configuration.
+
+    Empty when the call has no such value, which is the caller's signal to skip:
+    a call that was never answered has no start, and a calendar entry for it
+    would be wrong rather than merely blank.
+    """
+    try:
+        return template.format_map(
+            {{k: v for k, v in payload.items() if v is not None}}
+        )
+    except KeyError:
+        return ""
 
 
 async def on_call_ended(payload: dict) -> None:
@@ -345,15 +374,30 @@ async def on_call_ended(payload: dict) -> None:
     """
     if not AUTOMATIONS:
         return
-    summary = call_summary(payload)
     for entry in AUTOMATIONS:
+        derived = {{
+            prop: fill(template, payload)
+            for prop, template in (entry.get("derived") or {{}}).items()
+        }}
+        blank = [
+            f"{{prop}} ({{entry['derived'][prop]}})"
+            for prop, value in derived.items()
+            if not value
+        ]
+        if blank:
+            print(
+                f"automation: skipping {{entry['action']}} —"
+                f" the call cannot fill {{', '.join(blank)}}"
+            )
+            continue
+        summary = call_summary(payload, entry.get("summary_style", "plain"))
         # One failure must not cost the others theirs: run_pipedream_action
         # swallows its own, so the loop always runs to the end.
         await run_pipedream_action(
             entry["action"],
             entry["app"],
             entry["app_prop"],
-            {{**entry["args"], entry["summary_arg"]: summary}},
+            {{**entry["args"], entry["summary_arg"]: summary, **derived}},
         )
 
 
