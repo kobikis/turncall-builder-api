@@ -73,7 +73,26 @@ async def catalog(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     return {
         "success": True,
         "data": [
-            {"app": app.slug, "name": app.name, "tools": list(app.tools)}
+            {
+                "app": app.slug,
+                "name": app.name,
+                "tools": list(app.tools),
+                # What may run when a call ends, and what each one needs asked.
+                # The Console fills `summary_arg` from here so nobody is ever
+                # asked to type a Pipedream prop name (ADR-0021).
+                "actions": [
+                    {
+                        "id": action.id,
+                        "label": action.label,
+                        "summary_arg": action.summary_arg,
+                        "inputs": [
+                            {"name": i.name, "label": i.label, "placeholder": i.placeholder}
+                            for i in action.inputs
+                        ],
+                    }
+                    for action in app.actions
+                ],
+            }
             for app in pipedream.CATALOG.values()
         ],
     }

@@ -189,9 +189,33 @@ async def agent_webrtc_connect(
     body = {k: v for k, v in offer.items() if k not in _CLIENT_CONTROLLED}
     rd = offer.get("request_data")
     rd = {k: v for k, v in rd.items() if k not in _CLIENT_CONTROLLED} if isinstance(rd, dict) else {}
-    rd["agent_id"] = agent_id
+    # Routed through the backend's own /call-init when we hold its secret, so a
+    # test call resolves the way a phone call does — and an agent with attached
+    # apps gets the inline config carrying a freshly minted credential. Resolving
+    # by agent_id loads the STORED config instead, whose mcp_servers deliberately
+    # carry none (ADR-0018/0020): Connected apps were unreachable from the Test
+    # tab, and silently, because the agent simply had no tool to call.
+    #
+    # Still server-chosen, never the client's: _CLIENT_CONTROLLED is stripped from
+    # both places first, so this pins the leg exactly as agent_id did.
+    call_init_secret = b.get("call_init_secret")
+    if call_init_secret:
+        routing = {
+            # The full endpoint, not the base: TurnCall POSTs to server_url as
+            # given and does not append a path. Same convention the phone bind
+            # uses (routers/phones.py) — a bare base URL lands on `POST /` and
+            # 404s, which surfaces as "server_url did not return a valid agent".
+            "server_url": f"{registry.backend_url(b['port'])}/call-init",
+            "server_url_secret": call_init_secret,
+        }
+    else:
+        # An agent older than the secret column, or one whose .env has not been
+        # rewritten since. Resolving by id still works; it just cannot carry
+        # credentials, which is what it did before this existed.
+        routing = {"agent_id": agent_id}
+    rd.update(routing)
     body["request_data"] = rd
-    body["agent_id"] = agent_id
+    body.update(routing)
     try:
         answer = await runtime.get_client().webrtc_connect(body, b["api_key"])
     except httpx.HTTPStatusError as exc:

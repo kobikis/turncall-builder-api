@@ -37,17 +37,60 @@ MCP_URL = "https://remote.mcp.pipedream.net/v3"
 
 
 @dataclass(frozen=True)
+class CatalogInput:
+    """One input an end-of-call Action needs from the Workspace.
+
+    `name` is Pipedream's own prop name and never reaches a person; `label` is
+    what they are actually asked for.
+    """
+
+    name: str
+    label: str
+    placeholder: str = ""
+
+
+@dataclass(frozen=True)
+class CatalogAction:
+    """An Action that makes sense to run when a call ends (ADR-0021).
+
+    Not every tool does. `list-channels` is useful mid-call and meaningless
+    afterwards, and an Action whose required inputs cannot be known from a
+    `call.ended` payload cannot be offered at all — it would configure cleanly
+    and then fail every night.
+
+    `summary_arg` is the input the summary rides in. It belongs here rather than
+    in an agent's config because it is a fact about the Action, identical for
+    every Workspace that ever picks it: asking a person to supply a constant is
+    not configuration.
+    """
+
+    id: str
+    label: str
+    summary_arg: str
+    # The component's own name for its app prop, which is NOT the app slug:
+    # slack_v2-post-message declares `slack`. Sending the credential under the
+    # slug leaves the prop unset, so the action runs unauthenticated and Slack
+    # answers `not_authed` — a 200 from Pipedream with nothing posted.
+    app_prop: str
+    inputs: tuple[CatalogInput, ...] = ()
+
+
+@dataclass(frozen=True)
 class CatalogApp:
     """An app this build can connect, and the tools an agent may actually call.
 
     `slug` is Pipedream's own app slug, which is also the prefix of every tool
     name it generates. Slack's is `slack_v2` — the registry package was versioned
     and the slug went with it, so `slack` is not the name of anything current.
+
+    `tools` is the mid-call allowlist; `actions` is the end-of-call menu. They
+    are different questions (ADR-0021) and an app may have one and not the other.
     """
 
     slug: str
     name: str
     tools: tuple[str, ...]
+    actions: tuple[CatalogAction, ...] = ()
 
 
 # v1 catalog (ADR-0018): the two apps that were actually asked for. ADR-0017's
@@ -72,6 +115,21 @@ CATALOG = {
                 "slack_v2-list-channels",
                 "slack_v2-find-user-by-email",
             ),
+            actions=(
+                CatalogAction(
+                    id="slack_v2-post-message",
+                    label="Post the call summary",
+                    summary_arg="text",
+                    app_prop="slack",
+                    inputs=(
+                        CatalogInput(
+                            name="channel",
+                            label="Channel",
+                            placeholder="#sales-calls",
+                        ),
+                    ),
+                ),
+            ),
         ),
         CatalogApp(
             slug="google_calendar",
@@ -84,6 +142,11 @@ CATALOG = {
                 # Booking a meeting means knowing when someone is free.
                 "google_calendar-query-free-busy-calendars",
             ),
+            # No end-of-call Actions. `create-event` needs a start and an end,
+            # and a `call.ended` payload says when a call finished, not when a
+            # meeting should be. Offering it would configure cleanly and fail
+            # every night — worse than not offering it.
+            actions=(),
         ),
     )
 }

@@ -28,12 +28,20 @@ _SCHEMA = {
                         "body": {
                             "type": "string",
                             "description": "Body statements for `async def tool_<name>(args: dict) -> dict:`. "
-                            "Must `return` a dict. Realistic stub logic; no imports beyond stdlib.",
+                            "Must `return` a dict. Local logic only — validate arguments, compute, "
+                            "record. No imports beyond stdlib.",
                         },
                     },
                     "required": ["name", "body"],
                 },
-            }
+            },
+            "needs_a_service_i_cannot_reach": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Names of tools whose work requires a third-party service "
+                "(calendar, CRM, email, messaging, payments, any external API). Do NOT write "
+                "bodies for these — list them here instead.",
+            },
         },
         "required": ["bodies"],
     },
@@ -70,8 +78,17 @@ async def generate_tool_bodies(
             max_tokens=2048,
             system="You write Python handler bodies for voice-agent tools. Each body is the "
             "statements of `async def tool_<name>(args: dict) -> dict:` and must return a dict. "
-            "Write realistic stub logic (validate expected args, return a plausible result). "
-            "No external imports. Always call the tool_bodies tool.",
+            "No external imports.\n\n"
+            "Write a body ONLY for a tool whose work is local: validating arguments, computing "
+            "something, recording it in the backend's own store. For anything needing a "
+            "third-party service — a calendar, a CRM, email, messaging, payments — you have no "
+            "credentials and cannot reach it. Do not simulate one. Put its name in "
+            "`needs_a_service_i_cannot_reach` and write no body.\n\n"
+            "A fabricated success is the worst thing you can return here: it reports `success` "
+            "for a write that never happened, the caller is told their booking is confirmed, and "
+            "nothing distinguishes it from a working integration. An honest stub is labelled as "
+            "one in the console; a convincing lie is not.\n\n"
+            "Always call the tool_bodies tool.",
             tools=[_SCHEMA],
             tool_choice={"type": "tool", "name": "tool_bodies"},
             messages=[{"role": "user", "content": f"Tools:\n{listing}"}],
@@ -91,13 +108,18 @@ def _parse_bodies(resp: Any) -> dict[str, str]:
         for block in resp.content:
             if block.type != "tool_use" or block.name != "tool_bodies":
                 continue
-            items = (block.input or {}).get("bodies", [])
-            for item in items:
+            payload = block.input or {}
+            # Belt and braces: a model that both lists a tool as unreachable and
+            # writes it a body meant the refusal — take that, not the fabrication.
+            declined = {
+                n for n in payload.get("needs_a_service_i_cannot_reach") or [] if isinstance(n, str)
+            }
+            for item in payload.get("bodies", []):
                 if not isinstance(item, dict):
                     continue
                 name = item.get("name")
                 body = _normalize(str(item.get("body") or ""))
-                if name and body and _valid(body):
+                if name and name not in declined and body and _valid(body):
                     out[name] = body
     except Exception:
         return out  # whatever parsed so far; the rest stub out

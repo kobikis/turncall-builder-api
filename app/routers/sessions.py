@@ -661,6 +661,7 @@ async def _generate_backend(
         _run_build(
             pool, agent_id, row["slug"], row["service_dir"], config, port, secret,
             row.get("builder_token") or "",
+            row.get("call_init_secret") or "",
         )
     )
     return _backend_view(port, "generating")
@@ -675,6 +676,7 @@ async def _run_build(
     port: int,
     secret: str,
     builder_token: str = "",
+    call_init_secret: str = "",
 ) -> None:
     """Background worker: render the repo, docker-build it, record the outcome.
     Best-effort — a failure is recorded as 'failed' for the UI, never raised."""
@@ -701,6 +703,7 @@ async def _run_build(
             integrations=config.get("integrations"),
             agent_id=agent_id,
             webhook_secret=secret,
+            call_init_secret=call_init_secret,
             builder_token=builder_token,
         )
         ok, _ = await generator.materialize_and_run(service_dir, files)

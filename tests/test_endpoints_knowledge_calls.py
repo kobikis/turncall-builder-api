@@ -1,6 +1,7 @@
 """Calls, knowledge, takeaways, credentials endpoints (per-agent proxies)."""
 
 import httpx
+from app.backends import registry
 
 from tests.conftest import backend_row
 
@@ -297,3 +298,74 @@ def test_webrtc_connect_stale_key_maps_to_502_not_401(client, mocks):
     mocks.client.webrtc_connect.side_effect = _http_status_error(401, "Unauthorized")
     r = client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
     assert r.status_code == 502
+
+
+# --- a test call resolves the way a phone call does (ADR-0020) ----------------
+#
+# Resolving by agent_id loads the STORED config, whose mcp_servers deliberately
+# carry no credential — so Connected apps were unreachable from the Test tab,
+# and silently: the agent simply had no tool to call and confirmed the booking
+# anyway. Routing through the backend's own /call-init is the path that carries
+# a freshly minted one.
+
+
+def test_webrtc_connect_routes_through_call_init_when_we_hold_the_secret(client, mocks):
+    row = backend_row(agent_id="a1")
+    row["call_init_secret"] = "cis-1"
+    mocks.registry.get_backend.return_value = row
+    mocks.client.webrtc_connect.return_value = {"sdp": "answer"}
+
+    client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+
+    fwd = mocks.client.webrtc_connect.await_args.args[0]
+    # The agent's own backend, derived from its port — never anything the
+    # caller named. The full endpoint, because TurnCall POSTs to server_url as
+    # given: a bare base URL lands on `POST /` and comes back as "server_url did
+    # not return a valid agent".
+    assert fwd["server_url"] == f"{registry.backend_url(row['port'])}/call-init"
+    assert fwd["server_url_secret"] == "cis-1"
+    # agent_id would win over server_url in TurnCall's resolver, taking the
+    # stored config and the credential with it.
+    assert "agent_id" not in fwd
+    assert "agent_id" not in fwd["request_data"]
+
+
+def test_webrtc_connect_falls_back_to_agent_id_without_a_secret(client, mocks):
+    """An agent older than the secret column still connects — it just cannot
+    carry credentials, exactly as before this existed."""
+    row = backend_row(agent_id="a1")
+    row["call_init_secret"] = None
+    mocks.registry.get_backend.return_value = row
+    mocks.client.webrtc_connect.return_value = {"sdp": "answer"}
+
+    client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+
+    fwd = mocks.client.webrtc_connect.await_args.args[0]
+    assert fwd["agent_id"] == "a1"
+    assert "server_url" not in fwd
+
+
+def test_webrtc_connect_still_refuses_a_client_chosen_backend(client, mocks):
+    """The routing is server-chosen either way. A caller supplying their own
+    server_url must not be able to point the leg at a backend they control."""
+    row = backend_row(agent_id="a1")
+    row["call_init_secret"] = "cis-1"
+    mocks.registry.get_backend.return_value = row
+    mocks.client.webrtc_connect.return_value = {"sdp": "answer"}
+
+    client.post(
+        "/agents/a1/webrtc/connect",
+        json={
+            "sdp": "o",
+            "server_url": "http://evil",
+            "server_url_secret": "stolen",
+            "request_data": {"server_url": "http://evil", "server_url_secret": "stolen"},
+        },
+    )
+
+    fwd = mocks.client.webrtc_connect.await_args.args[0]
+    assert fwd["server_url"].endswith("/call-init")
+    assert "evil" not in repr(fwd)
+    assert "stolen" not in repr(fwd)
+    assert fwd["server_url_secret"] == "cis-1"
+    assert fwd["request_data"]["server_url_secret"] == "cis-1"
