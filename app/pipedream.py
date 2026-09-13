@@ -73,6 +73,17 @@ class CatalogAction:
     # answers `not_authed` — a 200 from Pipedream with nothing posted.
     app_prop: str
     inputs: tuple[CatalogInput, ...] = ()
+    # Props filled from the `call.ended` payload rather than from the form:
+    # prop name -> a format template over the payload. This is what lets an
+    # Action be offered whose inputs a Workspace could not possibly type — a
+    # calendar entry for the call has to start when the call did. Like
+    # `summary_arg` it is a fact about the Action, identical everywhere, so it
+    # never reaches the config or the Console.
+    derived: tuple[tuple[str, str], ...] = ()
+    # How the summary wrapper is marked up. Slack renders `*bold*`; a calendar
+    # description renders it as punctuation. ADR-0021 flagged this as due the
+    # moment a second Action existed.
+    summary_style: str = "plain"
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,7 @@ CATALOG = {
                     label="Post the call summary",
                     summary_arg="text",
                     app_prop="slack",
+                    summary_style="slack",
                     inputs=(
                         CatalogInput(
                             name="channel",
@@ -142,11 +154,46 @@ CATALOG = {
                 # Booking a meeting means knowing when someone is free.
                 "google_calendar-query-free-busy-calendars",
             ),
-            # No end-of-call Actions. `create-event` needs a start and an end,
-            # and a `call.ended` payload says when a call finished, not when a
-            # meeting should be. Offering it would configure cleanly and fail
-            # every night — worse than not offering it.
-            actions=(),
+            actions=(
+                # `create-event` needs a start and an end, which is why this was
+                # once left empty: a `call.ended` payload says when a *call*
+                # finished, not when a meeting should be. But it says exactly
+                # when the call ran, and an entry for the call itself is a real
+                # thing to want — so the times come from the payload and the
+                # Workspace gets the same choice every other app has.
+                #
+                # Scheduling a *follow-up* still is not offered: nothing in the
+                # payload knows when it should be. That needs takeaway fields
+                # bound to inputs, which is a separate change.
+                CatalogAction(
+                    id="google_calendar-create-event",
+                    label="Add the call to a calendar",
+                    # The event body. `summary` is Google's name for the title,
+                    # which is why the summary does not ride in it.
+                    summary_arg="description",
+                    app_prop="googleCalendar",
+                    inputs=(
+                        # "Calendar" with a placeholder of `primary` reads as
+                        # an invitation to name the calendar, and Google answers
+                        # a display name with 404 Not Found — into a log nobody
+                        # is watching. Ask for the thing it actually wants.
+                        CatalogInput(
+                            name="calendarId",
+                            label="Calendar ID",
+                            placeholder="primary, or …@group.calendar.google.com",
+                        ),
+                        CatalogInput(
+                            name="summary",
+                            label="Event title",
+                            placeholder="Customer call",
+                        ),
+                    ),
+                    derived=(
+                        ("eventStartDate", "{started_at}"),
+                        ("eventEndDate", "{ended_at}"),
+                    ),
+                ),
+            ),
         ),
     )
 }
