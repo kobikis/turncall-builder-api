@@ -168,6 +168,39 @@ Contract: request has `phoneNumber.number` (dialed) + `customer.number` (caller)
 response returns `agent_id` (any agent — call-init isn't project-scoped),
 `variables`, `metadata`, `dynamic_data.knowledge_context`. Signed like webhooks.
 
+## V5 — Connected apps (shipped)
+
+An agent acts in the workspace's own Slack or Google Calendar, authorized once
+through [Pipedream Connect](https://pipedream.com/docs/connect/) rather than by
+anyone here handling a token. Setup in
+[pipedream-setup.md](./docs/pipedream-setup.md).
+
+Two triggers per attached app, deliberately not symmetric: **during a call** the
+app's pinned tools are offered to the model, which calls them if it decides to;
+**when a call ends** one action runs because the event arrived. An app may carry
+either or both, and an end-of-call-only attachment hands the model nothing —
+which is the leak ADR-0021 exists to close.
+
+- **Credentials never sit in a config.** The builder stores one encrypted
+  Pipedream client credential; a call's MCP header is minted for that call and
+  expires within the hour, reaching it through call-init as an inline agent
+  (ADR-0019, ADR-0020).
+- **The end-of-call half never reaches TurnCall.** It drives code generation:
+  the handler is generated whole into the agent's own backend, and is delivered
+  at least once and runs at most once, keyed on the event's `event_id`.
+- **The catalog is curated** — two apps — because the pinned tool list is
+  load-bearing against TurnCall's cap of 50 tools per server, and an end-of-call
+  action needs a human decision about which inputs can be known before the call
+  happens. ADR-0017's raw `mcp_servers` form stays the escape hatch for anything
+  else.
+- **Opaque values are chosen, not typed.** A Slack channel and a Google calendar
+  are picked from a list fetched from the workspace's own account; the label is
+  a name, the stored value is an id (ADR-0022).
+
+Not built: a third app, per-tool mid-call selection, binding an end-of-call
+action's inputs to takeaway fields (which is what a *follow-up* booking would
+need), and a second integrations provider.
+
 ## Partly shipped
 
 - **GitHub integration** — push each Agent Backend to the user's own GitHub so
@@ -209,3 +242,12 @@ response returns `agent_id` (any agent — call-init isn't project-scoped),
 - ADR-0011 — Multi-tenant identity in builder
 - ADR-0012 — Interview rounds + composed disciplines
 - ADR-0013 — Push an Agent Backend to the user's GitHub
+- ADR-0014 — deepagents interview loop
+- ADR-0015 — Workspace skills
+- ADR-0016 — Confirm before build
+- ADR-0017 — MCP servers from the Console
+- ADR-0018 — Integrations via Pipedream
+- ADR-0019 — Agent Backend credential
+- ADR-0020 — Inline agent from the builder
+- ADR-0021 — The user chooses when an integration runs
+- ADR-0022 — Input values come from the provider
