@@ -46,19 +46,32 @@ proceeds with no MCP tools rather than waiting past
   is not optional.
 - **An inline agent costs the call its `active_agent_id`.** TurnCall records the
   agent only when it resolved one by id, so a call running an inline config has a
-  null `agent_id` in its `call.ended` envelope. Tolerable here: the builder gives
-  each agent its own project, so calls are still attributable, and the backend
+  null `agent_id` in its `call.ended` envelope. Tolerable: the builder gives each
+  agent its own project, so calls are still attributable, and the backend
   receiving the event knows which agent it is. It is the main reason the
   `agent_id` path is kept for agents with nothing attached.
-- **Twilio voice cannot run an inline agent today.** `media_stream.py` builds its
+
+  **Correction (2026-09-13).** That understated it, and the understatement hid a
+  bug. A null `agent_id` was not the consequence — *no event at all* was. Every
+  post-call trigger in the engine gated on `call.active_agent_id`, and
+  `trigger_post_call_analysis` is what dispatches `call.ended`, so a call running
+  an inline agent completed and told nobody: no analysis, no transcript, no
+  webhook, and therefore no Automation. The in-call and post-call halves of
+  ADR-0018 were mutually exclusive in practice. Fixed in kobikis/turncall#53,
+  which resolves a finished call's config from the inline config when there is no
+  agent row. The envelope now arrives, with a null `agent_id`, as this bullet
+  originally claimed.
+- **Twilio voice could not run an inline agent.** ~~`media_stream.py` builds its
   `CallContext` with `agent_id=UUID(agent_id_str)`, where `agent_id_str` is the
-  literal string `"dynamic"` when no agent was resolved by id — which is exactly
-  the inline case. WebRTC and WhatsApp voice both use a `UUID(int=0)` sentinel at
-  the same place and work. This is an engine defect on a path nothing previously
-  exercised, not a limit of this design, and #27's acceptance criteria say to stop
-  rather than edit the engine for it. **In-call integrations therefore reach
-  WebRTC and WhatsApp voice, and not Twilio voice, until that is fixed.**
+  literal string `"dynamic"` when no agent was resolved by id.~~ **Resolved** in
+  kobikis/turncall#52 and #53. It took two goes: the first fixed the
+  `CallContext` line and missed a *log* line in `inbound_voice_webhook` that
+  dereferenced the same absent agent and crashed the webhook outright. The
+  lesson, recorded because it will recur: the inline path needed sweeping for
+  every `agent` dereference, not just the one in the traceback. In-call
+  integrations now reach all three voice transports.
 
 ## Status
 
-Accepted. Implemented alongside #27, which stays open on the Twilio path.
+Accepted and implemented (#27). The two engine defects this ADR recorded as open
+are fixed; see the corrections above.
