@@ -310,7 +310,10 @@ async def call_config(backend: dict = Depends(_calling_backend)) -> dict[str, An
     then answers call-init with its `agent_id` exactly as it did before.
     """
     config = backend.get("config") or {}
-    if not (config.get("integrations") or []):
+    # Mid-call apps are the only reason to inline (ADR-0021): an end-of-call-only
+    # agent has nothing to put in `mcp_servers`, and an inline agent costs the
+    # call its `active_agent_id` (ADR-0020).
+    if not pipedream.mid_call_apps(config.get("integrations")):
         return {"success": True, "data": {"agent": None}}
 
     cred = await _credential()

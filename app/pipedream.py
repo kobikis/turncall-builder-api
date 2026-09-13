@@ -89,6 +89,79 @@ CATALOG = {
 }
 
 
+@dataclass(frozen=True)
+class CallEnded:
+    """The one Action an Automation runs when a call ends (ADR-0021).
+
+    Its arguments are bound here rather than at runtime because nothing is
+    choosing: the generated handler just runs it. `args` is an open dict — the
+    action's own shape, never a Slack-shaped field — so a second catalog app
+    needs no change here.
+    """
+
+    action: str
+    args: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Integration:
+    """An attached app and when it runs (ADR-0021)."""
+
+    app: str
+    mid_call: bool
+    call_ended: CallEnded | None
+
+
+def parse_integrations(value: Any) -> list[Integration]:
+    """Read `config.integrations` in either shape.
+
+    A bare slug is the pre-ADR-0021 form and means mid-call only. An end-of-call
+    trigger is something a Workspace opts into, never something an upgrade turns
+    on underneath it — so widening the reader is the whole migration.
+
+    Unreadable entries are skipped, not raised on: validation belongs at the API
+    edge (`_validate_agent_config`), and this runs against configs that are
+    already stored, where a 500 deep in the mapper would be the worse failure.
+    """
+    out: list[Integration] = []
+    for entry in value or []:
+        if isinstance(entry, str):
+            out.append(Integration(app=entry, mid_call=True, call_ended=None))
+            continue
+        if not isinstance(entry, dict):
+            continue
+        app = entry.get("app")
+        if not isinstance(app, str) or not app:
+            continue
+        raw = entry.get("call_ended")
+        call_ended = None
+        if isinstance(raw, dict) and isinstance(raw.get("action"), str) and raw["action"]:
+            args = raw.get("args")
+            call_ended = CallEnded(
+                action=raw["action"], args=args if isinstance(args, dict) else {}
+            )
+        out.append(
+            Integration(
+                app=app, mid_call=bool(entry.get("mid_call")), call_ended=call_ended
+            )
+        )
+    return out
+
+
+def mid_call_apps(value: Any) -> list[str]:
+    """The attached apps that get an `mcp_servers` entry — the in-call half.
+
+    An end-of-call-only attachment returns nothing here, which is the point: it
+    must not hand the model a tool it never asked to expose.
+    """
+    return [i.app for i in parse_integrations(value) if i.mid_call]
+
+
+def automations(value: Any) -> list[Integration]:
+    """The attached apps with an end-of-call Automation — the generated half."""
+    return [i for i in parse_integrations(value) if i.call_ended]
+
+
 class PipedreamError(RuntimeError):
     """A Pipedream operation failed with something the user can act on."""
 

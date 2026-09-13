@@ -211,7 +211,9 @@ def to_create_agent_request(
     # unconfigured, or the credential unreadable. A server the agent cannot
     # authenticate to is worse than no server — it costs a discovery timeout at
     # the start of every call.
-    apps = [a for a in (cfg.get("integrations") or []) if isinstance(a, str)]
+    # Mid-call only (ADR-0021): an end-of-call-only attachment must not put a
+    # tool in front of the model. Before that ADR every attachment did.
+    apps = pipedream.mid_call_apps(cfg.get("integrations"))
     if apps and pipedream_target:
         servers += pipedream.mcp_servers_for(apps, **pipedream_target)
     if servers:

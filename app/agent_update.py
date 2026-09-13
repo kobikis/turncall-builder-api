@@ -15,7 +15,7 @@ from typing import Any
 from . import pipedream_store
 from ._helpers import _normalize_config
 from .backends import generator, registry, scaffold, toolgen
-from .backends.diff import tools_changed
+from .backends.diff import automations_changed, tools_changed
 from .mapper import external_tool_names, to_create_agent_request
 from .tasks import spawn
 
@@ -39,9 +39,14 @@ async def apply_update(
 
     # Both sides normalized with the same port, so a legacy config (nulls/missing
     # fields) vs its filled form never reads as a change. Regenerate on tool
-    # changes — and whenever the backend never came up (retry a failed build).
+    # changes, on Automation changes (ADR-0021 — they are generated code too),
+    # and whenever the backend never came up (retry a failed build).
     old_config = _normalize_config(backend["config"], port) if backend.get("config") else None
-    regenerated = tools_changed(old_config, new_config) or backend["status"] == "failed"
+    regenerated = (
+        tools_changed(old_config, new_config)
+        or automations_changed(old_config, new_config)
+        or backend["status"] == "failed"
+    )
     await registry.update_config(pool, backend["agent_id"], new_config)
     if regenerated:
         await _regenerate_backend(pool, backend, new_config)

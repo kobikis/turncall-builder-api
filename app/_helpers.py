@@ -6,10 +6,11 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from . import runtime
 from .backends import registry
+from .pipedream import CATALOG
 
 
 class _ToolShape(BaseModel):
@@ -18,6 +19,51 @@ class _ToolShape(BaseModel):
 
     model_config = ConfigDict(extra="allow")
     name: str
+
+
+class _CallEndedShape(BaseModel):
+    """The end-of-call half of an attached app (ADR-0021)."""
+
+    model_config = ConfigDict(extra="allow")
+    action: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class _IntegrationShape(BaseModel):
+    """An attached app in the object form. A bare slug is also accepted (see
+    `_AgentConfigShape.integrations`) and means mid-call only."""
+
+    model_config = ConfigDict(extra="allow")
+    app: str
+    mid_call: bool = False
+    call_ended: _CallEndedShape | None = None
+
+    @model_validator(mode="after")
+    def _usable(self) -> "_IntegrationShape":
+        # An entry with neither trigger does nothing. Silently storing it would
+        # read to a Workspace as "attached" while no tool is exposed and no
+        # summary is posted, so it is refused at the edge instead.
+        if not self.mid_call and self.call_ended is None:
+            raise ValueError(
+                f"integration {self.app!r} has no trigger — set mid_call or call_ended"
+            )
+        # Only the object form is checked against the catalog: a bare slug is the
+        # legacy shape and validating it now would 422 an edit to an agent that
+        # has been working, over a field the edit did not touch.
+        app = CATALOG.get(self.app)
+        if app is None:
+            raise ValueError(
+                f"unknown app {self.app!r} — choose from {sorted(CATALOG)}"
+            )
+        if self.call_ended and self.call_ended.action not in app.tools:
+            # A wrong action is the one failure this whole change cannot afford
+            # to be quiet about: the handler logs and drops, so it would look
+            # exactly like a call that ended with nothing to say.
+            raise ValueError(
+                f"{self.call_ended.action!r} is not an action of {self.app!r} — "
+                f"choose from {sorted(app.tools)}"
+            )
+        return self
 
 
 class _AgentConfigShape(BaseModel):
@@ -36,6 +82,8 @@ class _AgentConfigShape(BaseModel):
     stt: dict[str, Any] | None = None
     analysis: dict[str, Any] | None = None
     custom_tools: list[_ToolShape] | None = None
+    # `str` first so a legacy bare slug stays a slug rather than being coerced.
+    integrations: list[str | _IntegrationShape] | None = None
 
 
 def _validate_agent_config(config: dict[str, Any]) -> None:
