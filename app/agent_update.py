@@ -73,6 +73,7 @@ async def _run_regen(pool: Any, backend: dict, config: dict) -> None:
             port=backend["port"],
             tools=internal_tools,
             tool_bodies=bodies,
+            integrations=config.get("integrations"),
             agent_id=backend["agent_id"],
             webhook_secret=backend.get("webhook_secret") or "",
             builder_token=backend.get("builder_token") or "",

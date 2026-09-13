@@ -14,6 +14,8 @@ import os
 import re
 from typing import Any
 
+from ..pipedream import automations
+
 STUB_BODY = (
     "    # ponytail: stub — echoes args. Replace with real logic (or call your system).\n"
     '    return {"status": "ok", "tool": name, "arguments": args, "note": "stub"}'
@@ -48,11 +50,41 @@ def _tool_function(tool: dict[str, Any], body: str | None) -> str:
     return f'async def tool_{name}(args: dict, name: str = {name!r}) -> dict:\n{body}\n'
 
 
-def render_app_py(tools: list[dict[str, Any]], tool_bodies: dict[str, str]) -> str:
+def _automations_literal(integrations: Any) -> str:
+    """The `AUTOMATIONS` assignment, as source.
+
+    Rendered with `repr` on data that has already passed `_validate_agent_config`.
+    Keys are written in a fixed order so an unrelated edit does not rewrite the
+    file and cost a rebuild.
+    """
+    entries = [
+        {
+            "app": i.app,
+            "action": i.call_ended.action,
+            "args": dict(i.call_ended.args),
+            "summary_arg": i.call_ended.summary_arg,
+        }
+        for i in automations(integrations)
+    ]
+    if not entries:
+        return "AUTOMATIONS: list[dict] = []"
+    body = "".join(f"    {e!r},\n" for e in entries)
+    return f"AUTOMATIONS: list[dict] = [\n{body}]"
+
+
+def render_app_py(
+    tools: list[dict[str, Any]],
+    tool_bodies: dict[str, str],
+    integrations: Any = None,
+) -> str:
     validate_tool_names(tools)
     fns = "\n\n".join(_tool_function(t, tool_bodies.get(t["name"])) for t in tools)
     handlers = ", ".join(f'{t["name"]!r}: tool_{t["name"]}' for t in tools)
-    return _APP_PY.format(tool_functions=fns or "# (no custom tools)", handlers=handlers)
+    return _APP_PY.format(
+        tool_functions=fns or "# (no custom tools)",
+        handlers=handlers,
+        automations=_automations_literal(integrations),
+    )
 
 
 def render(
@@ -61,6 +93,7 @@ def render(
     port: int,
     tools: list[dict[str, Any]],
     tool_bodies: dict[str, str] | None = None,
+    integrations: Any = None,
     agent_id: str = "",
     webhook_secret: str = "",
     call_init_secret: str = "",
@@ -77,7 +110,7 @@ def render(
     # container, so the host gateway — not the console's origin.
     builder_url = os.environ.get("BUILDER_URL", "http://host.docker.internal:8000")
     return {
-        "app.py": render_app_py(tools, tool_bodies),
+        "app.py": render_app_py(tools, tool_bodies, integrations),
         # httpx: this backend calls builder-api for a Pipedream access token.
         "requirements.txt": "fastapi>=0.115\nuvicorn[standard]>=0.30\nhttpx>=0.27\n",
         "Dockerfile": _DOCKERFILE,
@@ -197,16 +230,17 @@ app.add_middleware(
 )
 
 
-# --- Automations (ADR-0018) ---
+# --- Automations (ADR-0018, ADR-0021) ---
 
 # An Automation runs because an event arrived, not because a model chose to call
 # a tool. That is the whole reason it lives here rather than in the agent's MCP
 # servers: "post the summary when the call ends" is a delivery guarantee, and
 # routing it through tool selection would turn it into an outcome.
 
-# TODO: your channel, e.g. "#sales-calls". Empty means this Automation does
-# nothing — which is exactly what an untouched backend should do.
-SLACK_CHANNEL = ""
+# Written from this agent's configuration — an app, one Action, and the inputs it
+# runs with. An agent with none posts nothing and fails nothing. Editing this list
+# works and survives until the next regeneration; the Console is what persists.
+{automations}
 
 
 async def run_pipedream_action(action_id: str, app: str, props: dict) -> dict | None:
@@ -249,27 +283,36 @@ async def run_pipedream_action(action_id: str, app: str, props: dict) -> dict | 
         return None
 
 
-async def on_call_ended(payload: dict) -> None:
-    """Post the call summary to Slack when a call ends.
-
-    `payload` is the full call.ended body: summary, analysis, duration_ms,
-    ended_reason, from_number, to_number, direction, transcript, recording_url.
-    Edit freely — this file is yours.
-    """
-    if not SLACK_CHANNEL:
-        return
+def call_summary(payload: dict) -> str:
+    """The text an Automation sends. Derived from the event, never configured —
+    what varies between Workspaces is where it goes, not what it says."""
     seconds = round((payload.get("duration_ms") or 0) / 1000)
-    text = (
+    return (
         f"*Call ended* — {{payload.get('from_number') or 'unknown'}}"
         f" → {{payload.get('to_number') or 'unknown'}}\\n"
         f"{{payload.get('summary') or '(no summary)'}}\\n"
         f"_{{seconds}}s · {{payload.get('ended_reason') or 'unknown'}}_"
     )
-    await run_pipedream_action(
-        "slack_v2-post-message",
-        "slack_v2",
-        {{"channel": SLACK_CHANNEL, "text": text}},
-    )
+
+
+async def on_call_ended(payload: dict) -> None:
+    """Run this agent's end-of-call Automations, in order.
+
+    `payload` is the full call.ended body: summary, analysis, duration_ms,
+    ended_reason, from_number, to_number, direction, transcript, recording_url.
+    Edit freely — this file is yours.
+    """
+    if not AUTOMATIONS:
+        return
+    summary = call_summary(payload)
+    for entry in AUTOMATIONS:
+        # One failure must not cost the others theirs: run_pipedream_action
+        # swallows its own, so the loop always runs to the end.
+        await run_pipedream_action(
+            entry["action"],
+            entry["app"],
+            {{**entry["args"], entry["summary_arg"]: summary}},
+        )
 
 
 # --- tool handlers (bodies authored by the builder) ---
@@ -438,7 +481,9 @@ TurnCall events directly, and serves managed call-init.
 - `POST /tools/<name>` — tool webhooks (called by TurnCall, HMAC-verified).
 - `POST /events` — TurnCall event sink (HMAC-verified). Runs `on_call_ended()`
   when a call ends: an **Automation**, which fires because the event arrived and
-  not because a model chose it. Set `SLACK_CHANNEL` in `app.py` to switch it on.
+  not because a model chose it. The `AUTOMATIONS` list in `app.py` is written from
+  this agent's configuration — change it in the Console, not here, or the next
+  regeneration overwrites you.
 - `POST /call-init` — managed call-init: picks this agent + loads caller info
   (HMAC-verified with this number's call-init secret).
 - `GET  /events` — stored events (the console polls this; CORS pinned to it).

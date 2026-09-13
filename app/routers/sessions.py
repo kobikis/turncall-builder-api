@@ -698,6 +698,7 @@ async def _run_build(
             port=port,
             tools=internal_tools,
             tool_bodies=bodies,
+            integrations=config.get("integrations"),
             agent_id=agent_id,
             webhook_secret=secret,
             builder_token=builder_token,

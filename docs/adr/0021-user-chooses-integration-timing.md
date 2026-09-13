@@ -32,7 +32,8 @@ objects rather than slugs:
   {"app": "slack_v2",
    "mid_call": true,
    "call_ended": {"action": "slack_v2-post-message",
-                  "args": {"channel": "#calls"}}},
+                  "args": {"channel": "#calls"},
+                  "summary_arg": "text"}},
   {"app": "google_calendar", "mid_call": true}
 ]
 ```
@@ -73,6 +74,15 @@ TurnCall's caps of 50 per server and 100 per agent, and every advertised tool
 rides in every LLM request for the length of the call. Letting a Workspace narrow
 that list is safe but buys little, and it complicates the cap reasoning for no
 stated need. It remains available as a separate change.
+
+**`summary_arg` names where the summary goes, and is required.** The handler
+composes the text from the `call.ended` payload — that is derived, not configured,
+because what varies between Workspaces is where a summary goes rather than what
+it says. But the text has to land in one of the action's own inputs, and those
+are the action's to name: Slack calls it `text`, and nothing says the next catalog
+app will agree. Defaulting it would mean guessing, and a wrong guess runs the
+action with an empty body and reports success — the failure shape this ADR keeps
+refusing to ship. Required, it is a 422 instead.
 
 **A bare slug still means `mid_call`.** Existing agents carry `["slack_v2"]` and
 must keep working untouched; the reader widens rather than migrating. An
