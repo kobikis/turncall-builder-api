@@ -67,6 +67,17 @@ is the point; the invitation is a courtesy.
 Add a Google Meet room only for a call or video meeting — never for something
 the caller is turning up to in person.
 
+### Logging the call itself
+
+Not yours to write either. "Add the call to a calendar" is an end-of-call
+Automation the workspace turns on per agent: it creates an entry spanning the
+call, titled how they chose, with the agent's own summary in the description.
+The times come from the call, so nothing in the prompt can improve it.
+
+Booking something *for the caller* is the prompt's job. Recording that the call
+happened is not — and a prompt that asks for both gets an agent creating a
+second, wrong event at the end of every call.
+
 ## Slack
 
 Mid-call, `slack_v2-post-message` lets the agent tell a channel something while

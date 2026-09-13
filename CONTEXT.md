@@ -321,14 +321,51 @@ endpoint
 
 **Automation**:
 An [[Action]] bound to an [[Event]], run by the [[Agent Backend]] when that event
-arrives — "post the summary to #sales when the call ends". Deterministic and
-retriable, which is the whole point of it not being a tool: an LLM may decline to
-call a tool, and "send the message" is not a decision the model should be making.
-Lives as a handler in the backend's [[Scaffold]] — generated as a stub with the
-[[Action]] pre-filled and the target marked TODO, then edited in the repo the
-user owns. Deliberately **not** a [[Console]] field: unlike an in-call
-integration, nothing about an Automation has to reach TurnCall, so nothing has
-to leave the backend. Unconditional. Distinct from an in-call integration, which
-*is* a tool and may legitimately not fire.
+arrives — "post the summary to #sales when the call ends". Deterministic, which
+is the whole point of it not being a tool: an LLM may decline to call a tool, and
+"send the message" is not a decision the model should be making. Unconditional.
+Distinct from an in-call integration, which *is* a tool and may legitimately not
+fire.
+
+Chosen in the [[Console]] on the agent, alongside [[mid-call]] exposure, and
+stored in the agent's config — but only the builder reads that half: it drives
+code generation, and nothing about an Automation reaches TurnCall. It lives as a
+handler in the backend's [[Scaffold]], generated whole from the choice rather
+than as a stub to be filled in, and still editable in the repo the user owns.
+See ADR-0021.
 _Avoid_: post-call hook, trigger, workflow, "action" alone (that's the operation
 it runs)
+
+**Trigger** — [[mid-call]] vs [[end-of-call]]:
+When an attached [[Connected app]] runs, chosen per app and not symmetric,
+because the two ask different questions. Mid-call asks *which tools may the
+model choose from* — a set, with the arguments supplied at runtime by the model.
+End-of-call asks *which one [[Action]] runs, and with what arguments* — nothing
+chooses at runtime, so both are decided up front. An app may carry either, both,
+or (before ADR-0021) neither, which is now refused. See ADR-0021.
+_Avoid_: "schedule" for mid-call (nothing guarantees the model calls it),
+treating the two as one list
+
+**Catalog**:
+The apps this build can connect, and for each the pinned tool allowlist, the
+[[Action]]s worth running at [[end-of-call]], and what each Action needs asked.
+Curated in code, not discovered: nothing in the system can answer "what can this
+app do" without someone having written it down. Deliberate — the pinning is
+load-bearing, because a provider generates one tool per registry action (50 for
+Slack, against TurnCall's cap of 50 per server) and every advertised tool rides
+in every LLM request for the length of the call. The exception is an input's
+*values*, which are fetched live per [[Connected app]]: see [[input options]].
+See ADR-0018, ADR-0021, ADR-0022.
+_Avoid_: "registry" (that is the provider's, and it is far larger), "the list of
+integrations"
+
+**Input options**:
+The values one [[Action]] input will accept, listed by asking the provider on
+behalf of this [[Workspace]]'s [[Connected app]] — the channels in that Slack,
+the calendars in that Google account. The one part of the [[Catalog]] that is
+discovered rather than curated, because it is the one part that is nobody's to
+curate: it belongs to the Workspace and changes without telling anyone. Shown as
+a picker that stores an id and displays a name. Failing to fetch them costs the
+picker and never the form. See ADR-0022.
+_Avoid_: "schema" (the prop's *shape* is still curated; this is only its values),
+"autocomplete"

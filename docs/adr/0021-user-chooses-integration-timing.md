@@ -208,6 +208,12 @@ options for a field like "which channel" are fetched per connected account at
 configure time, so the form needs round-trips rather than a schema render — and
 the endpoint shapes have not been verified against current Pipedream docs.
 
+> **Update: one slice of this was taken — see ADR-0022.** An input's *values* are
+> now fetched live per connected account, because they are the one part of the
+> catalog that is nobody's to curate. The round trip this paragraph predicted
+> exists. Everything else here stands: the tool allowlist, the Action menu and
+> the form's fields are still curated, and `CATALOG` is still the gate.
+
 ADR-0017's raw `mcp_servers` form remains the escape hatch for anything the
 catalog does not carry, unchanged by this ADR.
 
@@ -216,6 +222,17 @@ catalog does not carry, unchanged by this ADR.
 The automation stops being a constant, so the generator needs the integrations
 list: `render()` takes it, and the block is emitted per `call_ended` entry with
 its action and bound arguments, or not at all.
+
+**An Automation is delivered at least once and runs at most once.** TurnCall
+retries a `call.ended` it did not get an answer to in time, and a third-party
+Action is a round trip long enough that the first attempt timed out while the
+action was still running — so the retry ran it again, and a second calendar
+entry for one call is not a cosmetic fault. The generated handler therefore
+answers *before* running the Automation, and keys on the envelope's `event_id`,
+which TurnCall documents as stable across retries. Backgrounding makes a
+redelivery unlikely; honouring the key is what makes one harmless. The event
+itself is still stored on every delivery — a redelivery did happen, and the log
+should say so.
 
 The message is assembled by the generated handler; the summary inside it is the
 agent's. TurnCall sends a written summary in the `call.ended` payload and the
