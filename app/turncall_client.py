@@ -212,6 +212,91 @@ class TurnCallClient:
             body["session_id"] = session_id
         return await self._request("POST", "/v1/chat", api_key=api_key, json=body)
 
+    # ------------------------------------------------------------- evals
+    #
+    # TurnCall owns every bit of this: scenarios, runs, batches, mocks and
+    # verdicts. Nothing eval-shaped is stored here, so these are pass-throughs
+    # that exist only to carry the agent's API key. See turncall#68 and
+    # https://github.com/kobikis/turncall/blob/main/docs/guides/evals.mdx
+
+    async def list_eval_scenarios(
+        self, api_key: str, *, tag: str | None = None
+    ) -> dict[str, Any]:
+        params = {"tag": tag} if tag else None
+        return await self._request(
+            "GET", "/v1/eval-scenarios", api_key=api_key, extract="json", params=params
+        )
+
+    async def create_eval_scenario(
+        self, api_key: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/v1/eval-scenarios", api_key=api_key, json=body
+        )
+
+    async def update_eval_scenario(
+        self, scenario_id: str, api_key: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "PUT", f"/v1/eval-scenarios/{scenario_id}", api_key=api_key, json=body
+        )
+
+    async def delete_eval_scenario(self, scenario_id: str, api_key: str) -> None:
+        await self._request(
+            "DELETE", f"/v1/eval-scenarios/{scenario_id}", api_key=api_key
+        )
+
+    async def create_eval_run(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Queue one scenario, or every scenario carrying a tag.
+
+        202 Accepted: a separate worker executes it, so the response carries a
+        batch id and the runs it created, not a verdict.
+        """
+        return await self._request("POST", "/v1/eval-runs", api_key=api_key, json=body)
+
+    async def list_eval_runs(
+        self,
+        api_key: str,
+        *,
+        status: str | None = None,
+        scenario_id: str | None = None,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        params = {
+            k: v
+            for k, v in {
+                "status": status,
+                "scenario_id": scenario_id,
+                "batch_id": batch_id,
+            }.items()
+            if v
+        }
+        return await self._request(
+            "GET", "/v1/eval-runs", api_key=api_key, extract="json", params=params
+        )
+
+    async def get_eval_run(self, run_id: str, api_key: str) -> dict[str, Any]:
+        return await self._request("GET", f"/v1/eval-runs/{run_id}", api_key=api_key)
+
+    async def get_eval_batch(self, batch_id: str, api_key: str) -> dict[str, Any]:
+        """One verdict for a batch, without every run's transcripts."""
+        return await self._request(
+            "GET", f"/v1/eval-runs/batches/{batch_id}", api_key=api_key
+        )
+
+    async def scenario_from_call(
+        self, api_key: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Derive a scenario draft from a finished call.
+
+        `save` defaults to False in TurnCall and must keep doing so through
+        here: the draft asserts whatever the agent did on that call, mistakes
+        included, so it is shown for review before anything is stored.
+        """
+        return await self._request(
+            "POST", "/v1/eval-scenarios/from-call", api_key=api_key, json=body
+        )
+
     # -------------------------------------------------------- knowledge
 
     async def list_knowledge_bases(self, api_key: str) -> list[dict[str, Any]]:
