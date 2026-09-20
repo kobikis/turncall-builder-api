@@ -102,14 +102,77 @@ def test_a_tag_run_returns_every_run_it_created(client, mocks):
 
 
 def test_a_rejected_scenario_says_which_field(client, mocks):
-    """The whole reason this router exists rather than a bare passthrough."""
+    """The whole reason this router exists rather than a bare passthrough.
+
+    The body here is copied from a live TurnCall, not invented: a validation
+    failure puts "Validation error" in `error` and the useful text down in
+    `details.errors[].msg`. The first version of this test asserted the shape
+    I assumed, passed, and shipped a Console that said "Validation error".
+    """
     mocks.registry.get_backend.return_value = backend_row()
-    mocks.client.create_eval_scenario.side_effect = _turncall_rejects(
-        422, "'turns:' must be a list"
+    request = httpx.Request("POST", "http://turncall/v1/eval-scenarios")
+    response = httpx.Response(
+        422,
+        request=request,
+        json={
+            "success": False,
+            "error": "Validation error",
+            "code": "validation_error",
+            "details": {
+                "errors": [
+                    {
+                        "type": "value_error",
+                        "loc": ["body"],
+                        "msg": "Value error, <stored scenario>: 'turns:' must be a list",
+                    }
+                ]
+            },
+        },
+    )
+    mocks.client.create_eval_scenario.side_effect = httpx.HTTPStatusError(
+        "invalid", request=request, response=response
     )
     r = client.post("/agents/a1/eval-scenarios", json=SCENARIO)
     assert r.status_code == 422
-    assert r.json()["detail"] == "'turns:' must be a list"
+    detail = r.json()["detail"]
+    assert "'turns:' must be a list" in detail
+    # Pydantic's own prefix is noise to whoever is fixing the scenario.
+    assert not detail.startswith("Value error")
+    assert detail != "Validation error", "the generic label helps nobody"
+
+
+def test_several_field_errors_are_all_reported(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    request = httpx.Request("POST", "http://turncall/v1/eval-scenarios")
+    response = httpx.Response(
+        422,
+        request=request,
+        json={
+            "error": "Validation error",
+            "details": {
+                "errors": [
+                    {"msg": "Value error, name is required"},
+                    {"msg": "Value error, 'turns:' must be a list"},
+                ]
+            },
+        },
+    )
+    mocks.client.create_eval_scenario.side_effect = httpx.HTTPStatusError(
+        "invalid", request=request, response=response
+    )
+    r = client.post("/agents/a1/eval-scenarios", json=SCENARIO)
+    assert "name is required" in r.json()["detail"]
+    assert "'turns:' must be a list" in r.json()["detail"]
+
+
+def test_a_business_error_still_comes_through_its_own_field(client, mocks):
+    """The other shape: `error` holds the message and there are no details."""
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.create_eval_scenario.side_effect = _turncall_rejects(
+        409, "Eval scenario 'greets' already exists"
+    )
+    r = client.post("/agents/a1/eval-scenarios", json=SCENARIO)
+    assert r.json()["detail"] == "Eval scenario 'greets' already exists"
 
 
 def test_an_empty_tag_reports_turncalls_refusal(client, mocks):

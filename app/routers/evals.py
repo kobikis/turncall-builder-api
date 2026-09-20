@@ -27,18 +27,55 @@ from ..deps import AuthContext, require_editor, require_member
 router = APIRouter()
 
 
+# Pydantic prefixes a raised ValueError with this; it is noise to a reader who
+# only wants to know which field is wrong.
+_VALUE_ERROR_PREFIX = "Value error, "
+
+
+def _validation_messages(body: dict[str, Any]) -> str | None:
+    """The field-level messages out of TurnCall's validation envelope.
+
+    Its errors come in two shapes, and only one of them puts the useful text
+    where you would first look:
+
+        business   {"error": "no scenarios carry the tag 'pre-publsh'", ...}
+        validation {"error": "Validation error",
+                    "details": {"errors": [{"msg": "Value error, ...", ...}]}}
+
+    The second is the one a scenario author actually hits — a definition
+    pipecat rejects — and reading only `error` there reports "Validation
+    error", which is exactly as useless as the "scenario failed" this function
+    exists to avoid. Verified against a live TurnCall; a unit test alone agreed
+    with the wrong assumption.
+    """
+    errors = (body.get("details") or {}).get("errors")
+    if not isinstance(errors, list):
+        return None
+    messages = []
+    for err in errors:
+        msg = err.get("msg") if isinstance(err, dict) else None
+        if msg:
+            messages.append(str(msg).removeprefix(_VALUE_ERROR_PREFIX))
+    return "; ".join(messages) or None
+
+
 def _turncall_error(exc: httpx.HTTPStatusError, fallback: str) -> HTTPException:
     """TurnCall's message, not ours.
 
-    Its errors are `{"success": false, "error": "...", "code": "..."}` and the
-    error names the field — "turns: must be a list", "no scenarios carry the
-    tag 'pre-publsh'". That is the whole value of the response to whoever is
-    writing the scenario, so it reaches the browser intact.
+    The message names the offending field — "'turns:' must be a list", "no
+    scenarios carry the tag 'pre-publsh'" — and that is the whole value of the
+    response to whoever is writing the scenario, so it reaches the browser
+    intact.
     """
     detail = fallback
     try:
         body = exc.response.json()
-        detail = body.get("error") or body.get("detail") or fallback
+        detail = (
+            _validation_messages(body)
+            or body.get("error")
+            or body.get("detail")
+            or fallback
+        )
     except Exception:
         pass
     return HTTPException(status_code=exc.response.status_code, detail=detail)
