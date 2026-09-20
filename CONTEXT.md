@@ -283,6 +283,26 @@ Agent Backend stores); the Calls tab shows Call records with the Event feed
 alongside.
 _Avoid_: call log, call history entry
 
+**Eval scenario** / **Eval run**:
+One saved behavioural test for an Agent, and one execution of it. Both live in
+TurnCall, not here — builder-api proxies them workspace-scoped with the Agent's
+own API key the way it proxies [[Call record]]s, and stores no eval state. Shown
+on the Console's **Evals** tab beside Calls and Takeaways: scenarios for the
+Agent you are looking at, run with one click, verdict read back inline. A run
+reports `passed_count`/`failed_count` out of its iterations — there is no score
+— and `errored` means TurnCall *could not check*, not that the agent failed.
+Editors run; viewers read.
+_Avoid_: "test suite"; rendering `errored` as a failure.
+
+**Save as scenario**:
+The button that turns a conversation that already happened into an [[Eval
+scenario]] draft — on a row in the Calls tab (via TurnCall's `from-call`) and on
+the manual text test (via `from-session`). Nobody sits down to author test cases
+for a voice agent; they do click a button on a call that went wrong, which is
+why the library populates itself. The result is a **draft**: it asserts whatever
+the agent did that day, and the UI says so.
+_Avoid_: presenting a derived scenario as a finished test.
+
 **Tool server**:
 Where a custom tool executes. By default the Agent Backend; a Config may name
 the user's own server instead — per agent (a base URL all tools route to) or
