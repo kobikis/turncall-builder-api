@@ -297,6 +297,18 @@ class TurnCallClient:
             "POST", "/v1/eval-scenarios/from-call", api_key=api_key, json=body
         )
 
+    async def scenario_from_session(
+        self, api_key: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Derive a scenario draft from a finished text conversation.
+
+        The chat equivalent of `scenario_from_call` (turncall#87), and the one
+        a console's manual test produces: a text test is a session, not a call.
+        """
+        return await self._request(
+            "POST", "/v1/eval-scenarios/from-session", api_key=api_key, json=body
+        )
+
     # -------------------------------------------------------- knowledge
 
     async def list_knowledge_bases(self, api_key: str) -> list[dict[str, Any]]:

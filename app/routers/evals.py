@@ -105,6 +105,15 @@ class RunBody(BaseModel):
     iterations: int = Field(default=1, ge=1)
 
 
+class FromSessionBody(BaseModel):
+    session_id: str
+    name: str | None = None
+    # Same default as the call path, for the same reason: a derived scenario
+    # asserts whatever the agent did in that conversation.
+    save: bool = False
+    tags: list[str] = Field(default_factory=list)
+
+
 class FromCallBody(BaseModel):
     call_id: str
     name: str | None = None
@@ -253,4 +262,25 @@ async def scenario_from_call(
         # "the call has no caller speech", "convert it once it has ended" —
         # TurnCall's refusals say what to do about them.
         raise _turncall_error(exc, "could not derive a scenario from that call") from exc
+    return {"success": True, "data": data}
+
+
+@router.post("/agents/{agent_id}/eval-scenarios/from-session")
+async def scenario_from_session(
+    agent_id: str, body: FromSessionBody, ctx: AuthContext = Depends(require_editor)
+) -> dict[str, Any]:
+    """Derive a scenario draft from one of this agent's text conversations.
+
+    The chat sibling of `from-call`. Editor+ for the same reason: it reads the
+    conversation and the results its tools returned.
+    """
+    b = await _backend_or_404(agent_id, ctx.workspace_id)
+    try:
+        data = await runtime.get_client().scenario_from_session(
+            b["api_key"], body.model_dump()
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _turncall_error(
+            exc, "could not derive a scenario from that conversation"
+        ) from exc
     return {"success": True, "data": data}
