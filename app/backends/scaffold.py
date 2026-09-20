@@ -216,6 +216,13 @@ def _db():
     # been acted on.
     conn.execute("CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, tool TEXT, input TEXT, output TEXT)")
+    # What each Automation did, so a post that never arrived is visible somewhere
+    # other than this container's stdout. Same reason `handled` is its own table:
+    # an existing backend upgrades by creating it, with no migration.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS automation_runs"
+        " (id INTEGER PRIMARY KEY, at TEXT, action TEXT, ok INTEGER, reason TEXT, detail TEXT)"
+    )
     return conn
 
 
@@ -268,6 +275,38 @@ app.add_middleware(
 {automations}
 
 
+def _record(action: str, ok: bool, reason: str, detail: str = "") -> None:
+    """Log one Automation outcome, to stdout and to the database.
+
+    Four failures, kept apart on purpose: `not_connected` is an admin\'s problem
+    (nobody authorized the app, or someone disconnected it), `refused` is an
+    editor\'s (the channel is archived, the calendar id is stale), `unfilled`
+    means the call could not supply a required input, and `error` is the network
+    or the token. Collapsing them into "failed" makes the surface worth about as
+    much as the print it replaces.
+
+    Never raises. The call has already ended, and a bookkeeping failure must not
+    cost the Automations that come after this one.
+    """
+    if not ok:
+        # Only failures are printed. Silence has to keep meaning success, or the
+        # log is noise nobody reads — which is how this feature got filed. The
+        # success still gets a row: "nothing has run yet" and "every run failed"
+        # are different answers and the Console has to be able to tell them apart.
+        line = f"automation: {{action}} {{reason}}"
+        print(line if not detail else f"{{line}} — {{detail}}")
+    try:
+        with closing(_db()) as conn:
+            conn.execute(
+                "INSERT INTO automation_runs (at, action, ok, reason, detail)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (datetime.now(UTC).isoformat(), action, 1 if ok else 0, reason, detail),
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"automation: could not record {{action}} ({{exc}})")
+
+
 def _action_error(result: dict) -> str | None:
     """What the third-party API refused, if it did.
 
@@ -297,7 +336,7 @@ async def run_pipedream_action(
         pd = await pipedream_token()
         account = next((a for a in pd.get("accounts", []) if a["app"] == app), None)
         if account is None:
-            print(f"automation: no connected {{app}} account — skipping {{action_id}}")
+            _record(action_id, False, "not_connected", f"no connected {{app}} account")
             return None
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
@@ -324,14 +363,14 @@ async def run_pipedream_action(
         result = r.json()
         refused = _action_error(result)
         if refused:
-            print(f"automation: {{app}} refused {{action_id}} ({{refused}})")
+            _record(action_id, False, "refused", f"{{app}} refused it: {{refused}}")
             return None
+        _record(action_id, True, "ok")
         return result
     except Exception as exc:  # noqa: BLE001
-        # ponytail: log and move on. Retry policy and failure surfacing are
-        # deliberately out of scope (ADR-0018) — the call has already ended, and
-        # a failed post must never become its problem.
-        print(f"automation: {{action_id}} failed ({{exc}})")
+        # ponytail: record and move on. Retry is still out of scope — the call
+        # has already ended, and a failed post must never become its problem.
+        _record(action_id, False, "error", str(exc))
         return None
 
 
@@ -391,9 +430,11 @@ async def on_call_ended(payload: dict) -> None:
             if not value
         ]
         if blank:
-            print(
-                f"automation: skipping {{entry['action']}} —"
-                f" the call cannot fill {{', '.join(blank)}}"
+            _record(
+                entry["action"],
+                False,
+                "unfilled",
+                f"the call cannot fill {{', '.join(blank)}}",
             )
             continue
         summary = call_summary(payload, entry.get("summary_style", "plain"))
@@ -552,6 +593,37 @@ def list_events() -> dict:
     return {{"success": True, "data": {{"events": [json.loads(r[0]) for r in rows]}}}}
 
 
+@app.get("/automations")
+def list_automation_runs() -> dict:
+    """What each Automation did, newest first.
+
+    Read by the Console the same way it reads `/events` — straight from this
+    backend, which is the only thing that knows. An empty list means none has
+    run yet, which is different from every one having failed; the Console has to
+    say which.
+    """
+    with closing(_db()) as conn:
+        rows = conn.execute(
+            "SELECT at, action, ok, reason, detail FROM automation_runs"
+            " ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+    return {{
+        "success": True,
+        "data": {{
+            "runs": [
+                {{
+                    "at": r[0],
+                    "action": r[1],
+                    "ok": bool(r[2]),
+                    "reason": r[3],
+                    "detail": r[4],
+                }}
+                for r in rows
+            ]
+        }},
+    }}
+
+
 @app.get("/health")
 def health() -> dict:
     return {{"status": "ok"}}
@@ -588,7 +660,8 @@ AGENT_ID=
 WEBHOOK_SECRET=
 # Set when a phone number binds with managed call-init. Leave empty otherwise.
 CALL_INIT_SECRET=
-# Origin allowed to read GET /events. The console, or your own dashboard.
+# Origin allowed to read GET /events and GET /automations. The console, or your
+# own dashboard.
 CONSOLE_ORIGIN=http://localhost:5173
 # The clock the agent reasons in — call-init tells it today's date in this zone.
 # An IANA name, e.g. Asia/Jerusalem. Wrong or missing falls back to UTC.
@@ -626,6 +699,10 @@ TurnCall events directly, and serves managed call-init.
 - `POST /call-init` — managed call-init: picks this agent + loads caller info
   (HMAC-verified with this number's call-init secret).
 - `GET  /events` — stored events (the console polls this; CORS pinned to it).
+- `GET  /automations` — what each Automation did, newest first: `ok`, or one of
+  `not_connected` / `refused` / `unfilled` / `error` with the detail. A Slack
+  post that silently stopped arriving is visible here rather than only in this
+  container's logs.
 
 Secrets live in `.env` (gitignored) — do not commit or share it. Verification
 fails closed: if a secret is missing the matching endpoint rejects traffic.

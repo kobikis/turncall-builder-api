@@ -847,6 +847,95 @@ def test_an_observation_that_is_not_an_error_is_not_treated_as_one(monkeypatch, 
     assert "automation:" not in capsys.readouterr().out
 
 
+# --- what the Automation did is readable, not just printed (#47) --------------
+#
+# ADR-0021 made an Automation something a Workspace configures in the Console.
+# Configuring a thing in a UI and never hearing from it again is how a Slack post
+# that silently stopped arriving reads as a quiet week.
+
+
+def _runs(monkeypatch, tmp_path):
+    """`GET /automations`, read the way the Console reads it.
+
+    Renders the backend a second time in the same directory, which also proves
+    the no-migration claim: an existing `events.db` gains the table on open.
+    """
+    from fastapi.testclient import TestClient
+
+    files = scaffold.render(slug="x-1", port=9001, tools=[], agent_id="agent-123")
+    ns: dict = {}
+    exec(compile(files["app.py"], "app.py", "exec"), ns)  # noqa: S102 — our own scaffold
+    r = TestClient(ns["app"]).get("/automations")
+    assert r.status_code == 200
+    return r.json()["data"]["runs"]
+
+
+def test_a_refused_post_is_recorded_where_someone_will_look(monkeypatch, tmp_path):
+    _events(monkeypatch, tmp_path, channel="#calls", responses=_pipedream(_SLACK_REFUSED))
+
+    [run] = _runs(monkeypatch, tmp_path)
+    assert run["ok"] is False
+    assert run["reason"] == "refused"
+    assert run["action"] == "slack_v2-post-message"
+    assert "not_authed" in run["detail"]
+    assert run["at"]
+
+
+def test_a_missing_account_is_not_the_same_failure_as_a_refusal(monkeypatch, tmp_path):
+    """`not_connected` is an admin\'s problem and `refused` is an editor\'s.
+
+    Collapsing them into "failed" leaves the Console unable to say who should do
+    what, which is most of the value of recording anything.
+    """
+
+    def _no_accounts(url, **kw):
+        if url.endswith("/integrations/token"):
+            return _Resp({"data": {
+                "access_token": "pd_tok", "expires_at": 9_999_999_999.0,
+                "external_user_id": "ws-1", "project_id": "p",
+                "environment": "development", "accounts": [],
+            }})
+        return _Resp({"ok": True})
+
+    _events(monkeypatch, tmp_path, channel="#c", responses=_no_accounts)
+
+    [run] = _runs(monkeypatch, tmp_path)
+    assert (run["ok"], run["reason"]) == (False, "not_connected")
+
+
+def test_a_provider_that_is_down_is_recorded_as_an_error(monkeypatch, tmp_path):
+    def _explode(url, **kw):
+        if "actions/run" in url:
+            raise RuntimeError("pipedream is down")
+        return _Resp({"data": {
+            "access_token": "pd_tok", "expires_at": 9_999_999_999.0,
+            "external_user_id": "ws-1", "project_id": "p", "environment": "development",
+            "accounts": [{"id": "apn_slack", "app": "slack_v2"}],
+        }})
+
+    resp, _ = _events(monkeypatch, tmp_path, channel="#c", responses=_explode)
+
+    assert resp.status_code == 200  # still never the call\'s problem
+    [run] = _runs(monkeypatch, tmp_path)
+    assert (run["ok"], run["reason"]) == (False, "error")
+    assert "pipedream is down" in run["detail"]
+
+
+def test_a_post_that_worked_is_recorded_too(monkeypatch, tmp_path, capsys):
+    """Otherwise "nothing has run yet" and "every run failed" look identical."""
+    _events(monkeypatch, tmp_path, channel="#calls", responses=_pipedream({"os": [], "ret": {"ok": True}}))
+
+    [run] = _runs(monkeypatch, tmp_path)
+    assert (run["ok"], run["reason"]) == (True, "ok")
+    # ...and the log still says nothing, so silence keeps meaning success.
+    assert "automation:" not in capsys.readouterr().out
+
+
+def test_an_agent_that_has_run_nothing_answers_empty_rather_than_failing(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert _runs(monkeypatch, tmp_path) == []
+
+
 # --- toolgen must not fabricate a third-party call ----------------------------
 #
 # A generated body that simulates success is worse than no body at all: the
