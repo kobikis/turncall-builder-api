@@ -276,3 +276,43 @@ def test_a_viewer_cannot_delete_a_scenario(gate_client, mocks):
     r = gate_client.delete("/agents/a1/eval-scenarios/s1", headers=WS_HEADER)
     assert r.status_code == 403
     mocks.client.delete_eval_scenario.assert_not_called()
+
+
+# ---- deriving from a text conversation -------------------------------------
+
+
+def test_from_session_defaults_to_review_not_save(client, mocks):
+    """A manual test in the Console is a chat session, not a call — and the
+    draft it produces asserts whatever the agent said in it."""
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.scenario_from_session.return_value = {"saved": False}
+    r = client.post(
+        "/agents/a1/eval-scenarios/from-session", json={"session_id": "sess-1"}
+    )
+    assert r.status_code == 200
+    assert mocks.client.scenario_from_session.await_args.args[1]["save"] is False
+
+
+def test_from_session_reports_turncalls_refusal(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.scenario_from_session.side_effect = _turncall_rejects(
+        400, "the call has no caller speech to build turns from"
+    )
+    r = client.post(
+        "/agents/a1/eval-scenarios/from-session", json={"session_id": "sess-1"}
+    )
+    assert r.status_code == 400
+    assert "no caller speech" in r.json()["detail"]
+
+
+def test_a_viewer_cannot_derive_from_a_session_either(gate_client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    _login_as(mocks, "viewer")
+    gate_client.cookies.set(COOKIE, "live")
+    r = gate_client.post(
+        "/agents/a1/eval-scenarios/from-session",
+        json={"session_id": "sess-1"},
+        headers=WS_HEADER,
+    )
+    assert r.status_code == 403
+    mocks.client.scenario_from_session.assert_not_called()
