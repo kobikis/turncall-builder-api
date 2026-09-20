@@ -59,6 +59,18 @@ per call and expire within the hour; nothing durable lives in an agent's config.
 Anything outside that small curated list is still reachable as a raw MCP server.
 See `docs/adr/0018`, `0021` and `0022`.
 
+### Evals
+
+Change a prompt and you want to know whether the agent still behaves. Each
+agent has an **Evals** tab: saved behavioural scenarios, run against it with one
+click, verdict inline. The engine is TurnCall's; the builder proxies it and
+stores no eval state.
+
+Scenarios write themselves. A call that went wrong, or a text test you just ran
+by hand, becomes a draft with one button — caller turns, agent replies as
+expectations, and every tool the agent called mocked with the response it really
+returned. Edit it down to what should have happened, and it runs forever.
+
 Frontend lives in
 [`turncall-builder-web`](https://github.com/kobikis/turncall-builder-web).
 The voice runtime it targets is the MIT-licensed
