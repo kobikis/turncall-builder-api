@@ -353,6 +353,17 @@ code generation, and nothing about an Automation reaches TurnCall. It lives as a
 handler in the backend's [[Scaffold]], generated whole from the choice rather
 than as a stub to be filled in, and still editable in the repo the user owns.
 See ADR-0021.
+
+**Automation run**: what one Automation did, recorded by the backend and read
+back at `GET /automations` — `ok`, or one of four failures kept deliberately
+apart: `not_connected` (nobody authorized the app — an admin's problem),
+`refused` (the provider rejected it: an archived channel, a stale calendar id —
+an editor's), `unfilled` (the call had nothing to put in a required input) and
+`error` (the token or the network). The Console shows the latest one beside the
+Automation it belongs to. Never having run is a distinct state from having
+failed, and the surface has to say which — the failure mode this replaces was a
+Slack post that silently stopped arriving and read as a quiet week. Recording it
+never raises and never retries: the call has already ended (ADR-0018).
 _Avoid_: post-call hook, trigger, workflow, "action" alone (that's the operation
 it runs)
 
