@@ -292,7 +292,16 @@ Agent you are looking at, run with one click, verdict read back inline. A run
 reports `passed_count`/`failed_count` out of its iterations — there is no score
 — and `errored` means TurnCall *could not check*, not that the agent failed.
 Editors run; viewers read.
-_Avoid_: "test suite"; rendering `errored` as a failure.
+
+A scenario also carries the **judge** that decides its verdicts
+(`{provider, model, temperature}`, turncall#118/#119). This router adds no
+schema for it: the body passes through, and the closed set of providers is
+enforced where it is defined. One thing it does have to get right — the update
+forwards what the browser **sent**, nulls included, because `judge: null` means
+"back to the platform default" and dropping it would leave the Console offering
+a choice that silently did nothing.
+_Avoid_: "test suite"; rendering `errored` as a failure; validating TurnCall's
+eval fields here.
 
 **Save as scenario**:
 The button that turns a conversation that already happened into an [[Eval
