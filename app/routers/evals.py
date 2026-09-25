@@ -157,7 +157,14 @@ async def update_eval_scenario(
     b = await _backend_or_404(agent_id, ctx.workspace_id)
     try:
         data = await runtime.get_client().update_eval_scenario(
-            scenario_id, b["api_key"], body.model_dump(exclude_none=True)
+            # `exclude_unset`, not `exclude_none`: a PUT forwards what the
+            # browser sent, and for `judge`/`simulator` an explicit null is a
+            # real instruction — "back to the platform default" (turncall#119).
+            # Dropping it would leave the Console offering a choice that
+            # silently did nothing.
+            scenario_id,
+            b["api_key"],
+            body.model_dump(exclude_unset=True),
         )
     except httpx.HTTPStatusError as exc:
         raise _turncall_error(exc, "could not update the scenario") from exc

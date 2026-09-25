@@ -316,3 +316,46 @@ def test_a_viewer_cannot_derive_from_a_session_either(gate_client, mocks):
     )
     assert r.status_code == 403
     mocks.client.scenario_from_session.assert_not_called()
+
+
+# ---- editing a scenario's judge (turncall#118/#119) ------------------------
+
+
+def test_a_judge_reaches_turncall_unaltered(client, mocks):
+    """The router adds no schema of its own: `judge` is TurnCall's field, and
+    the closed set of providers is enforced where it is defined."""
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.update_eval_scenario.return_value = {"id": "s1"}
+    r = client.put(
+        "/agents/a1/eval-scenarios/s1",
+        json={"judge": {"provider": "openai", "model": "gpt-4o", "temperature": 0}},
+        headers=WS_HEADER,
+    )
+    assert r.status_code == 200
+    sent = mocks.client.update_eval_scenario.call_args[0][2]
+    assert sent["judge"] == {"provider": "openai", "model": "gpt-4o", "temperature": 0}
+
+
+def test_clearing_the_judge_survives_the_proxy(client, mocks):
+    """`judge: null` means "back to the platform default". Stripping nulls on
+    the way through would make that choice do nothing at all, which is worse
+    than refusing it."""
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.update_eval_scenario.return_value = {"id": "s1"}
+    r = client.put(
+        "/agents/a1/eval-scenarios/s1", json={"judge": None}, headers=WS_HEADER
+    )
+    assert r.status_code == 200
+    sent = mocks.client.update_eval_scenario.call_args[0][2]
+    assert "judge" in sent and sent["judge"] is None
+
+
+def test_a_field_the_browser_never_sent_is_not_forwarded(client, mocks):
+    """The other half of the same rule: absent still means "leave it alone"."""
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.update_eval_scenario.return_value = {"id": "s1"}
+    client.put(
+        "/agents/a1/eval-scenarios/s1", json={"name": "renamed"}, headers=WS_HEADER
+    )
+    sent = mocks.client.update_eval_scenario.call_args[0][2]
+    assert sent == {"name": "renamed"}
