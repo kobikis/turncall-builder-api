@@ -22,6 +22,7 @@ from . import builder, pipedream_store, runtime, schema_check
 from .backends import generator, registry
 from .db import create_pool
 from .routers import (
+    agent_activity,
     agents,
     auth,
     calls,
@@ -120,7 +121,7 @@ app.add_middleware(
 )
 
 for _router in (
-    sessions, agents, phones, calls, evals, knowledge, takeaways, auth, workspaces,
-    members, github, skills, integrations,
+    sessions, agents, agent_activity, phones, calls, evals, knowledge, takeaways,
+    auth, workspaces, members, github, skills, integrations,
 ):
     app.include_router(_router.router)
