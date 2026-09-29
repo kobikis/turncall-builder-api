@@ -143,11 +143,15 @@ The subset of TurnCall agent fields the Builder is allowed to set (name,
 system_prompt, first_message, llm, voice, built-in tools, and `aws.region` for
 the AWS providers). Everything outside it takes TurnCall defaults.
 
-**Credentials are outside the config surface, permanently.** The Builder may
-select an AWS *region* but never emits `access_key_id`, `secret_access_key` or
-`role_arn` — those belong to whoever operates the TurnCall server, and agent
-config is stored unencrypted. A generated config that carried a key would put
-it in a database row and in every API response that isn't masked.
+**Credentials reach TurnCall as [[Integration]]s, never as config.** The Builder
+may select an AWS *region* but never emits `access_key_id`, `secret_access_key`
+or `role_arn` into a generated config — agent config is stored unencrypted, and a
+config carrying a key would put it in a database row and in every API response
+that isn't masked. That much is unchanged. What changed is that a [[Workspace]]'s
+own provider keys are no longer the server operator's alone: they are entered on
+the [[Console]], stored encrypted here, and projected into TurnCall's own
+encrypted credential store. The config surface itself stays credential-free.
+See ADR-0023, and turncall ADR-0020.
 _Avoid_: schema (ambiguous with the full TurnCall schema)
 
 **Agent Backend**:
@@ -409,3 +413,41 @@ a picker that stores an id and displays a name. Failing to fetch them costs the
 picker and never the form. See ADR-0022.
 _Avoid_: "schema" (the prop's *shape* is still curated; this is only its values),
 "autocomplete"
+
+**Integration**:
+A [[Workspace]]'s own account with a provider — its Deepgram key, its AWS
+credentials — entered on the [[Console]], stored encrypted here, and projected
+into TurnCall as a Project credential. One per provider *account*, never per
+role: Deepgram is one key serving transcription and voice, OpenAI one serving
+four, so a card is a provider and never a (role, provider) pair. Absent one, a
+provider falls back to the key the TurnCall server itself holds — which is why a
+card states which key will run the call rather than only "connected". Entering
+and disconnecting are admin-only; an editor sees presence, because the agent form
+has to be able to flag a provider with no key. See ADR-0023.
+_Avoid_: "provider" (that is the *selected backend*, TurnCall's word), "API key"
+alone (the AWS one is a credential set), "[[Connected app]]" (Pipedream's, and
+minted per call).
+
+**Workspace MCP server**:
+An MCP server registered once for a [[Workspace]] and opted into per agent,
+instead of retyped into each agent's config (ADR-0017 put them on the agent; this
+puts the definition one level up). The master — URL and headers, which carry
+bearer tokens — lives encrypted here; what TurnCall receives is a [[Projection]]
+into that agent's `mcp_servers`, the same shape the Pipedream target already
+takes in `apply_update`. Opt-in and never inherited, because TurnCall connects
+every configured server at call start under one 10s discovery budget and past it
+the call proceeds with *no* MCP tools: one slow server, inherited by default,
+silently disarms every agent in the Workspace. An agent's own inline server still
+wins a name collision. `stdio` stays refused (ADR-0017). See ADR-0023.
+_Avoid_: "shared MCP server", "global server" (it belongs to a Workspace, not the
+deployment).
+
+**Projection** (of an [[Integration]] or a [[Workspace MCP server]]):
+The copy written into each agent or TurnCall project when a workspace-scoped
+record changes. The master here is authoritative and the copy disposable —
+rewritten, never read back. Because the Builder mints one TurnCall project per
+agent, one change is N writes, so a projection is idempotent and reports
+per-agent state; on a *removal* it projects first and deletes the master last,
+since the reverse order strands agents holding a credential nothing points at.
+_Avoid_: "sync" (nothing is bidirectional — a master never learns from a copy),
+"broadcast".
