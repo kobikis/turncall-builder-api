@@ -376,6 +376,26 @@ class TestMCPServers:
         assert "mcp_servers" not in _with_servers(["not-a-server", None, 42])
 
 
+class TestAmbience:
+    def test_passes_through_untouched(self):
+        ambience = {"sound": "290679e3-6630-49c7-90b1-b9186bf177e0", "volume": 0.2}
+
+        config = to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "ambience": ambience}
+        )["config"]
+
+        assert config["ambience"] == ambience
+
+    def test_absent_means_no_key_at_all(self):
+        """Absence is TurnCall's "off"; an emitted null would be a 422."""
+        assert "ambience" not in to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi"}
+        )["config"]
+        assert "ambience" not in to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "ambience": None}
+        )["config"]
+
+
 def test_the_interview_cannot_compose_an_mcp_server():
     """Not in the compose schema, deliberately: an LLM building an agent from a
     conversation must not invent outbound URLs, and a bearer token has no
