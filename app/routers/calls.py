@@ -83,6 +83,23 @@ async def agent_call_events(
     return {"success": True, "data": data}
 
 
+@router.get("/agents/{agent_id}/calls/{call_id}/tool-invocations")
+async def agent_call_tool_invocations(
+    agent_id: str, call_id: str, ctx: AuthContext = Depends(require_member)
+) -> dict[str, Any]:
+    """The tools a call ran — the console threads them into the transcript."""
+    b = await _backend_or_404(agent_id, ctx.workspace_id)
+    try:
+        data = await runtime.get_client().get_call_tool_invocations(
+            call_id, b["api_key"]
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code, detail="tool calls not available"
+        ) from exc
+    return {"success": True, "data": data}
+
+
 @router.get("/agents/{agent_id}/calls/{call_id}/context")
 async def agent_call_context(
     agent_id: str, call_id: str, ctx: AuthContext = Depends(require_member)

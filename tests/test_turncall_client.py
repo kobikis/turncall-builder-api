@@ -198,3 +198,13 @@ async def test_call_context_returns_data():
 
     client = _client_with(handler)
     assert (await client.get_call_context("c1", "k"))["status"] == "captured"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_invocations_path():
+    def handler(request):
+        assert request.url.path == "/v1/tools/invocations/c1"
+        return httpx.Response(200, json={"success": True, "data": [{"tool_name": "x"}]})
+
+    client = _client_with(handler)
+    assert await client.get_call_tool_invocations("c1", "k") == [{"tool_name": "x"}]

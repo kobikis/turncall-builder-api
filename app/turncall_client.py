@@ -192,6 +192,14 @@ class TurnCallClient:
             "GET", f"/v1/calls/{call_id}/events", api_key=api_key, params=params
         )
 
+    async def get_call_tool_invocations(
+        self, call_id: str, api_key: str
+    ) -> list[dict[str, Any]]:
+        """Every tool the call ran, with its input, output, status and latency."""
+        return await self._request(
+            "GET", f"/v1/tools/invocations/{call_id}", api_key=api_key
+        )
+
     async def get_call_context(self, call_id: str, api_key: str) -> dict[str, Any]:
         """What the model was given, per agent segment, plus a capture status."""
         return await self._request(

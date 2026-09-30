@@ -80,17 +80,29 @@ def test_call_context_passes_status_through(client, mocks):
     assert r.json()["data"]["status"] == "switched_off"
 
 
+def test_call_tool_invocations_proxied(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.get_call_tool_invocations.return_value = [{"tool_name": "book_table"}]
+    r = client.get("/agents/a1/calls/c1/tool-invocations")
+    assert r.status_code == 200
+    assert r.json()["data"] == [{"tool_name": "book_table"}]
+    mocks.client.get_call_tool_invocations.assert_awaited_once_with(
+        "c1", backend_row()["api_key"]
+    )
+
+
 def test_call_of_another_project_is_404(client, mocks):
     # The agent's key is scoped to its own project, so TurnCall 404s a call
     # belonging to any other agent; that answer must reach the browser as-is.
     mocks.registry.get_backend.return_value = backend_row()
     resp = httpx.Response(404, request=httpx.Request("GET", "http://tc/x"))
-    for method in ("get_call_events", "get_call_context"):
+    for method in ("get_call_events", "get_call_context", "get_call_tool_invocations"):
         getattr(mocks.client, method).side_effect = httpx.HTTPStatusError(
             "nf", request=resp.request, response=resp
         )
     assert client.get("/agents/a1/calls/other/events").status_code == 404
     assert client.get("/agents/a1/calls/other/context").status_code == 404
+    assert client.get("/agents/a1/calls/other/tool-invocations").status_code == 404
 
 
 def test_call_events_and_context_404_when_no_backend(client, mocks):
