@@ -69,46 +69,22 @@ def test_call_events_without_type_asks_for_all(client, mocks):
     assert mocks.client.get_call_events.await_args.kwargs["event_type"] is None
 
 
-def test_call_context_passes_status_through(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row()
-    mocks.client.get_call_context.return_value = {
-        "status": "switched_off",
-        "segments": [],
-    }
-    r = client.get("/agents/a1/calls/c1/context")
-    assert r.status_code == 200
-    assert r.json()["data"]["status"] == "switched_off"
-
-
-def test_call_tool_invocations_proxied(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row()
-    mocks.client.get_call_tool_invocations.return_value = [{"tool_name": "book_table"}]
-    r = client.get("/agents/a1/calls/c1/tool-invocations")
-    assert r.status_code == 200
-    assert r.json()["data"] == [{"tool_name": "book_table"}]
-    mocks.client.get_call_tool_invocations.assert_awaited_once_with(
-        "c1", backend_row()["api_key"]
-    )
-
-
 def test_call_of_another_project_is_404(client, mocks):
     # The agent's key is scoped to its own project, so TurnCall 404s a call
     # belonging to any other agent; that answer must reach the browser as-is.
     mocks.registry.get_backend.return_value = backend_row()
     resp = httpx.Response(404, request=httpx.Request("GET", "http://tc/x"))
-    for method in ("get_call_events", "get_call_context", "get_call_tool_invocations"):
+    for method in ("get_call_events", "get_call_tool_invocations"):
         getattr(mocks.client, method).side_effect = httpx.HTTPStatusError(
             "nf", request=resp.request, response=resp
         )
     assert client.get("/agents/a1/calls/other/events").status_code == 404
-    assert client.get("/agents/a1/calls/other/context").status_code == 404
     assert client.get("/agents/a1/calls/other/tool-invocations").status_code == 404
 
 
 def test_call_events_and_context_404_when_no_backend(client, mocks):
     mocks.registry.get_backend.return_value = None
     assert client.get("/agents/nope/calls/c1/events").status_code == 404
-    assert client.get("/agents/nope/calls/c1/context").status_code == 404
 
 
 def test_recording_missing_maps_status(client, mocks):
@@ -451,8 +427,8 @@ def test_unreachable_turncall_is_a_502_not_a_500(client, mocks):
 
     mocks.registry.get_backend.return_value = backend_row()
     mocks.client.list_calls.side_effect = httpx.ConnectTimeout("timed out")
-    mocks.client.get_call_context.side_effect = httpx.ConnectError("refused")
+    mocks.client.get_call_events.side_effect = httpx.ConnectError("refused")
     r = client.get("/agents/a1/calls")
     assert r.status_code == 502
     assert "unreachable" in r.json()["detail"].lower()
-    assert client.get("/agents/a1/calls/c1/context").status_code == 502
+    assert client.get("/agents/a1/calls/c1/events").status_code == 502

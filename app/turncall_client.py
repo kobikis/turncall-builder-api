@@ -200,12 +200,6 @@ class TurnCallClient:
             "GET", f"/v1/tools/invocations/{call_id}", api_key=api_key
         )
 
-    async def get_call_context(self, call_id: str, api_key: str) -> dict[str, Any]:
-        """What the model was given, per agent segment, plus a capture status."""
-        return await self._request(
-            "GET", f"/v1/calls/{call_id}/context", api_key=api_key
-        )
-
     async def get_call_recording(self, call_id: str, api_key: str) -> bytes:
         """The call's WAV audio."""
         return await self._request(

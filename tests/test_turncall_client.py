@@ -189,18 +189,6 @@ async def test_call_events_sends_event_type_only_when_given():
 
 
 @pytest.mark.asyncio
-async def test_call_context_returns_data():
-    def handler(request):
-        assert request.url.path == "/v1/calls/c1/context"
-        return httpx.Response(
-            200, json={"success": True, "data": {"status": "captured", "segments": []}}
-        )
-
-    client = _client_with(handler)
-    assert (await client.get_call_context("c1", "k"))["status"] == "captured"
-
-
-@pytest.mark.asyncio
 async def test_call_tool_invocations_path():
     def handler(request):
         assert request.url.path == "/v1/tools/invocations/c1"
