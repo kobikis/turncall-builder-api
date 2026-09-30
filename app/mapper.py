@@ -187,6 +187,13 @@ def to_create_agent_request(
     if cfg.get("analysis"):
         config["analysis"] = cfg["analysis"]
 
+    # Ambience (turncall ADR-0021) passes through the same way: the console
+    # sets it, TurnCall validates the sound against the project, and an absent
+    # block means off. Without this an inline agent (call-init, ADR-0020) and
+    # every update silently dropped it.
+    if cfg.get("ambience"):
+        config["ambience"] = cfg["ambience"]
+
     # MCP servers pass through the same way, and for the same reason: the
     # console sets them, not the interview (ADR-0014 left that open; this is
     # the answer). They are deliberately absent from the compose schema — an
