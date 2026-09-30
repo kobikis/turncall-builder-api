@@ -180,6 +180,26 @@ class TurnCallClient:
             "GET", f"/v1/calls/{call_id}/transcript", api_key=api_key
         )
 
+    async def get_call_events(
+        self, call_id: str, api_key: str, *, event_type: str | None = None
+    ) -> list[dict[str, Any]]:
+        """A call's events, optionally one type (the console reads `metrics.turn`).
+        One page of 1000 — a turn is one event, so that is a very long call."""
+        params: dict[str, Any] = {"limit": 1000}
+        if event_type:
+            params["event_type"] = event_type
+        return await self._request(
+            "GET", f"/v1/calls/{call_id}/events", api_key=api_key, params=params
+        )
+
+    async def get_call_tool_invocations(
+        self, call_id: str, api_key: str
+    ) -> list[dict[str, Any]]:
+        """Every tool the call ran, with its input, output, status and latency."""
+        return await self._request(
+            "GET", f"/v1/tools/invocations/{call_id}", api_key=api_key
+        )
+
     async def get_call_recording(self, call_id: str, api_key: str) -> bytes:
         """The call's WAV audio."""
         return await self._request(

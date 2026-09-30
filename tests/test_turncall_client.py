@@ -172,3 +172,27 @@ async def test_non_401_bootstrap_error_propagates_unchanged():
     client = _client_with(handler, platform_key="pk")
     with pytest.raises(httpx.HTTPStatusError):
         await client.create_project("x")
+
+
+@pytest.mark.asyncio
+async def test_call_events_sends_event_type_only_when_given():
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"success": True, "data": []})
+
+    client = _client_with(handler)
+    await client.get_call_events("c1", "k", event_type="metrics.turn")
+    await client.get_call_events("c1", "k")
+    assert seen == [{"event_type": "metrics.turn", "limit": "1000"}, {"limit": "1000"}]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_invocations_path():
+    def handler(request):
+        assert request.url.path == "/v1/tools/invocations/c1"
+        return httpx.Response(200, json={"success": True, "data": [{"tool_name": "x"}]})
+
+    client = _client_with(handler)
+    assert await client.get_call_tool_invocations("c1", "k") == [{"tool_name": "x"}]
