@@ -24,6 +24,19 @@ def test_agent_calls_proxies_turncall(client, mocks):
     assert r.json()["data"][0]["id"] == "c1"
 
 
+def test_agent_calls_forward_derived_call_fields_unchanged(client, mocks):
+    call = {
+        "id": "c1",
+        "ended_reason": "customer_ended_call",
+        "agent_name": "support",
+        "agent_version": 3,
+        "latency_summary": {"turns": 2},
+    }
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.list_calls.return_value = {"success": True, "data": [call]}
+    assert client.get("/agents/a1/calls").json()["data"] == [call]
+
+
 def test_test_chat_proxies_to_turncall(client, mocks):
     mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
     mocks.client.send_chat.return_value = {"reply": "hello!", "session_id": "s1"}
@@ -36,6 +49,54 @@ def test_test_chat_proxies_to_turncall(client, mocks):
 def test_test_chat_404_when_no_backend(client, mocks):
     mocks.registry.get_backend.return_value = None
     assert client.post("/agents/nope/chat", json={"message": "hi"}).status_code == 404
+
+
+def test_call_events_forwards_event_type(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.get_call_events.return_value = [{"event_type": "metrics.turn"}]
+    r = client.get("/agents/a1/calls/c1/events?event_type=metrics.turn")
+    assert r.status_code == 200
+    assert r.json()["data"] == [{"event_type": "metrics.turn"}]
+    mocks.client.get_call_events.assert_awaited_once_with(
+        "c1", backend_row()["api_key"], event_type="metrics.turn"
+    )
+
+
+def test_call_events_without_type_asks_for_all(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.get_call_events.return_value = []
+    client.get("/agents/a1/calls/c1/events")
+    assert mocks.client.get_call_events.await_args.kwargs["event_type"] is None
+
+
+def test_call_context_passes_status_through(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.get_call_context.return_value = {
+        "status": "switched_off",
+        "segments": [],
+    }
+    r = client.get("/agents/a1/calls/c1/context")
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "switched_off"
+
+
+def test_call_of_another_project_is_404(client, mocks):
+    # The agent's key is scoped to its own project, so TurnCall 404s a call
+    # belonging to any other agent; that answer must reach the browser as-is.
+    mocks.registry.get_backend.return_value = backend_row()
+    resp = httpx.Response(404, request=httpx.Request("GET", "http://tc/x"))
+    for method in ("get_call_events", "get_call_context"):
+        getattr(mocks.client, method).side_effect = httpx.HTTPStatusError(
+            "nf", request=resp.request, response=resp
+        )
+    assert client.get("/agents/a1/calls/other/events").status_code == 404
+    assert client.get("/agents/a1/calls/other/context").status_code == 404
+
+
+def test_call_events_and_context_404_when_no_backend(client, mocks):
+    mocks.registry.get_backend.return_value = None
+    assert client.get("/agents/nope/calls/c1/events").status_code == 404
+    assert client.get("/agents/nope/calls/c1/context").status_code == 404
 
 
 def test_recording_missing_maps_status(client, mocks):
