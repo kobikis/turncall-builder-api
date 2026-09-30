@@ -15,7 +15,9 @@ from contextlib import asynccontextmanager
 
 import logging
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import builder, pipedream_store, runtime, schema_check
@@ -119,6 +121,21 @@ app = FastAPI(title="TurnCall Builder API", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware, secret_key=load_settings().session_secret, https_only=True
 )
+
+
+
+@app.exception_handler(httpx.TransportError)
+async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) -> JSONResponse:
+    """An upstream that can't be reached — TurnCall restarting, a generated
+    backend's container down — is a 502 the console can explain, not a 500
+    with a traceback that reads as a builder bug."""
+    try:
+        host = exc.request.url.host
+    except RuntimeError:  # raised without a request attached
+        host = "upstream"
+    logger.warning("upstream_unreachable host=%s: %r", host, exc)
+    return JSONResponse(status_code=502, content={"detail": f"{host} is unreachable"})
+
 
 for _router in (
     sessions, agents, agent_activity, phones, calls, evals, knowledge, takeaways,

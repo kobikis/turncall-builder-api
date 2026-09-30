@@ -430,3 +430,17 @@ def test_webrtc_connect_still_refuses_a_client_chosen_backend(client, mocks):
     assert "stolen" not in repr(fwd)
     assert fwd["server_url_secret"] == "cis-1"
     assert fwd["request_data"]["server_url_secret"] == "cis-1"
+
+
+def test_unreachable_turncall_is_a_502_not_a_500(client, mocks):
+    # TurnCall restarting (or down) is an upstream outage: a traceback and a
+    # 500 made the console read it as a builder bug.
+    import httpx
+
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.list_calls.side_effect = httpx.ConnectTimeout("timed out")
+    mocks.client.get_call_context.side_effect = httpx.ConnectError("refused")
+    r = client.get("/agents/a1/calls")
+    assert r.status_code == 502
+    assert "unreachable" in r.json()["detail"].lower()
+    assert client.get("/agents/a1/calls/c1/context").status_code == 502
