@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .. import runtime
-from .._helpers import _backend_or_404
+from .._helpers import _backend_or_404, ranged_audio
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
@@ -115,28 +115,4 @@ async def agent_call_recording(
         raise HTTPException(
             status_code=exc.response.status_code, detail="recording not available"
         ) from exc
-    total = len(audio)
-    range_header = request.headers.get("range", "")
-    if range_header.startswith("bytes="):
-        start_s, _, end_s = range_header[len("bytes=") :].partition("-")
-        try:
-            start = int(start_s) if start_s else 0
-            end = min(int(end_s), total - 1) if end_s else total - 1
-        except ValueError:
-            start, end = 0, total - 1
-        if start > end or start >= total:
-            return Response(
-                status_code=416, headers={"Content-Range": f"bytes */{total}"}
-            )
-        return Response(
-            content=audio[start : end + 1],
-            status_code=206,
-            media_type="audio/wav",
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{total}",
-                "Accept-Ranges": "bytes",
-            },
-        )
-    return Response(
-        content=audio, media_type="audio/wav", headers={"Accept-Ranges": "bytes"}
-    )
+    return ranged_audio(audio, request, "audio/wav")

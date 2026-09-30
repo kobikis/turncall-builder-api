@@ -386,6 +386,36 @@ class TurnCallClient:
             json={"query": query},
         )
 
+    # -------------------------------------------------------- ambience
+
+    async def list_ambience_sounds(self, api_key: str) -> list[dict[str, Any]]:
+        return await self._request("GET", "/v1/ambience-sounds", api_key=api_key)
+
+    async def upload_ambience_sound(
+        self, filename: str, content: bytes, content_type: str, api_key: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/v1/ambience-sounds",
+            api_key=api_key,
+            timeout=60,  # decode + resample + encode, once per voice rate
+            files={"file": (filename, content, content_type)},
+        )
+
+    async def delete_ambience_sound(self, sound_id: str, api_key: str) -> None:
+        await self._request(
+            "DELETE", f"/v1/ambience-sounds/{sound_id}", api_key=api_key, extract="none"
+        )
+
+    async def get_ambience_audio(self, sound_id: str, rate: int, api_key: str) -> bytes:
+        """One rendition's MP3 — what a caller at that rate hears."""
+        return await self._request(
+            "GET",
+            f"/v1/ambience-sounds/{sound_id}/renditions/{rate}",
+            api_key=api_key,
+            extract="content",
+        )
+
     # -------------------------------------------------------- takeaways
 
     async def list_takeaways(self, api_key: str) -> list[dict[str, Any]]:

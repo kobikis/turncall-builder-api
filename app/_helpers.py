@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import runtime
@@ -269,3 +270,35 @@ async def _agent_kb(
     # into the agent's prompt — always present, never missed by a retrieval query.
     await client.link_knowledge_base(agent_id, kb["id"], api_key, mode="prompt")
     return kb
+
+
+def ranged_audio(audio: bytes, request: Request, media_type: str) -> Response:
+    """Audio bytes as a response that honors Range requests (206).
+
+    Safari refuses to play <audio> from endpoints that only ever answer 200
+    with the full body."""
+    total = len(audio)
+    range_header = request.headers.get("range", "")
+    if range_header.startswith("bytes="):
+        start_s, _, end_s = range_header[len("bytes=") :].partition("-")
+        try:
+            start = int(start_s) if start_s else 0
+            end = min(int(end_s), total - 1) if end_s else total - 1
+        except ValueError:
+            start, end = 0, total - 1
+        if start > end or start >= total:
+            return Response(
+                status_code=416, headers={"Content-Range": f"bytes */{total}"}
+            )
+        return Response(
+            content=audio[start : end + 1],
+            status_code=206,
+            media_type=media_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{total}",
+                "Accept-Ranges": "bytes",
+            },
+        )
+    return Response(
+        content=audio, media_type=media_type, headers={"Accept-Ranges": "bytes"}
+    )
