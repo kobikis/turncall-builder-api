@@ -89,6 +89,21 @@ Disconnecting is refused while numbers use the account.
 project first and the deployment's `PIPEDREAM_*` second. The project's secret
 is sealed with the Integrations key, which also signs the connect state when
 `PIPEDREAM_ENCRYPTION_KEY` is unset. Disconnecting is refused while apps are
-connected in that project, since the fallback project does not hold them. Withdrawable in the sense that the page can be
+connected in that project, since the fallback project does not hold them.
+Unsetting `PIPEDREAM_*` removes the stored deployment project at the next
+start, so the card never claims a fallback that is gone.
+
+**One encryption key where a deployment wants one.** `INTEGRATIONS_ENCRYPTION_KEY`
+seals Integrations, registered MCP headers, the Workspace Twilio and Pipedream
+secrets, and stands in for `GITHUB_TOKEN_ENCRYPTION_KEY` and (for signing the
+connect state) `PIPEDREAM_ENCRYPTION_KEY` when those are unset. Each existing
+key still wins while set, so nothing already sealed has to be re-encrypted.
+
+**Engine keys are a fallback everywhere.** TurnCall resolves a project
+credential for text turns, analysis, KB embeddings and the eval judge as well as
+calls, and `typesafe` (the `jev` judge) is an account like the others, so a
+Workspace can run without any provider key in the engine's environment. Phone
+numbers routed to a custom call-init webhook are the exception: they live in the
+one shared webhook-numbers project, which no Workspace's keys reach. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

@@ -428,6 +428,23 @@ _Avoid_: "provider" (that is the *selected backend*, TurnCall's word), "API key"
 alone (the AWS one is a credential set), "[[Connected app]]" (Pipedream's, and
 minted per call).
 
+**Workspace Twilio account**:
+A [[Workspace]]'s Twilio account, connected once on the Integrations page and
+chosen when binding a number instead of entering a pair per number. Not an
+[[Integration]] in the projected sense: TurnCall holds Twilio credentials per
+*number* (Twilio's own unit), so a bind sends this account's pair and the phone
+mirror marks the number `twilio_source = 'workspace'`; saving the card again
+re-sends the pair to each such number. A number may still bring its own pair (a
+second account, a subaccount). Disconnect is refused while numbers use it.
+_Avoid_: "Twilio integration" (suggests projection into agents).
+
+**Workspace Pipedream project**:
+A [[Workspace]]'s own Pipedream Connect project, behind its [[Connected app]]s,
+instead of the deployment's (`PIPEDREAM_*`). Every Connected-apps path resolves
+the Workspace's first. Its apps live only in it, so disconnecting is refused
+while any are connected.
+_Avoid_: "Pipedream credential" unqualified (the deployment has one too).
+
 **Workspace MCP server**:
 An MCP server registered once for a [[Workspace]] and opted into per agent,
 instead of retyped into each agent's config (ADR-0017 put them on the agent; this
