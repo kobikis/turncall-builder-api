@@ -74,6 +74,15 @@ its Integration changes. The shared webhook-numbers project is not a projection
 target — it is one project behind every Workspace, so a call routed through it
 still runs on the platform key.
 
+**Update (2026-10-01, #65).** That exception is closed for new numbers: each
+Workspace now gets its own webhook project, created on its first custom
+call-init bind and treated as one more projection target (connect, apply and
+disconnect reach it; it is recorded under `webhook-numbers:{workspace}` and never
+listed as an agent). The shared project stays, unprojected, for numbers bound
+before the change — they keep running on the platform key until rebound, and
+each card reports how many (`webhook_numbers.on_platform_keys`) — and for the
+platform-wide `GET /v1/providers` read.
+
 **Twilio is a card too, but not a projection.** TurnCall holds Twilio
 credentials per *number* (Twilio's own unit — webhooks name their account by
 `AccountSid`), so the Workspace's Twilio account (`twilio_accounts`, one per
@@ -103,7 +112,9 @@ key still wins while set, so nothing already sealed has to be re-encrypted.
 credential for text turns, analysis, KB embeddings and the eval judge as well as
 calls, and `typesafe` (the `jev` judge) is an account like the others, so a
 Workspace can run without any provider key in the engine's environment. Phone
-numbers routed to a custom call-init webhook are the exception: they live in the
-one shared webhook-numbers project, which no Workspace's keys reach. Withdrawable in the sense that the page can be
+numbers routed to a custom call-init webhook were the exception, living in one
+shared webhook-numbers project no Workspace's keys reach; since #65 each
+Workspace's go to its own project instead (see the update above), and only
+numbers bound before that remain on the platform key. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

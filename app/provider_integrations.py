@@ -105,7 +105,7 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
         if p["state"] == "applied" and p["version"] == version
     }
     results = []
-    for backend in await registry.list_backends(pool, workspace_id):
+    for backend in await _targets(pool, workspace_id):
         agent_id = backend["agent_id"]
         error = None if agent_id in done else await _write(client, provider, document, backend)
         state = _state(backend, provider, error)
@@ -114,6 +114,16 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
         )
         results.append({"agent_id": agent_id, "state": state, "error": error})
     return results
+
+
+async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
+    """Every TurnCall project the Workspace's keys go into: each agent's, and
+    the Workspace's webhook project once it has one (#65)."""
+    targets = list(await registry.list_backends(pool, workspace_id))
+    webhook = await phones.workspace_webhook_project(pool, workspace_id)
+    if webhook:
+        targets.append(phones.as_projection_target(workspace_id, webhook))
+    return targets
 
 
 async def _write(client: Any, provider: str, document: dict[str, Any], backend: dict[str, Any]) -> str | None:
@@ -132,10 +142,12 @@ def _state(backend: dict[str, Any], provider: str, error: str | None) -> str:
     return "pinned" if pinned_account(backend.get("config")) == provider else "applied"
 
 
-async def project_into_new_agent(
-    pool: Any, client: Any, workspace_id: str, backend: dict[str, Any]
+async def project_into_new_target(
+    pool: Any, client: Any, workspace_id: str, target: dict[str, Any]
 ) -> None:
-    """A newly created agent gets every Workspace credential its project lacks.
+    """A new projection target gets every Workspace credential: an agent's
+    project when the agent is created, or the Workspace's webhook project when
+    its first webhook number is bound (#65).
 
     Best-effort: the agent exists either way, and a failure is recorded so the
     card shows it and the next apply retries it.
@@ -145,10 +157,10 @@ async def project_into_new_agent(
             continue
         provider = integration["provider"]
         document = await integration_store.get_document(pool, workspace_id, provider)
-        error = await _write(client, provider, document, backend)
+        error = await _write(client, provider, document, target)
         await integration_store.record_projection(
-            pool, workspace_id, provider, backend["agent_id"],
-            state=_state(backend, provider, error), version=integration["version"], error=error,
+            pool, workspace_id, provider, target["agent_id"],
+            state=_state(target, provider, error), version=integration["version"], error=error,
         )
 
 
@@ -167,7 +179,7 @@ async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -
         if p["state"] == "removed"
     }
     results = []
-    for backend in await registry.list_backends(pool, workspace_id):
+    for backend in await _targets(pool, workspace_id):
         agent_id = backend["agent_id"]
         state, error = "removed", None
         if agent_id not in removed:
@@ -233,6 +245,21 @@ async def engine_providers(pool: Any, client: Any) -> dict[str, Any] | None:
         return None
 
 
+def _webhook_numbers(
+    projections: list[dict[str, Any]], provider: str, target: str | None, shared: int
+) -> dict[str, Any]:
+    """Which key the Workspace's webhook-routed numbers run on, for one card."""
+    p = next(
+        (p for p in projections if p["provider"] == provider and p["agent_id"] == target),
+        None,
+    ) if target else None
+    return {
+        "state": p["state"] if p else None,
+        "error": p["error"] if p else None,
+        "on_platform_keys": shared,
+    }
+
+
 async def cards(pool: Any, client: Any, workspace_id: str) -> dict[str, Any]:
     """One card per provider account: what is connected and which key runs calls."""
     engine = await engine_providers(pool, client)
@@ -241,6 +268,11 @@ async def cards(pool: Any, client: Any, workspace_id: str) -> dict[str, Any]:
     backends = await registry.list_backends(pool, workspace_id)
     names = {b["agent_id"]: (b.get("config") or {}).get("name") or b.get("slug") for b in backends}
     live = set(names)
+    # Webhook-routed numbers (#65): their own project's projection, and how many
+    # still sit in the shared project on the platform's keys until rebound.
+    webhook = await phones.workspace_webhook_project(pool, workspace_id)
+    webhook_target = phones.as_projection_target(workspace_id, webhook)["agent_id"] if webhook else None
+    shared_numbers = await phones.shared_webhook_numbers(pool, workspace_id)
 
     accounts = (engine or {}).get("accounts") or {
         p: {"serves": {}, "platform_key": None} for p in integrations
@@ -278,5 +310,6 @@ async def cards(pool: Any, client: Any, workspace_id: str) -> dict[str, Any]:
                 if pinned_account(b.get("config")) == provider
             ],
             "agents": agents,
+            "webhook_numbers": _webhook_numbers(projections, provider, webhook_target, shared_numbers),
         })
     return {"providers": out, "roles": (engine or {}).get("roles") or {}, "engine_reachable": engine is not None}

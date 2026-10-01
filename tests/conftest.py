@@ -41,7 +41,12 @@ from app import (
     workspace_skills,
 )
 from app.backends import generator, phones, registry, scaffold, toolgen
+
 from app.turncall_client import TurnCallClient
+
+# Captured before the fixture patches the module: the mock delegates to the real
+# function, so the tests exercise it rather than a copy of it.
+_REAL_AS_PROJECTION_TARGET = phones.as_projection_target
 
 # The Workspace every existing endpoint test acts within (see `client` fixture).
 TEST_WORKSPACE_ID = "d0000000-0000-0000-0000-000000000001"
@@ -110,6 +115,11 @@ def mocks(monkeypatch):
     # Numbers run on the platform's Twilio account unless a test says otherwise.
     m.phones.twilio_account.return_value = None
     m.phones.on_workspace_twilio.return_value = []
+    # No Workspace has bound a webhook number unless a test says so (#65).
+    m.phones.workspace_webhook_project.return_value = None
+    m.phones.key_for_project.return_value = None
+    m.phones.as_projection_target.side_effect = _REAL_AS_PROJECTION_TARGET
+    m.phones.shared_webhook_numbers.return_value = 0
     m.twilio_store.get.return_value = None
     m.twilio_store.credentials.return_value = None
     # auth_store: mock the DB/hash functions but keep the real exception classes

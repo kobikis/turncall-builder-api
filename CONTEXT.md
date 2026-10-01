@@ -246,8 +246,8 @@ _Avoid_: auto call-init, builder call-init
 
 **Custom call-init**:
 Call-init against a customer-written endpoint (ADR-0007's original mode). The
-Number is bound in the shared webhook project; the customer hosts and verifies
-the endpoint themselves.
+Number is bound in its Workspace's webhook project (the shared one, for numbers
+bound before #65); the customer hosts and verifies the endpoint themselves.
 _Avoid_: manual call-init, external webhook
 
 **Degraded**:

@@ -301,3 +301,41 @@ def test_a_label_is_mirrored_trimmed(client, mocks):
 
 def test_a_label_too_long_is_refused(client, mocks):
     assert client.post("/phone-numbers", json=_bind_body(label="x" * 101)).status_code == 422
+
+
+def test_the_first_webhook_bind_gets_its_workspace_a_project_with_its_keys(client, mocks, monkeypatch):
+    """A webhook number runs in its Workspace's own project (#65): the shared
+    one could not hold any Workspace's keys without lending them to the rest."""
+    from app import provider_integrations
+
+    projected = []
+
+    async def fake_project(pool, client_, workspace_id, target):
+        projected.append(target["api_key"])
+
+    monkeypatch.setattr(provider_integrations, "project_into_new_target", fake_project)
+    mocks.phones.ensure_workspace_webhook_project.return_value = (
+        {"project_id": "wp-ws", "api_key": "tc_wp_ws"},
+        True,
+    )
+    mocks.client.bind_phone_number.return_value = {"id": "pn-9"}
+
+    r = client.post(
+        "/phone-numbers",
+        json=_bind_body(routing_type="webhook", agent_id=None, server_url="https://crm.example.com/init"),
+    )
+
+    assert r.status_code == 200, r.text
+    assert mocks.client.bind_phone_number.await_args.args[1] == "tc_wp_ws"
+    assert projected == ["tc_wp_ws"]
+    mocks.phones.ensure_webhook_project.assert_not_called()
+
+
+def test_a_number_bound_before_65_is_unbound_with_the_shared_projects_key(client, mocks):
+    mocks.phones.get_number.return_value = _phone(routing_type="webhook", agent_id=None, project_id="wp-shared")
+    mocks.phones.key_for_project.return_value = "tc_shared"
+
+    r = client.delete("/phone-numbers/pn-1")
+
+    assert r.status_code in (200, 204), r.text
+    assert mocks.client.unbind_phone_number.await_args.args[1] == "tc_shared"
