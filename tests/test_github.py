@@ -34,8 +34,20 @@ class TestTokenStorage:
 
     def test_missing_key_explains_how_to_make_one(self, monkeypatch):
         monkeypatch.delenv("GITHUB_TOKEN_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("INTEGRATIONS_ENCRYPTION_KEY", raising=False)
         with pytest.raises(github.GitHubError, match="Fernet.generate_key"):
             github.encrypt_token("tok")
+
+    def test_the_integrations_key_stands_in_when_githubs_is_unset(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setenv("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        assert github.decrypt_token(github.encrypt_token("tok")) == "tok"
+
+    def test_its_own_key_wins_while_set(self, monkeypatch):
+        """A deployment that already has one keeps reading what it sealed."""
+        sealed = github.encrypt_token("tok")
+        monkeypatch.setenv("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        assert github.decrypt_token(sealed) == "tok"
 
 
 @pytest.mark.unit

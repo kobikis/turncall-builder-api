@@ -17,9 +17,15 @@ class SecretBox:
     error: type[Exception]
     disabled: str  # what stops working without the key, e.g. "integrations are disabled"
     changed: str  # the full message when a stored value no longer decrypts
+    # Used when `env` is unset, so a fresh deployment needs one key rather than
+    # one per feature. Never consulted while `env` is set, so a deployment that
+    # already has its own key keeps reading what that key sealed.
+    fallback_env: str | None = None
 
     def _fernet(self) -> Fernet:
-        key = os.environ.get(self.env, "")
+        key = os.environ.get(self.env, "") or (
+            os.environ.get(self.fallback_env, "") if self.fallback_env else ""
+        )
         if not key:
             raise self.error(
                 f"{self.env} is not set — {self.disabled}. Generate one with: "

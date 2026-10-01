@@ -62,6 +62,7 @@ class PushResult:
 
 _BOX = SecretBox(
     env="GITHUB_TOKEN_ENCRYPTION_KEY",
+    fallback_env="INTEGRATIONS_ENCRYPTION_KEY",
     error=GitHubError,
     disabled="GitHub connections are disabled",
     changed=(
