@@ -32,7 +32,7 @@ async def ensure_webhook_project(pool: asyncpg.Pool, client: Any) -> dict[str, s
 # derived so the console can say whose Twilio account a number runs on.
 _COLS = (
     "id, e164, sid, routing_type, agent_id, project_id, server_url, "
-    "server_url_secret, sms_enabled, twilio_account_sid, "
+    "server_url_secret, sms_enabled, label, twilio_account_sid, "
     "CASE WHEN twilio_source = 'workspace' THEN 'workspace' "
     "WHEN twilio_auth_token_encrypted IS NULL THEN 'platform' ELSE 'number' END "
     "AS twilio_credentials"
@@ -48,15 +48,16 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
         """INSERT INTO phone_numbers
              (id, e164, sid, routing_type, agent_id, project_id, server_url,
               server_url_secret, sms_enabled, workspace_id,
-              twilio_account_sid, twilio_auth_token_encrypted, twilio_source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              twilio_account_sid, twilio_auth_token_encrypted, twilio_source, label)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            ON CONFLICT (id) DO UPDATE SET
              e164=$2, sid=$3, routing_type=$4, agent_id=$5, project_id=$6,
              server_url=$7, server_url_secret=$8, sms_enabled=$9,
              workspace_id=$10,
              twilio_account_sid=COALESCE($11, phone_numbers.twilio_account_sid),
              twilio_auth_token_encrypted=COALESCE($12, phone_numbers.twilio_auth_token_encrypted),
-             twilio_source=COALESCE($13, phone_numbers.twilio_source)""",
+             twilio_source=COALESCE($13, phone_numbers.twilio_source),
+             label=$14""",
         number["id"],
         number["e164"],
         number["sid"],
@@ -70,6 +71,7 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
         number.get("twilio_account_sid"),
         number.get("twilio_auth_token_encrypted"),
         number.get("twilio_source"),
+        number.get("label"),
     )
 
 

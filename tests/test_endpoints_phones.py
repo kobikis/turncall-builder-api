@@ -288,3 +288,16 @@ def test_an_in_place_edit_sends_twilio_only_when_re_entered(client, mocks):
 
     client.put("/phone-numbers/pn-1", json=_bind_body(twilio_account_sid=AC, twilio_auth_token="rotated"))
     assert mocks.client.update_phone_number.await_args.args[1]["twilio_auth_token"] == "rotated"
+
+
+def test_a_label_is_mirrored_trimmed(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.return_value = {"id": "pn-9"}
+    r = client.post("/phone-numbers", json=_bind_body(label="  Support line "))
+    assert r.status_code == 200
+    assert mocks.phones.record_number.await_args.args[1]["label"] == "Support line"
+    assert "label" not in mocks.client.bind_phone_number.await_args.args[0]  # builder-only
+
+
+def test_a_label_too_long_is_refused(client, mocks):
+    assert client.post("/phone-numbers", json=_bind_body(label="x" * 101)).status_code == 422

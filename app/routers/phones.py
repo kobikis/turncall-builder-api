@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import runtime, twilio_store
 from ..integration_store import BOX, IntegrationError
@@ -35,6 +35,13 @@ class PhoneBind(BaseModel):
     # Bind with the Workspace's connected Twilio account (Integrations page)
     # instead of entering a pair here.
     use_workspace_twilio: bool = False
+    # A name for the number in the console ("Support line"). Builder-side only.
+    label: str | None = Field(default=None, max_length=100)
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
 
     @model_validator(mode="after")
     def _twilio_pair(self) -> "PhoneBind":
@@ -260,6 +267,7 @@ async def _bind(
             "project_id": None,
             "server_url": None,
             "sms_enabled": body.sms_enabled,
+            "label": body.label,
             "workspace_id": workspace_id,
             **_seal(twilio, source),
         }
@@ -294,6 +302,7 @@ async def _bind(
         # per-number call-init signing secret (webhook + agent_call_init routing)
         "server_url_secret": secret,
         "sms_enabled": body.sms_enabled,
+        "label": body.label,
         "workspace_id": workspace_id,
         **_seal(twilio, source),
     }
@@ -374,6 +383,7 @@ async def update_phone_number(
                 "server_url": routing["server_url"],
                 "server_url_secret": secret,
                 "sms_enabled": body.sms_enabled,
+                "label": body.label,
                 "workspace_id": workspace_id,
                 **_seal(new_twilio, new_source),
             }

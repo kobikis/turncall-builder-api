@@ -141,6 +141,8 @@ async def _run_assertions(dsn: str) -> None:
         assert await phones.twilio_account(pool, "pn-2") == ("ACws", "ws-token")
         assert [n["id"] for n in await phones.on_workspace_twilio(pool, ws)] == ["pn-2"]
         assert (await phones.get_number(pool, "pn-2", ws))["twilio_credentials"] == "workspace"
+        await phones.record_number(pool, {**number, "id": "pn-3", "label": "Support line"})
+        assert (await phones.get_number(pool, "pn-3", ws))["label"] == "Support line"
     finally:
         await pool.close()
 
