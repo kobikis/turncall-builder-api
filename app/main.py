@@ -33,11 +33,15 @@ from .routers import (
     github,
     integrations,
     knowledge,
+    mcp_registry,
     members,
     phones,
+    pipedream_project,
+    provider_integrations,
     sessions,
     skills,
     takeaways,
+    twilio_integration,
     workspaces,
 )
 from .settings import load_settings
@@ -71,12 +75,21 @@ async def _reap_orphan_backends(pool) -> None:
 async def _store_pipedream_credential(pool, settings) -> None:
     """Env configures the Pipedream credential; the encrypted row is what the
     mint path reads back (ADR-0018). Never blocks startup — without it the
-    integrations endpoints 503 with what to set, which is the actionable failure."""
+    integrations endpoints 503 with what to set, which is the actionable failure.
+
+    Env unset removes the copy too: the deployment's project is a fallback, and
+    a row left from an earlier configuration would keep claiming one exists —
+    readable only with a PIPEDREAM_ENCRYPTION_KEY that may since be gone."""
     if not (
         settings.pipedream_client_id
         and settings.pipedream_client_secret
         and settings.pipedream_project_id
     ):
+        try:
+            if await pipedream_store.delete_credential(pool):
+                logger.info("PIPEDREAM_* unset — removed the stored deployment project")
+        except Exception:
+            logger.exception("could not remove the stored Pipedream credential")
         return
     try:
         await pipedream_store.save_credential(
@@ -141,6 +154,9 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 for _router in (
     sessions, agents, agent_activity, phones, calls, evals, knowledge, takeaways,
     ambience,
-    auth, workspaces, members, github, skills, integrations,
+    # Before `integrations`, whose `/integrations/{...}` routes are broader.
+    auth, workspaces, members, github, skills, provider_integrations, mcp_registry,
+    twilio_integration, pipedream_project,
+    integrations,
 ):
     app.include_router(_router.router)

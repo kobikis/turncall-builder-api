@@ -23,8 +23,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+
+from app.secret_box import SecretBox
 
 _API = "https://api.pipedream.com/v1"
 # The auth handshake is a redirect out and back; ten minutes is generous for a
@@ -323,37 +324,25 @@ class Credential:
 # --- credential storage ------------------------------------------------------
 
 
-def _fernet() -> Fernet:
-    key = os.environ.get("PIPEDREAM_ENCRYPTION_KEY", "")
-    if not key:
-        raise PipedreamError(
-            "PIPEDREAM_ENCRYPTION_KEY is not set — integrations are disabled. "
-            'Generate one with: python -c "from cryptography.fernet import '
-            'Fernet; print(Fernet.generate_key().decode())"'
-        )
-    try:
-        return Fernet(key.encode())
-    except (ValueError, TypeError) as exc:
-        raise PipedreamError(
-            "PIPEDREAM_ENCRYPTION_KEY is not a valid Fernet key (44 url-safe "
-            "base64 characters)."
-        ) from exc
+_BOX = SecretBox(
+    env="PIPEDREAM_ENCRYPTION_KEY",
+    error=PipedreamError,
+    disabled="integrations are disabled",
+    changed=(
+        "The stored Pipedream client secret could not be decrypted — "
+        "PIPEDREAM_ENCRYPTION_KEY has changed. Restart with the original "
+        "key, or set PIPEDREAM_CLIENT_SECRET again to re-store it."
+    ),
+)
 
 
 def encrypt_secret(secret: str) -> str:
-    return _fernet().encrypt(secret.encode()).decode()
+    return _BOX.encrypt(secret)
 
 
 def decrypt_secret(ciphertext: str) -> str:
     """Raises if the key changed — rotating it orphans the stored credential."""
-    try:
-        return _fernet().decrypt(ciphertext.encode()).decode()
-    except InvalidToken as exc:
-        raise PipedreamError(
-            "The stored Pipedream client secret could not be decrypted — "
-            "PIPEDREAM_ENCRYPTION_KEY has changed. Restart with the original "
-            "key, or set PIPEDREAM_CLIENT_SECRET again to re-store it."
-        ) from exc
+    return _BOX.decrypt(ciphertext)
 
 
 # --- connect state -----------------------------------------------------------
@@ -372,8 +361,14 @@ def _serializer() -> URLSafeTimedSerializer:
 
 def _state_key() -> str:
     """Reuses PIPEDREAM_ENCRYPTION_KEY: integrations already require it, and it is
-    stable by construction (changing it is what re-stores the credential)."""
-    key = os.environ.get("PIPEDREAM_ENCRYPTION_KEY", "")
+    stable by construction (changing it is what re-stores the credential).
+
+    A deployment where every Workspace brings its own Pipedream project need not
+    set any PIPEDREAM_* at all, so the Integrations key — required for those
+    projects' sealed secrets anyway — signs the state there instead."""
+    key = os.environ.get("PIPEDREAM_ENCRYPTION_KEY", "") or os.environ.get(
+        "INTEGRATIONS_ENCRYPTION_KEY", ""
+    )
     if not key:
         raise PipedreamError(
             "PIPEDREAM_ENCRYPTION_KEY is not set — integrations are disabled."
@@ -418,8 +413,8 @@ async def _request(
         )
     if r.status_code == 401:
         raise PipedreamError(
-            "Pipedream rejected our credentials. Check PIPEDREAM_CLIENT_ID / "
-            "PIPEDREAM_CLIENT_SECRET."
+            "Pipedream rejected our credentials. Check the workspace's Pipedream "
+            "project on Integrations, or PIPEDREAM_CLIENT_ID / PIPEDREAM_CLIENT_SECRET."
         )
     if r.status_code == 404:
         raise PipedreamError("Pipedream could not find that resource.")
@@ -445,8 +440,9 @@ async def access_token(cred: Credential) -> AccessToken:
         )
     if r.status_code >= 400:
         raise PipedreamError(
-            "Pipedream refused to issue an access token. Check "
-            "PIPEDREAM_CLIENT_ID / PIPEDREAM_CLIENT_SECRET."
+            "Pipedream refused to issue an access token. Check the workspace's "
+            "Pipedream project on Integrations, or PIPEDREAM_CLIENT_ID / "
+            "PIPEDREAM_CLIENT_SECRET."
         )
     body = r.json()
     token = body.get("access_token") or ""

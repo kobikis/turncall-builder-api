@@ -79,8 +79,12 @@ def to_create_agent_request(
     tools_base_url: str | None = None,
     tools_secret: str | None = None,
     pipedream_target: dict[str, str] | None = None,
+    registered_mcp_servers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Trimmed agent_config -> the body for POST /v1/agents.
+
+    `registered_mcp_servers` are the Workspace MCP servers this agent opted
+    into (`workspace_mcp_servers` ids, resolved and decrypted by the caller).
 
     Custom tools get their webhook_url wired to the agent's generated backend
     (tools_base_url) and, when tools_secret is set, TurnCall HMAC-signs each
@@ -134,6 +138,10 @@ def to_create_agent_request(
         "llm": {
             "provider": llm.get("provider", "openai"),
             "model": llm.get("model", "gpt-4o-mini"),
+            # An agent's own key, set deliberately in the advanced config: it
+            # pins the agent to that account over the Workspace Integration
+            # (ADR-0023). Dropped here before, so a pin silently did nothing.
+            **({"api_key": llm["api_key"]} if llm.get("api_key") else {}),
         },
         "tts": _tts_block(tts),
         "tools": tools,
@@ -220,6 +228,9 @@ def to_create_agent_request(
     # the start of every call.
     # Mid-call only (ADR-0021): an end-of-call-only attachment must not put a
     # tool in front of the model. Before that ADR every attachment did.
+    # Registered Workspace servers come after the agent's own, for the same
+    # reason: what the agent author typed wins a tool-name collision (#59).
+    servers += list(registered_mcp_servers or [])
     apps = pipedream.mid_call_apps(cfg.get("integrations"))
     if apps and pipedream_target:
         servers += pipedream.mcp_servers_for(apps, **pipedream_target)

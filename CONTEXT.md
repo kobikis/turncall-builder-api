@@ -208,9 +208,9 @@ Backend's data plane.
 _Avoid_: orchestrator, gateway
 
 **Console**:
-The builder-web management UI: a sidebar with an Agents section and a Phone
-Numbers section (each list → detail → edit), plus the Builder reached as the
-"new agent" path. Modeled on the Vapi dashboard.
+The builder-web management UI: a sidebar with Agents, Phone Numbers,
+Integrations, Members and Skills (each list → detail → edit), plus the Builder
+reached as the "new agent" path.
 _Avoid_: dashboard, admin panel
 
 **Number binding**:
@@ -427,6 +427,23 @@ has to be able to flag a provider with no key. See ADR-0023.
 _Avoid_: "provider" (that is the *selected backend*, TurnCall's word), "API key"
 alone (the AWS one is a credential set), "[[Connected app]]" (Pipedream's, and
 minted per call).
+
+**Workspace Twilio account**:
+A [[Workspace]]'s Twilio account, connected once on the Integrations page and
+chosen when binding a number instead of entering a pair per number. Not an
+[[Integration]] in the projected sense: TurnCall holds Twilio credentials per
+*number* (Twilio's own unit), so a bind sends this account's pair and the phone
+mirror marks the number `twilio_source = 'workspace'`; saving the card again
+re-sends the pair to each such number. A number may still bring its own pair (a
+second account, a subaccount). Disconnect is refused while numbers use it.
+_Avoid_: "Twilio integration" (suggests projection into agents).
+
+**Workspace Pipedream project**:
+A [[Workspace]]'s own Pipedream Connect project, behind its [[Connected app]]s,
+instead of the deployment's (`PIPEDREAM_*`). Every Connected-apps path resolves
+the Workspace's first. Its apps live only in it, so disconnecting is refused
+while any are connected.
+_Avoid_: "Pipedream credential" unqualified (the deployment has one too).
 
 **Workspace MCP server**:
 An MCP server registered once for a [[Workspace]] and opted into per agent,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from . import pipedream_store
+from . import mcp_registry_store, pipedream_store
 from ._helpers import _normalize_config
 from .backends import generator, registry, scaffold, toolgen
 from .backends.diff import automations_changed, tools_changed
@@ -21,6 +21,25 @@ from .tasks import spawn
 logger = logging.getLogger("turncall_builder")
 
 
+async def build_payload(
+    pool: Any, backend: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any]:
+    """The TurnCall agent body for `config`, with everything resolved per
+    Workspace: the Connected-apps target and the registered MCP servers the agent
+    opted into. Every path that pushes a config goes through here, so none of
+    them can drop either."""
+    workspace_id = backend.get("workspace_id")
+    return to_create_agent_request(
+        config,
+        registry.backend_url(backend["port"]),
+        tools_secret=backend.get("webhook_secret") or None,
+        pipedream_target=await pipedream_store.mcp_target(pool, workspace_id),
+        registered_mcp_servers=await mcp_registry_store.resolve(
+            pool, workspace_id, config.get("workspace_mcp_servers")
+        ),
+    )
+
+
 async def apply_update(
     pool: Any, client: Any, backend: dict[str, Any], config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -28,12 +47,7 @@ async def apply_update(
     changed. Returns {"backend_regenerated": bool}."""
     port = backend["port"]
     new_config = _normalize_config(config, port)
-    payload = to_create_agent_request(
-        new_config,
-        registry.backend_url(port),
-        tools_secret=backend.get("webhook_secret") or None,
-        pipedream_target=await pipedream_store.mcp_target(pool, backend.get("workspace_id")),
-    )
+    payload = await build_payload(pool, backend, new_config)
     await client.update_agent(backend["agent_id"], payload, backend["api_key"])
 
     # Both sides normalized with the same port, so a legacy config (nulls/missing

@@ -108,6 +108,12 @@ migrations run against. It mints a TurnCall API key and writes
 `TURNCALL_API_KEY` into `.env`; it is required on a first run, not only after
 a reset — the builder cannot create agents without that key.
 
+Set `INTEGRATIONS_ENCRYPTION_KEY` once (same generator as the others) to use the
+Integrations page: workspaces then connect their own provider keys, Twilio
+account and Pipedream project there, and the keys in either `.env` become a
+fallback rather than a requirement. See
+[ADR-0023](docs/adr/0023-provider-credentials-from-the-console.md).
+
 ### 3. Start the builder
 
 ```bash

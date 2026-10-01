@@ -14,7 +14,16 @@ call needs is minted for that call.
 supplies the OAuth client for each app. What you create is a Pipedream account
 and one Connect project.
 
-## 1. Server: five environment variables
+**Two places a Connect project can come from.** The deployment's, configured
+below in `.env` — every Workspace without its own uses it. Or a Workspace's own:
+an admin connects it on **Integrations → Connected apps → Pipedream** (client
+id, client secret, project id, environment), and that Workspace's apps then live
+in its project, on its bill. A Workspace's project always wins. A deployment
+where every Workspace brings its own needs only `PIPEDREAM_REDIRECT_URI` from
+the list below — the callback is this API's, whoever owns the project — and
+unsetting the rest removes the stored deployment project at the next start.
+
+## 1. Server: environment variables (the deployment's project)
 
 In the builder API's `.env`:
 
@@ -35,7 +44,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ```
 
 **Set it once and leave it.** Rotating it invalidates the stored client secret,
-and integrations stop working until it is re-entered. Decryption fails loudly
+and integrations stop working until it is re-entered. Unset, the connect flow is
+signed with `INTEGRATIONS_ENCRYPTION_KEY` instead — which is also what seals a
+Workspace's own project secret. Decryption fails loudly
 with a message naming the key rather than returning junk.
 
 `PIPEDREAM_ENVIRONMENT` selects which Pipedream environment connected accounts

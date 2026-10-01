@@ -42,8 +42,8 @@ platform key separately so a card can name which key will run the call.
 
 ## Why not per-role cards
 
-Vapi's dashboard lists Deepgram under Voice and again under Transcription. A data
-model shaped that way stores two Deepgram keys that can disagree, and the first
+A dashboard that lists Deepgram under Voice and again under Transcription is a
+data model that stores two Deepgram keys that can disagree, and the first
 support question is why transcription 401s while voice works. Cards are grouped
 by role for browsing; the credential is keyed by provider account.
 
@@ -63,6 +63,47 @@ agent because TurnCall connects every configured server at call start under one
 
 ## Status
 
-Accepted; not yet implemented. Withdrawable in the sense that the page can be
+Accepted; implemented (#54-#59). `/integrations/providers` (cards, connect,
+apply, disconnect, adopt) and `/integrations/mcp-servers`; storage in
+`provider_integrations`, `integration_projections` and `workspace_mcp_servers`
+(migration 0012), encrypted under `INTEGRATIONS_ENCRYPTION_KEY`. Two details the
+build settled: the account namespace is read from TurnCall's `GET /v1/providers`
+rather than copied here, and the picker cache is keyed by a fingerprint of the
+key that fetched it, which is what invalidates a Workspace's lists the moment
+its Integration changes. The shared webhook-numbers project is not a projection
+target — it is one project behind every Workspace, so a call routed through it
+still runs on the platform key.
+
+**Twilio is a card too, but not a projection.** TurnCall holds Twilio
+credentials per *number* (Twilio's own unit — webhooks name their account by
+`AccountSid`), so the Workspace's Twilio account (`twilio_accounts`, one per
+Workspace) is never written into agent projects. A bind "with the workspace's
+Twilio account" sends its pair, the phone mirror marks the number
+`twilio_source = 'workspace'` without keeping a token copy, and saving the card
+again re-sends the pair to each of those numbers, reporting per number. A
+number can still bring its own pair (a second account or a subaccount).
+Disconnecting is refused while numbers use the account.
+
+**Pipedream likewise.** A Workspace can connect its own Pipedream project
+(`workspace_pipedream`); every Connected-apps path resolves the Workspace's
+project first and the deployment's `PIPEDREAM_*` second. The project's secret
+is sealed with the Integrations key, which also signs the connect state when
+`PIPEDREAM_ENCRYPTION_KEY` is unset. Disconnecting is refused while apps are
+connected in that project, since the fallback project does not hold them.
+Unsetting `PIPEDREAM_*` removes the stored deployment project at the next
+start, so the card never claims a fallback that is gone.
+
+**One encryption key where a deployment wants one.** `INTEGRATIONS_ENCRYPTION_KEY`
+seals Integrations, registered MCP headers, the Workspace Twilio and Pipedream
+secrets, and stands in for `GITHUB_TOKEN_ENCRYPTION_KEY` and (for signing the
+connect state) `PIPEDREAM_ENCRYPTION_KEY` when those are unset. Each existing
+key still wins while set, so nothing already sealed has to be re-encrypted.
+
+**Engine keys are a fallback everywhere.** TurnCall resolves a project
+credential for text turns, analysis, KB embeddings and the eval judge as well as
+calls, and `typesafe` (the `jev` judge) is an account like the others, so a
+Workspace can run without any provider key in the engine's environment. Phone
+numbers routed to a custom call-init webhook are the exception: they live in the
+one shared webhook-numbers project, which no Workspace's keys reach. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

@@ -31,10 +31,10 @@ def test_providers_lists_stt_llm_tts_s2s(client):
 def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     from app.routers import sessions
 
-    async def fake_models(provider):
+    async def fake_models(provider, keys=None):
         return ["gpt-4o-realtime-preview"]
 
-    async def fake_voices(provider):
+    async def fake_voices(provider, keys=None):
         return ["alloy", "echo"]
 
     monkeypatch.setattr(sessions.provider_catalog, "s2s_models", fake_models)
@@ -46,7 +46,7 @@ def test_s2s_models_and_voices_endpoints(client, monkeypatch):
 def test_stt_models_endpoint(client, monkeypatch):
     from app.routers import sessions
 
-    async def fake(provider):
+    async def fake(provider, keys=None):
         return ["nova-2", "nova-3"]
 
     monkeypatch.setattr(sessions.provider_catalog, "stt_models", fake)
@@ -58,7 +58,7 @@ def test_stt_models_endpoint(client, monkeypatch):
 def test_llm_models_endpoint(client, monkeypatch):
     from app.routers import sessions
 
-    async def fake(provider):
+    async def fake(provider, keys=None):
         return ["gpt-4o", "gpt-4o-mini"]
 
     monkeypatch.setattr(sessions.provider_catalog, "llm_models", fake)
@@ -70,7 +70,7 @@ def test_llm_models_endpoint(client, monkeypatch):
 def test_tts_voices_endpoint(client, monkeypatch):
     from app.routers import sessions
 
-    async def fake(provider):
+    async def fake(provider, keys=None):
         return ["alloy", "echo"]
 
     monkeypatch.setattr(sessions.provider_catalog, "tts_voices", fake)

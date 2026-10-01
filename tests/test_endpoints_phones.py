@@ -223,3 +223,81 @@ def test_update_of_a_number_turncall_already_holds_explains_itself(client, mocks
 
     assert r.status_code == 409
     mocks.client.unbind_phone_number.assert_not_called()
+
+
+# --- a number's own Twilio account --------------------------------------------
+
+AC = "AC" + "b" * 32
+TOKEN = "twilio-token-secret"
+
+
+def test_bind_with_an_own_twilio_account_sends_it_and_never_returns_it(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.return_value = {
+        "id": "pn-9",
+        "external_number_sid": "PNlooked",
+        "twilio_webhooks_configured": True,
+    }
+    body = _bind_body(sid="", twilio_account_sid=AC, twilio_auth_token=TOKEN)
+
+    r = client.post("/phone-numbers", json=body)
+
+    assert r.status_code == 200, r.text
+    payload = mocks.client.bind_phone_number.await_args.args[0]
+    assert payload["twilio_account_sid"] == AC
+    assert payload["twilio_auth_token"] == TOKEN
+    assert "external_number_sid" not in payload  # TurnCall looks it up
+    mirrored = mocks.phones.record_number.await_args.args[1]
+    assert mirrored["sid"] == "PNlooked"
+    assert TOKEN not in mirrored["twilio_auth_token_encrypted"]
+    data = r.json()["data"]
+    assert TOKEN not in r.text and "twilio_auth_token_encrypted" not in data
+    assert data["twilio_credentials"] == "number"
+    assert data["twilio_account_sid"] == AC
+
+
+def test_half_a_twilio_pair_is_refused(client, mocks):
+    r = client.post("/phone-numbers", json=_bind_body(twilio_account_sid=AC))
+    assert r.status_code == 422
+    mocks.client.bind_phone_number.assert_not_called()
+
+
+def test_a_rebind_carries_the_stored_twilio_account(client, mocks):
+    """TurnCall never returns the token, so moving a number between projects
+    can only re-send the mirror's sealed copy."""
+    mocks.phones.get_number.return_value = _phone(routing_type="webhook", agent_id=None, project_id="wp")
+    mocks.phones.twilio_account.return_value = (AC, TOKEN)
+    mocks.phones.ensure_webhook_project.return_value = {"project_id": "wp", "api_key": "tc_wp"}
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1", project_id="p1")
+    mocks.client.bind_phone_number.return_value = {"id": "pn-new", "external_number_sid": "PN1"}
+
+    r = client.put("/phone-numbers/pn-1", json=_bind_body())
+
+    assert r.status_code == 200, r.text
+    payload = mocks.client.bind_phone_number.await_args.args[0]
+    assert (payload["twilio_account_sid"], payload["twilio_auth_token"]) == (AC, TOKEN)
+
+
+def test_an_in_place_edit_sends_twilio_only_when_re_entered(client, mocks):
+    mocks.phones.get_number.return_value = _phone()
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1", project_id="p1")
+    mocks.client.update_phone_number.return_value = {"id": "pn-1"}
+
+    client.put("/phone-numbers/pn-1", json=_bind_body())
+    assert "twilio_auth_token" not in mocks.client.update_phone_number.await_args.args[1]
+
+    client.put("/phone-numbers/pn-1", json=_bind_body(twilio_account_sid=AC, twilio_auth_token="rotated"))
+    assert mocks.client.update_phone_number.await_args.args[1]["twilio_auth_token"] == "rotated"
+
+
+def test_a_label_is_mirrored_trimmed(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.bind_phone_number.return_value = {"id": "pn-9"}
+    r = client.post("/phone-numbers", json=_bind_body(label="  Support line "))
+    assert r.status_code == 200
+    assert mocks.phones.record_number.await_args.args[1]["label"] == "Support line"
+    assert "label" not in mocks.client.bind_phone_number.await_args.args[0]  # builder-only
+
+
+def test_a_label_too_long_is_refused(client, mocks):
+    assert client.post("/phone-numbers", json=_bind_body(label="x" * 101)).status_code == 422

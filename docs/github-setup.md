@@ -21,6 +21,11 @@ Put it in `.env`:
 GITHUB_TOKEN_ENCRYPTION_KEY=<the 44-character key>
 ```
 
+Optional on a deployment that already sets `INTEGRATIONS_ENCRYPTION_KEY`: with
+this unset, that key seals GitHub tokens instead. It is never consulted while
+this one is set, so tokens sealed with it keep working — removing it later means
+each user reconnects GitHub once.
+
 **Set it once and leave it.** Rotating it invalidates every stored token and
 every user has to reconnect. Decryption fails loudly rather than silently
 returning junk, so you will know — but everyone is disconnected until they act.
