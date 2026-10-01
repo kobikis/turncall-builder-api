@@ -161,6 +161,17 @@ async def delete_agent(
 _CLIENT_CONTROLLED = ("agent_id", "server_url", "server_url_secret")
 
 
+def _pipeline_start_failure(response: httpx.Response) -> str | None:
+    """TurnCall's reason when the agent's pipeline could not start, else None."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict) and body.get("code") == "pipeline_start_failed":
+        return str(body.get("error") or "") or None
+    return None
+
+
 @router.post("/agents/{agent_id}/webrtc/connect")
 async def agent_webrtc_connect(
     agent_id: str, request: Request, ctx: AuthContext = Depends(require_editor)
@@ -232,6 +243,14 @@ async def agent_webrtc_connect(
         if 400 <= status < 500 and status not in (401, 403):
             raise HTTPException(
                 status_code=422, detail="offer rejected by upstream — check the SDP"
+            ) from exc
+        reason = _pipeline_start_failure(exc.response)
+        if reason:
+            # The one upstream message written for the person placing the call:
+            # without it the test call just timed out, saying nothing.
+            raise HTTPException(
+                status_code=502,
+                detail=f"{reason} — check the agent's provider keys in Integrations.",
             ) from exc
         raise HTTPException(status_code=502, detail="TurnCall upstream error") from exc
     except httpx.HTTPError as exc:

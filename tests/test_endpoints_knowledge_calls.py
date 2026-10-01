@@ -349,6 +349,35 @@ def test_webrtc_connect_stale_key_maps_to_502_not_401(client, mocks):
     assert r.status_code == 502
 
 
+
+def test_webrtc_connect_relays_why_the_agent_could_not_start(client, mocks):
+    """TurnCall's pipeline_start_failed carries a reason written for the caller
+    (a provider with no key, say). Without it the test call only timed out."""
+    import json
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    body = {
+        "success": False,
+        "code": "pipeline_start_failed",
+        "error": "The agent could not start (call c1): Missing credentials",
+    }
+    mocks.client.webrtc_connect.side_effect = _http_status_error(500, json.dumps(body))
+    r = client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+    assert r.status_code == 502
+    assert "Missing credentials" in r.json()["detail"]
+    assert "Integrations" in r.json()["detail"]
+
+
+def test_webrtc_connect_other_upstream_errors_stay_generic(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.webrtc_connect.side_effect = _http_status_error(
+        500, '{"code": "internal_error", "error": "secret internals"}'
+    )
+    r = client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+    assert r.status_code == 502
+    assert "secret internals" not in r.text
+
+
 # --- a test call resolves the way a phone call does (ADR-0020) ----------------
 #
 # Resolving by agent_id loads the STORED config, whose mcp_servers deliberately
