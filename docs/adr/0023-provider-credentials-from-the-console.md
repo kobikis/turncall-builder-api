@@ -42,8 +42,8 @@ platform key separately so a card can name which key will run the call.
 
 ## Why not per-role cards
 
-Vapi's dashboard lists Deepgram under Voice and again under Transcription. A data
-model shaped that way stores two Deepgram keys that can disagree, and the first
+A dashboard that lists Deepgram under Voice and again under Transcription is a
+data model that stores two Deepgram keys that can disagree, and the first
 support question is why transcription 401s while voice works. Cards are grouped
 by role for browsing; the credential is keyed by provider account.
 
@@ -63,6 +63,15 @@ agent because TurnCall connects every configured server at call start under one
 
 ## Status
 
-Accepted; not yet implemented. Withdrawable in the sense that the page can be
+Accepted; implemented (#54-#59). `/integrations/providers` (cards, connect,
+apply, disconnect, adopt) and `/integrations/mcp-servers`; storage in
+`provider_integrations`, `integration_projections` and `workspace_mcp_servers`
+(migration 0012), encrypted under `INTEGRATIONS_ENCRYPTION_KEY`. Two details the
+build settled: the account namespace is read from TurnCall's `GET /v1/providers`
+rather than copied here, and the picker cache is keyed by a fingerprint of the
+key that fetched it, which is what invalidates a Workspace's lists the moment
+its Integration changes. The shared webhook-numbers project is not a projection
+target — it is one project behind every Workspace, so a call routed through it
+still runs on the platform key. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

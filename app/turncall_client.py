@@ -450,3 +450,25 @@ class TurnCallClient:
             api_key=api_key,
             json={"url": url, "events": events},
         )
+
+    # --- project credentials (turncall ADR-0020) ---------------------------
+
+    async def put_credential(
+        self, provider: str, document: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Store (or replace) this project's credential for one provider account.
+        The response carries presence only, never the value."""
+        return await self._request(
+            "PUT", f"/v1/credentials/{provider}", api_key=api_key, json=document
+        )
+
+    async def delete_credential(self, provider: str, api_key: str) -> dict[str, Any]:
+        """Idempotent: a project holding none answers `deleted: false`."""
+        return await self._request(
+            "DELETE", f"/v1/credentials/{provider}", api_key=api_key
+        )
+
+    async def list_providers(self, api_key: str) -> dict[str, Any]:
+        """Valid providers per role, and per account `platform_key` +
+        `project_credential` (for the project this key belongs to)."""
+        return await self._request("GET", "/v1/providers", api_key=api_key)

@@ -1,9 +1,11 @@
 """Live model/voice catalogs, fetched from each provider's API.
 
 Populates the config form's model + voice dropdowns with the actual, current
-options instead of a hand-maintained list. Keys come from the builder's own env
-(OPENAI_API_KEY, ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY,
-DEEPGRAM_API_KEY; OpenRouter's model list is public). Best-effort: a provider
+options instead of a hand-maintained list. Keys come from the Workspace's
+Integration when it has one (#56), so the pickers list what the account that will
+run the call actually has; otherwise from the builder's own env (OPENAI_API_KEY,
+ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY, DEEPGRAM_API_KEY;
+OpenRouter's model list is public). Best-effort: a provider
 with no key / no list API / an error yields [] (the console still allows free
 text), and a stale cache is served over a transient failure. Cached ~1h.
 
@@ -16,9 +18,11 @@ text, which is what the ARN and inference-profile forms need.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
+from typing import Any
 
 import httpx
 
@@ -108,33 +112,65 @@ _AWS_S2S_MODELS = ["amazon.nova-2-sonic-v1:0", "amazon.nova-sonic-v1:0"]
 _AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
 
 
-async def llm_models(provider: str) -> list[str]:
-    return await _cached(f"llm:{provider}", lambda c: _fetch_llm_models(c, provider))
+# The Builder's own environment: the fallback when a Workspace has no Integration.
+_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "deepgram": "DEEPGRAM_API_KEY",
+    "elevenlabs": "ELEVENLABS_API_KEY",
+    "cartesia": "CARTESIA_API_KEY",
+}
+_ACCOUNT = {"openai_live": "openai"}
 
 
-async def tts_voices(provider: str) -> list[dict[str, str]]:
-    return await _cached(f"tts:{provider}", lambda c: _fetch_tts_voices(c, provider))
+def _key(provider: str, keys: dict[str, str] | None) -> str:
+    """The Workspace's key for this provider's account, else the Builder's own (#56)."""
+    account = _ACCOUNT.get(provider, provider)
+    return (keys or {}).get(account) or os.environ.get(_ENV.get(account, ""), "")
 
 
-async def stt_models(provider: str) -> list[str]:
-    return await _cached(f"stt:{provider}", lambda c: _fetch_stt_models(c, provider))
+def _fp(key: str) -> str:
+    """Cache-key fragment naming WHICH key fetched a list, never the key itself.
+
+    Keying the cache by the credential is what invalidates it: a Workspace that
+    connects, replaces or removes a key reads under a different fingerprint, so
+    its pickers repopulate immediately rather than an hour later, and two
+    Workspaces never share a list fetched with one of their keys.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()[:16] if key else "none"
 
 
-async def s2s_models(provider: str) -> list[str]:
-    return await _cached(f"s2s:{provider}", lambda c: _fetch_s2s_models(c, provider))
+async def llm_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
+    key = _key(provider, keys)
+    return await _cached(f"llm:{provider}:{_fp(key)}", lambda c: _fetch_llm_models(c, provider, key))
 
 
-async def s2s_voices(provider: str) -> list[dict[str, str]]:
+async def tts_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
+    key = _key(provider, keys)
+    return await _cached(f"tts:{provider}:{_fp(key)}", lambda c: _fetch_tts_voices(c, provider, key))
+
+
+async def stt_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
+    key = _key(provider, keys)
+    return await _cached(f"stt:{provider}:{_fp(key)}", lambda c: _fetch_stt_models(c, provider, key))
+
+
+async def s2s_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
+    key = _key(provider, keys)
+    return await _cached(f"s2s:{provider}:{_fp(key)}", lambda c: _fetch_s2s_models(c, provider, key))
+
+
+async def s2s_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
     return await _cached(f"s2sv:{provider}", lambda c: _fetch_s2s_voices(c, provider))
 
 
-async def _fetch_llm_models(client: httpx.AsyncClient, provider: str) -> list[str]:
+async def _fetch_llm_models(client: httpx.AsyncClient, provider: str, key: str) -> list[str]:
     if provider == "openrouter":
         r = await client.get("https://openrouter.ai/api/v1/models")
         r.raise_for_status()
         return sorted(m["id"] for m in r.json().get("data", []) if m.get("id"))
     if provider == "openai":
-        key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
             return []
         r = await client.get(
@@ -149,7 +185,6 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str) -> list[st
             if i.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")) and not any(x in i for x in skip)
         )
     if provider == "anthropic":
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             return []
         r = await client.get(
@@ -163,9 +198,8 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str) -> list[st
     return []  # ollama / custom_openai target a per-agent endpoint
 
 
-async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str) -> list[str]:
+async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) -> list[str]:
     if provider == "openai":
-        key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
             return list(_OPENAI_S2S_MODELS)  # no key — best-effort known set
         r = await client.get(
@@ -181,7 +215,6 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str) -> list[st
         dialog = sorted(i for i in ids if "realtime" in i and not any(x in i for x in skip))
         return dialog or list(_OPENAI_S2S_MODELS)  # fallback if the list came back bare
     if provider == "openai_live":
-        key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
             return list(_OPENAI_LIVE_MODELS)
         r = await client.get(
@@ -196,7 +229,6 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str) -> list[st
         dialog = sorted(i for i in ids if "live" in i and not any(x in i for x in skip))
         return dialog or list(_OPENAI_LIVE_MODELS)
     if provider == "google":
-        key = os.environ.get("GOOGLE_API_KEY", "")
         if key:
             r = await client.get(
                 "https://generativelanguage.googleapis.com/v1beta/models",
@@ -240,9 +272,8 @@ async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str) -> list[di
     return []
 
 
-async def _fetch_stt_models(client: httpx.AsyncClient, provider: str) -> list[str]:
+async def _fetch_stt_models(client: httpx.AsyncClient, provider: str, key: str) -> list[str]:
     if provider == "deepgram":
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             return []
         r = await client.get(
@@ -254,14 +285,13 @@ async def _fetch_stt_models(client: httpx.AsyncClient, provider: str) -> list[st
     return _STT_MODELS.get(provider, [])
 
 
-async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str) -> list[dict[str, str]]:
+async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str, key: str) -> list[dict[str, str]]:
     # ElevenLabs + Cartesia need a voice *id* in config (the display name would
     # build a broken TTS websocket URL -> "did not receive a valid HTTP
     # response"), so value=id, label=name. Deepgram/OpenAI use the string as-is.
     if provider == "openai":
         return _same(_OPENAI_TTS_VOICES)
     if provider == "elevenlabs":
-        key = os.environ.get("ELEVENLABS_API_KEY", "")
         if not key:
             return []
         r = await client.get("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": key})
@@ -273,7 +303,6 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str) -> list[di
         ]
         return sorted(pairs, key=lambda p: p["label"])
     if provider == "cartesia":
-        key = os.environ.get("CARTESIA_API_KEY", "")
         if not key:
             return []
         r = await client.get(
@@ -290,7 +319,6 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str) -> list[di
         ]
         return sorted(pairs, key=lambda p: p["label"])
     if provider == "deepgram":
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             return []
         r = await client.get(
@@ -300,3 +328,55 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str) -> list[di
         names = [m.get("canonical_name") or m.get("name") for m in r.json().get("tts", [])]
         return _same(sorted({n for n in names if n}))  # dedup per-version/language rows
     return []
+
+
+# --- credential validation (#56) ---------------------------------------------
+
+# The list endpoint each account's key is checked against — the same calls the
+# pickers make, except OpenRouter's, whose model list is public and so would
+# accept any key; its key endpoint is what actually authenticates.
+_PROBES: dict[str, tuple[str, Any]] = {
+    "openai": ("https://api.openai.com/v1/models", lambda k: {"Authorization": f"Bearer {k}"}),
+    "anthropic": (
+        "https://api.anthropic.com/v1/models",
+        lambda k: {"x-api-key": k, "anthropic-version": "2023-06-01"},
+    ),
+    "openrouter": ("https://openrouter.ai/api/v1/key", lambda k: {"Authorization": f"Bearer {k}"}),
+    "google": ("https://generativelanguage.googleapis.com/v1beta/models", lambda k: {"x-goog-api-key": k}),
+    "deepgram": ("https://api.deepgram.com/v1/projects", lambda k: {"Authorization": f"Token {k}"}),
+    "elevenlabs": ("https://api.elevenlabs.io/v1/voices", lambda k: {"xi-api-key": k}),
+    "cartesia": (
+        "https://api.cartesia.ai/voices",
+        lambda k: {"X-API-Key": k, "Cartesia-Version": "2024-06-10"},
+    ),
+    "tavus": ("https://tavusapi.com/v2/replicas", lambda k: {"x-api-key": k}),
+}
+
+
+async def probe(provider: str, document: dict[str, Any]) -> dict[str, Any]:
+    """Check a credential against its provider's list endpoint.
+
+    The result names what was checked and never claims the key "works": a key
+    a list endpoint accepts can still lack the scopes a call needs.
+
+    status: `valid` (the endpoint accepted it), `rejected` (401/403 — the caller
+    must not store it as connected), `unverified` (the endpoint could not be
+    reached or answered otherwise), `unchecked` (no list endpoint to ask).
+    """
+    target = _PROBES.get(provider)
+    key = document.get("api_key")
+    if target is None or not key:
+        return {"status": "unchecked", "checked": None,
+                "detail": f"{provider} has no list endpoint the Builder can check a key against"}
+    url, headers = target
+    checked = f"GET {url}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=headers(key))
+    except httpx.HTTPError as exc:
+        return {"status": "unverified", "checked": checked, "detail": f"unreachable: {type(exc).__name__}"}
+    if r.status_code in (401, 403):
+        return {"status": "rejected", "checked": checked, "detail": f"{provider} answered {r.status_code}"}
+    if r.is_success:
+        return {"status": "valid", "checked": checked, "detail": f"accepted by {provider}'s list endpoint"}
+    return {"status": "unverified", "checked": checked, "detail": f"{provider} answered {r.status_code}"}

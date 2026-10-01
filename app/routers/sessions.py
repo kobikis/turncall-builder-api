@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
+    integration_store,
+    provider_integrations,
     provider_catalog,
     runtime,
     session_docs,
@@ -172,6 +174,14 @@ _STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
 _S2S_PROVIDERS = ["openai", "openai_live", "google", "aws"]
 
 
+async def _workspace_keys(ctx: AuthContext) -> dict[str, str]:
+    """The Workspace's own keys, so the pickers list what will run the call (#56)."""
+    try:
+        return await integration_store.api_keys(runtime.get_pool(), ctx.workspace_id)
+    except integration_store.IntegrationError:
+        return {}  # key unset/rotated: degrade to the Builder's own env, never fail
+
+
 @router.get("/providers")
 def providers() -> dict[str, Any]:
     """STT/LLM/TTS/S2S provider options for the config form's provider dropdowns."""
@@ -182,15 +192,15 @@ def providers() -> dict[str, Any]:
 
 
 @router.get("/providers/stt/{provider}/models")
-async def stt_models(provider: str) -> dict[str, Any]:
+async def stt_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     """Model ids for an STT provider (cached; Deepgram fetched live)."""
-    return {"success": True, "data": {"models": await provider_catalog.stt_models(provider)}}
+    return {"success": True, "data": {"models": await provider_catalog.stt_models(provider, await _workspace_keys(ctx))}}
 
 
 @router.get("/providers/s2s/{provider}/models")
-async def s2s_models(provider: str) -> dict[str, Any]:
+async def s2s_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     """Model ids for an S2S/realtime provider (openai live, google fixed)."""
-    return {"success": True, "data": {"models": await provider_catalog.s2s_models(provider)}}
+    return {"success": True, "data": {"models": await provider_catalog.s2s_models(provider, await _workspace_keys(ctx))}}
 
 
 @router.get("/providers/s2s/{provider}/voices")
@@ -200,15 +210,15 @@ async def s2s_voices(provider: str) -> dict[str, Any]:
 
 
 @router.get("/providers/llm/{provider}/models")
-async def llm_models(provider: str) -> dict[str, Any]:
+async def llm_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     """Model ids for an LLM provider, fetched live from its API (cached)."""
-    return {"success": True, "data": {"models": await provider_catalog.llm_models(provider)}}
+    return {"success": True, "data": {"models": await provider_catalog.llm_models(provider, await _workspace_keys(ctx))}}
 
 
 @router.get("/providers/tts/{provider}/voices")
-async def tts_voices(provider: str) -> dict[str, Any]:
+async def tts_voices(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     """Voices for a TTS provider, fetched live from its API (cached)."""
-    return {"success": True, "data": {"voices": await provider_catalog.tts_voices(provider)}}
+    return {"success": True, "data": {"voices": await provider_catalog.tts_voices(provider, await _workspace_keys(ctx))}}
 
 
 @router.get("/providers/builder")
@@ -553,6 +563,17 @@ async def create_agent(
     backend = await _generate_backend(
         pool, agent_id, project_id, key, config, port, secret, ctx.workspace_id
     )
+    # The Workspace's provider accounts reach the new agent's project too, so a
+    # connected key runs this agent's very first call (ADR-0023). Best-effort.
+    try:
+        await provider_integrations.project_into_new_agent(
+            pool,
+            client,
+            ctx.workspace_id,
+            {"agent_id": agent_id, "api_key": key, "config": config},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("projecting integrations into %s failed", agent_id)
     knowledge = await _forward_staged_documents(sid, agent_id, key)
     return {
         "success": True,

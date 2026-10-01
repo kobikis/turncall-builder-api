@@ -33,8 +33,10 @@ from .routers import (
     github,
     integrations,
     knowledge,
+    mcp_registry,
     members,
     phones,
+    provider_integrations,
     sessions,
     skills,
     takeaways,
@@ -141,6 +143,8 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 for _router in (
     sessions, agents, agent_activity, phones, calls, evals, knowledge, takeaways,
     ambience,
-    auth, workspaces, members, github, skills, integrations,
+    # Before `integrations`, whose `/integrations/{...}` routes are broader.
+    auth, workspaces, members, github, skills, provider_integrations, mcp_registry,
+    integrations,
 ):
     app.include_router(_router.router)

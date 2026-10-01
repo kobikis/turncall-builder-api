@@ -25,11 +25,14 @@ from fastapi.testclient import TestClient
 # on its own.
 os.environ.setdefault("PIPEDREAM_REDIRECT_URI", "https://api.test/integrations/callback")
 os.environ.setdefault("PIPEDREAM_ENCRYPTION_KEY", Fernet.generate_key().decode())
+os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 from app import (
     auth_store,
     deps,
+    integration_store,
     main,
+    mcp_registry_store,
     pipedream,
     pipedream_store,
     runtime,
@@ -63,6 +66,8 @@ def mocks(monkeypatch):
         workspace_skills=create_autospec(workspace_skills),
         pipedream=create_autospec(pipedream),
         pipedream_store=create_autospec(pipedream_store),
+        integration_store=create_autospec(integration_store),
+        mcp_registry_store=create_autospec(mcp_registry_store),
         client=AsyncMock(spec=TurnCallClient),
     )
     # Patch each function ON THE SOURCE MODULE so every importer sees the mock —
@@ -77,6 +82,8 @@ def mocks(monkeypatch):
         (toolgen, m.toolgen),
         (workspace_skills, m.workspace_skills),
         (pipedream_store, m.pipedream_store),
+        (integration_store, m.integration_store),
+        (mcp_registry_store, m.mcp_registry_store),
     ]:
         for attr in vars(mock_mod):
             if not attr.startswith("_"):
@@ -91,6 +98,12 @@ def mocks(monkeypatch):
             monkeypatch.setattr(pipedream, attr, getattr(m.pipedream, attr))
     # No Pipedream credential unless a test says otherwise — integrations off.
     m.pipedream_store.get_credential.return_value = None
+    # No Integrations or registered servers unless a test says otherwise.
+    m.integration_store.list_for_workspace.return_value = []
+    m.integration_store.list_projections.return_value = []
+    m.integration_store.api_keys.return_value = {}
+    m.mcp_registry_store.resolve.return_value = []
+    m.mcp_registry_store.list_servers.return_value = []
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

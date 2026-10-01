@@ -25,7 +25,6 @@ from pydantic import BaseModel, field_validator
 
 from .. import agent_update, pipedream, pipedream_store, runtime
 from .._helpers import _backend_or_404, _normalize_config
-from ..mapper import to_create_agent_request
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..settings import load_settings
@@ -372,13 +371,8 @@ async def call_config(backend: dict = Depends(_calling_backend)) -> dict[str, An
     cred = await _credential()
     port = backend["port"]
     try:
-        payload = to_create_agent_request(
-            _normalize_config(config, port),
-            registry.backend_url(port),
-            tools_secret=backend.get("webhook_secret") or None,
-            pipedream_target=await pipedream_store.mcp_target(
-                runtime.get_pool(), backend.get("workspace_id")
-            ),
+        payload = await agent_update.build_payload(
+            runtime.get_pool(), backend, _normalize_config(config, port)
         )
         servers = payload["config"].get("mcp_servers")
         if servers:

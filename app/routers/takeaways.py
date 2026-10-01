@@ -8,11 +8,10 @@ import httpx
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import pipedream_store, runtime
+from .. import agent_update, runtime
 from .._helpers import _backend_or_404, _turncall_http_error
 from ..backends import registry
 from ..deps import AuthContext, require_editor, require_member
-from ..mapper import to_create_agent_request
 
 router = APIRouter()
 
@@ -41,16 +40,9 @@ async def _set_agent_takeaways(b: dict[str, Any], takeaway_ids: list[str]) -> No
     base = b.get("config") or {}
     analysis = {**base.get("analysis", {"enabled": True}), "takeaway_ids": takeaway_ids}
     config = {**base, "analysis": analysis}
-    payload = to_create_agent_request(
-        config,
-        registry.backend_url(b["port"]),
-        tools_secret=b.get("webhook_secret") or None,
-        # Without this, attaching a takeaway would silently drop the agent's
-        # attached apps — the exact failure ADR-0017 opens on.
-        pipedream_target=await pipedream_store.mcp_target(
-            runtime.get_pool(), b.get("workspace_id")
-        ),
-    )
+    # build_payload, not the bare mapper: attaching a takeaway must not drop
+    # the agent's attached apps or registered servers (ADR-0017's failure).
+    payload = await agent_update.build_payload(runtime.get_pool(), b, config)
     await runtime.get_client().update_agent(b["agent_id"], payload, b["api_key"])
     await registry.update_config(runtime.get_pool(), b["agent_id"], config)
 
