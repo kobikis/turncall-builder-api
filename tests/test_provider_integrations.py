@@ -265,6 +265,29 @@ def test_cards_say_which_key_runs_the_call(client, engine):
     assert cards["deepgram"]["serves"] == {"stt": ["deepgram"], "tts": ["deepgram"]}
 
 
+def test_cards_say_which_key_webhook_numbers_run_on(client, engine):
+    """#65: the Workspace's webhook project shows its projection, failures
+    included, and numbers still in the shared project are counted — they run on
+    the platform's keys until rebound."""
+    engine.registry.list_backends.return_value = []
+    engine.integration_store.list_for_workspace.return_value = [_integration("deepgram")]
+    engine.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
+    engine.phones.shared_webhook_numbers.return_value = 2
+    target = f"webhook-numbers:{TEST_WORKSPACE_ID}"
+    engine.integration_store.list_projections.return_value = [
+        {"provider": "deepgram", "agent_id": target, "state": "failed", "version": V1, "error": "401"},
+    ]
+
+    r = client.get("/integrations/providers", headers=WS)
+
+    cards = {c["provider"]: c for c in r.json()["data"]["providers"]}
+    assert cards["deepgram"]["webhook_numbers"] == {
+        "state": "failed", "error": "401", "on_platform_keys": 2,
+    }
+    assert cards["deepgram"]["agents"] == []  # never listed as an agent
+    assert cards["openai"]["webhook_numbers"]["state"] is None
+
+
 # --- adoption -------------------------------------------------------------------------
 
 
@@ -339,7 +362,7 @@ def test_a_new_agent_gets_every_connected_credential(engine):
     ]
     engine.integration_store.get_document.return_value = {"api_key": KEY}
     asyncio.run(
-        provider_integrations.project_into_new_agent(
+        provider_integrations.project_into_new_target(
             object(), engine.client, TEST_WORKSPACE_ID, {"agent_id": "new", "api_key": "tc_new", "config": {}}
         )
     )

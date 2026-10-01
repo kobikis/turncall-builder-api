@@ -38,3 +38,7 @@ Amended by ADR-0008: **Managed call-init** binds the number in the agent's own
 project with the agent's backend serving the endpoint, which closes the known
 gap for that mode. This ADR's customer-written mode ("Custom call-init") and the
 shared webhook project remain as described.
+
+Amended by #65 (2026-10-01): a custom call-init number is now bound in its
+Workspace's own webhook project, so it runs on the Workspace's provider keys
+(ADR-0023). The shared project keeps the numbers bound before that.

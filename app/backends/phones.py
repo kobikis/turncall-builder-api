@@ -15,6 +15,10 @@ from typing import Any
 import asyncpg
 
 
+def _project(row: asyncpg.Record) -> dict[str, str]:
+    return {"project_id": row["project_id"], "api_key": row["api_key"]}
+
+
 async def ensure_webhook_project(pool: asyncpg.Pool, client: Any) -> dict[str, str]:
     """Return the shared webhook project + key, creating it once if needed.
 
@@ -22,7 +26,7 @@ async def ensure_webhook_project(pool: asyncpg.Pool, client: Any) -> dict[str, s
     #65. A new webhook bind goes to its Workspace's project instead."""
     row = await pool.fetchrow("SELECT project_id, api_key FROM webhook_project WHERE id = 1")
     if row:
-        return {"project_id": row["project_id"], "api_key": row["api_key"]}
+        return _project(row)
     project_id = await client.create_project("builder-webhook-numbers")
     api_key = await client.create_api_key(project_id)
     await pool.execute(
@@ -42,28 +46,47 @@ async def workspace_webhook_project(
         "SELECT project_id, api_key FROM webhook_project WHERE workspace_id = $1",
         workspace_id,
     )
-    return {"project_id": row["project_id"], "api_key": row["api_key"]} if row else None
+    return _project(row) if row else None
 
 
 async def ensure_workspace_webhook_project(
     pool: asyncpg.Pool, client: Any, workspace_id: str
 ) -> tuple[dict[str, str], bool]:
     """The Workspace's webhook project, created on first use. True when it was
-    created here, so the caller can project the Workspace's keys into it."""
-    existing = await workspace_webhook_project(pool, workspace_id)
-    if existing:
-        return existing, False
-    project_id = await client.create_project(f"builder-webhook-numbers-{workspace_id[:8]}")
-    api_key = await client.create_api_key(project_id)
-    await pool.execute(
-        "INSERT INTO webhook_project (project_id, api_key, workspace_id) VALUES ($1, $2, $3) "
-        "ON CONFLICT (workspace_id) DO NOTHING",
-        project_id,
-        api_key,
+    created here, so the caller can project the Workspace's keys into it.
+
+    Serialized per Workspace with a transaction-scoped advisory lock: two first
+    binds racing would otherwise each create a TurnCall project, and the loser's
+    would be orphaned with its key.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"webhook:{workspace_id}")
+        row = await conn.fetchrow(
+            "SELECT project_id, api_key FROM webhook_project WHERE workspace_id = $1",
+            workspace_id,
+        )
+        if row:
+            return _project(row), False
+        project_id = await client.create_project(f"builder-webhook-numbers-{workspace_id[:8]}")
+        api_key = await client.create_api_key(project_id)
+        await conn.execute(
+            "INSERT INTO webhook_project (project_id, api_key, workspace_id) VALUES ($1, $2, $3)",
+            project_id,
+            api_key,
+            workspace_id,
+        )
+    return {"project_id": project_id, "api_key": api_key}, True
+
+
+async def shared_webhook_numbers(pool: asyncpg.Pool, workspace_id: str) -> int:
+    """How many of the Workspace's numbers are still bound in the shared
+    project — they run on the platform's keys until rebound (#65)."""
+    return await pool.fetchval(
+        """SELECT count(*) FROM phone_numbers n
+           JOIN webhook_project w ON w.project_id = n.project_id AND w.workspace_id IS NULL
+           WHERE n.workspace_id = $1""",
         workspace_id,
     )
-    # A concurrent first bind may have won; whichever row stands is the project.
-    return await workspace_webhook_project(pool, workspace_id), True
 
 
 async def key_for_project(pool: asyncpg.Pool, project_id: str) -> str | None:

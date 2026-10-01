@@ -313,7 +313,7 @@ def test_the_first_webhook_bind_gets_its_workspace_a_project_with_its_keys(clien
     async def fake_project(pool, client_, workspace_id, target):
         projected.append(target["api_key"])
 
-    monkeypatch.setattr(provider_integrations, "project_into_new_agent", fake_project)
+    monkeypatch.setattr(provider_integrations, "project_into_new_target", fake_project)
     mocks.phones.ensure_workspace_webhook_project.return_value = (
         {"project_id": "wp-ws", "api_key": "tc_wp_ws"},
         True,

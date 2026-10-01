@@ -145,6 +145,36 @@ async def _run_assertions(dsn: str) -> None:
         await phones.record_number(pool, {**number, "id": "pn-3", "label": "Support line"})
         assert (await phones.get_number(pool, "pn-3", ws))["label"] == "Support line"
 
+        # A Workspace's own webhook project (#65): two racing first binds make
+        # one TurnCall project, not two, and only one of them says "created".
+        class _Client:
+            made: list[str] = []
+
+            async def create_project(self, name: str) -> str:
+                await asyncio.sleep(0.05)  # widen the race window
+                self.made.append(name)
+                return f"proj-{len(self.made)}"
+
+            async def create_api_key(self, project_id: str) -> str:
+                return f"key-{project_id}"
+
+        client = _Client()
+        first, second = await asyncio.gather(
+            phones.ensure_workspace_webhook_project(pool, client, ws),
+            phones.ensure_workspace_webhook_project(pool, client, ws),
+        )
+        assert len(client.made) == 1
+        assert first[0] == second[0] == await phones.workspace_webhook_project(pool, ws)
+        assert sorted([first[1], second[1]]) == [False, True]
+        assert await phones.key_for_project(pool, first[0]["project_id"]) == first[0]["api_key"]
+        # A number still bound in the shared project counts as on platform keys.
+        await pool.execute(
+            "INSERT INTO webhook_project (id, project_id, api_key) VALUES (1, 'shared', 'k')"
+        )
+        await phones.record_number(pool, {**number, "id": "pn-4", "e164": "+15550004444",
+                                          "routing_type": "webhook", "project_id": "shared"})
+        assert await phones.shared_webhook_numbers(pool, ws) == 1
+
         # A Workspace's own Pipedream project wins over the deployment's.
         from app import pipedream_store
 

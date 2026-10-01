@@ -124,7 +124,7 @@ async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dic
         wp, created = await phones.ensure_workspace_webhook_project(pool, client, workspace_id)
         if created:
             # Its calls run on the Workspace's keys, like any agent's (#65).
-            await provider_integrations.project_into_new_agent(
+            await provider_integrations.project_into_new_target(
                 pool, client, workspace_id, phones.as_projection_target(workspace_id, wp)
             )
         return {

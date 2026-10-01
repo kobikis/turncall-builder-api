@@ -574,7 +574,7 @@ async def create_agent(
     # The Workspace's provider accounts reach the new agent's project too, so a
     # connected key runs this agent's very first call (ADR-0023). Best-effort.
     try:
-        await provider_integrations.project_into_new_agent(
+        await provider_integrations.project_into_new_target(
             pool,
             client,
             ctx.workspace_id,
