@@ -28,7 +28,8 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
+
+from app.secret_box import SecretBox
 
 _API = "https://api.github.com"
 _UA = {"User-Agent": "turncall-builder", "X-GitHub-Api-Version": "2022-11-28"}
@@ -59,36 +60,24 @@ class PushResult:
 # --- token storage -----------------------------------------------------------
 
 
-def _fernet() -> Fernet:
-    key = os.environ.get("GITHUB_TOKEN_ENCRYPTION_KEY", "")
-    if not key:
-        raise GitHubError(
-            "GITHUB_TOKEN_ENCRYPTION_KEY is not set — GitHub connections are "
-            "disabled. Generate one with: python -c \"from cryptography.fernet "
-            'import Fernet; print(Fernet.generate_key().decode())"'
-        )
-    try:
-        return Fernet(key.encode())
-    except (ValueError, TypeError) as exc:
-        raise GitHubError(
-            "GITHUB_TOKEN_ENCRYPTION_KEY is not a valid Fernet key (44 url-safe "
-            "base64 characters)."
-        ) from exc
+_BOX = SecretBox(
+    env="GITHUB_TOKEN_ENCRYPTION_KEY",
+    error=GitHubError,
+    disabled="GitHub connections are disabled",
+    changed=(
+        "Stored GitHub token could not be decrypted — GITHUB_TOKEN_"
+        "ENCRYPTION_KEY has changed. Reconnect GitHub to store it again."
+    ),
+)
 
 
 def encrypt_token(token: str) -> str:
-    return _fernet().encrypt(token.encode()).decode()
+    return _BOX.encrypt(token)
 
 
 def decrypt_token(ciphertext: str) -> str:
     """Raises if the key changed — rotating it invalidates every stored token."""
-    try:
-        return _fernet().decrypt(ciphertext.encode()).decode()
-    except InvalidToken as exc:
-        raise GitHubError(
-            "Stored GitHub token could not be decrypted — GITHUB_TOKEN_"
-            "ENCRYPTION_KEY has changed. Reconnect GitHub to store it again."
-        ) from exc
+    return _BOX.decrypt(ciphertext)
 
 
 # --- GitHub API --------------------------------------------------------------
