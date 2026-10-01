@@ -381,3 +381,34 @@ def test_reapply_is_refused_while_a_disconnect_is_unfinished(client, engine):
     r = client.post("/integrations/providers/deepgram/apply", headers=WS)
     assert r.status_code == 409
     engine.client.put_credential.assert_not_called()
+
+
+# --- the Workspace's webhook project (#65) --------------------------------------
+
+
+def test_connect_also_projects_into_the_workspace_webhook_project(client, engine, probe):
+    """Numbers routed to a customer's own call-init server run in the Workspace's
+    webhook project; without this they ran on the platform's keys."""
+    _two_agents(engine)
+    engine.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
+    engine.integration_store.save.return_value = _integration()
+    engine.integration_store.get.return_value = _integration()
+    engine.integration_store.get_document.return_value = {"api_key": KEY}
+
+    r = client.put("/integrations/providers/deepgram", json={"api_key": KEY}, headers=WS)
+
+    assert r.status_code == 200, r.text
+    keys = [c.args[2] for c in engine.client.put_credential.await_args_list]
+    assert keys == ["tc_a1", "tc_a2", "tc_wp_ws"]
+
+
+def test_disconnect_also_removes_it_from_the_workspace_webhook_project(client, engine):
+    _two_agents(engine)
+    engine.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
+    engine.integration_store.get.return_value = _integration()
+
+    r = client.delete("/integrations/providers/deepgram", headers=WS)
+
+    assert r.json()["data"]["complete"] is True
+    keys = [c.args[1] for c in engine.client.delete_credential.await_args_list]
+    assert keys == ["tc_a1", "tc_a2", "tc_wp_ws"]

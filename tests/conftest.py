@@ -110,6 +110,12 @@ def mocks(monkeypatch):
     # Numbers run on the platform's Twilio account unless a test says otherwise.
     m.phones.twilio_account.return_value = None
     m.phones.on_workspace_twilio.return_value = []
+    # No Workspace has bound a webhook number unless a test says so (#65).
+    m.phones.workspace_webhook_project.return_value = None
+    m.phones.key_for_project.return_value = None
+    m.phones.as_projection_target.side_effect = lambda ws, p: {
+        "agent_id": f"webhook-numbers:{ws}", "api_key": p["api_key"], "config": None
+    }
     m.twilio_store.get.return_value = None
     m.twilio_store.credentials.return_value = None
     # auth_store: mock the DB/hash functions but keep the real exception classes

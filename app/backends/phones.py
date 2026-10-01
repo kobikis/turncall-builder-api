@@ -1,8 +1,11 @@
-"""Phone number mirror + the shared webhook project (ADR-0006).
+"""Phone number mirror + the webhook projects (ADR-0006).
 
 The builder mirrors every bind in `phone_numbers` so the console lists numbers
-with one query. Webhook-routed (call-init) numbers live in a single shared
-builder-owned project, since they don't belong to any one agent's project.
+with one query. Webhook-routed numbers (a customer's own call-init server) don't
+belong to any one agent's project, so they live in a builder-owned project: one
+per Workspace (#65), so the Workspace's provider keys can be projected into it
+without lending them to anyone else. The original shared project (no workspace)
+stays for numbers already bound in it and for platform-wide reads.
 """
 
 from __future__ import annotations
@@ -13,7 +16,10 @@ import asyncpg
 
 
 async def ensure_webhook_project(pool: asyncpg.Pool, client: Any) -> dict[str, str]:
-    """Return the shared webhook project + key, creating it once if needed."""
+    """Return the shared webhook project + key, creating it once if needed.
+
+    Platform-wide reads only (`GET /v1/providers`) and numbers bound before
+    #65. A new webhook bind goes to its Workspace's project instead."""
     row = await pool.fetchrow("SELECT project_id, api_key FROM webhook_project WHERE id = 1")
     if row:
         return {"project_id": row["project_id"], "api_key": row["api_key"]}
@@ -26,6 +32,57 @@ async def ensure_webhook_project(pool: asyncpg.Pool, client: Any) -> dict[str, s
         api_key,
     )
     return {"project_id": project_id, "api_key": api_key}
+
+
+async def workspace_webhook_project(
+    pool: asyncpg.Pool, workspace_id: str
+) -> dict[str, str] | None:
+    """The Workspace's own webhook project, if it has bound a webhook number."""
+    row = await pool.fetchrow(
+        "SELECT project_id, api_key FROM webhook_project WHERE workspace_id = $1",
+        workspace_id,
+    )
+    return {"project_id": row["project_id"], "api_key": row["api_key"]} if row else None
+
+
+async def ensure_workspace_webhook_project(
+    pool: asyncpg.Pool, client: Any, workspace_id: str
+) -> tuple[dict[str, str], bool]:
+    """The Workspace's webhook project, created on first use. True when it was
+    created here, so the caller can project the Workspace's keys into it."""
+    existing = await workspace_webhook_project(pool, workspace_id)
+    if existing:
+        return existing, False
+    project_id = await client.create_project(f"builder-webhook-numbers-{workspace_id[:8]}")
+    api_key = await client.create_api_key(project_id)
+    await pool.execute(
+        "INSERT INTO webhook_project (project_id, api_key, workspace_id) VALUES ($1, $2, $3) "
+        "ON CONFLICT (workspace_id) DO NOTHING",
+        project_id,
+        api_key,
+        workspace_id,
+    )
+    # A concurrent first bind may have won; whichever row stands is the project.
+    return await workspace_webhook_project(pool, workspace_id), True
+
+
+async def key_for_project(pool: asyncpg.Pool, project_id: str) -> str | None:
+    """The key of the webhook project a number was bound in, shared or not."""
+    return await pool.fetchval(
+        "SELECT api_key FROM webhook_project WHERE project_id = $1", project_id
+    )
+
+
+def as_projection_target(workspace_id: str, project: dict[str, str]) -> dict[str, Any]:
+    """The Workspace's webhook project in the shape Integrations project into.
+
+    Its id is not an agent's, so the Integrations card (which lists projections
+    of live agents only) never shows it as one."""
+    return {
+        "agent_id": f"webhook-numbers:{workspace_id}",
+        "api_key": project["api_key"],
+        "config": None,
+    }
 
 
 # Never the token column: reads go to the console. `twilio_credentials` is

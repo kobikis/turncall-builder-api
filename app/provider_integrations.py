@@ -105,7 +105,7 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
         if p["state"] == "applied" and p["version"] == version
     }
     results = []
-    for backend in await registry.list_backends(pool, workspace_id):
+    for backend in await _targets(pool, workspace_id):
         agent_id = backend["agent_id"]
         error = None if agent_id in done else await _write(client, provider, document, backend)
         state = _state(backend, provider, error)
@@ -114,6 +114,16 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
         )
         results.append({"agent_id": agent_id, "state": state, "error": error})
     return results
+
+
+async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
+    """Every TurnCall project the Workspace's keys go into: each agent's, and
+    the Workspace's webhook project once it has one (#65)."""
+    targets = list(await registry.list_backends(pool, workspace_id))
+    webhook = await phones.workspace_webhook_project(pool, workspace_id)
+    if webhook:
+        targets.append(phones.as_projection_target(workspace_id, webhook))
+    return targets
 
 
 async def _write(client: Any, provider: str, document: dict[str, Any], backend: dict[str, Any]) -> str | None:
@@ -167,7 +177,7 @@ async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -
         if p["state"] == "removed"
     }
     results = []
-    for backend in await registry.list_backends(pool, workspace_id):
+    for backend in await _targets(pool, workspace_id):
         agent_id = backend["agent_id"]
         state, error = "removed", None
         if agent_id not in removed:

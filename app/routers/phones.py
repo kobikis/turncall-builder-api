@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .. import runtime, twilio_store
+from .. import provider_integrations, runtime, twilio_store
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -79,6 +79,11 @@ async def _key_for_number(pool: Any, number: dict[str, Any], workspace_id: str) 
     if number["routing_type"] in ("agent", "agent_call_init"):
         b = await registry.get_backend(pool, number["agent_id"], workspace_id)
         return b["api_key"]
+    # The project the number was bound in: its Workspace's, or the shared one
+    # every webhook number went to before #65.
+    key = await phones.key_for_project(pool, number["project_id"])
+    if key:
+        return key
     wp = await phones.ensure_webhook_project(pool, runtime.get_client())
     return wp["api_key"]
 
@@ -115,7 +120,13 @@ async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dic
     if body.routing_type == "webhook":
         if not body.server_url:
             raise HTTPException(status_code=400, detail="server_url required for webhook routing")
-        wp = await phones.ensure_webhook_project(pool, runtime.get_client())
+        client = runtime.get_client()
+        wp, created = await phones.ensure_workspace_webhook_project(pool, client, workspace_id)
+        if created:
+            # Its calls run on the Workspace's keys, like any agent's (#65).
+            await provider_integrations.project_into_new_agent(
+                pool, client, workspace_id, phones.as_projection_target(workspace_id, wp)
+            )
         return {
             "fields": {"routing_target_type": "webhook", "server_url": body.server_url},
             "project_id": wp["project_id"],
