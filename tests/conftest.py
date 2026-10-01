@@ -104,6 +104,8 @@ def mocks(monkeypatch):
     m.integration_store.api_keys.return_value = {}
     m.mcp_registry_store.resolve.return_value = []
     m.mcp_registry_store.list_servers.return_value = []
+    # Numbers run on the platform's Twilio account unless a test says otherwise.
+    m.phones.twilio_account.return_value = None
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

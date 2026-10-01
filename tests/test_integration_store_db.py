@@ -113,6 +113,20 @@ async def _run_assertions(dsn: str) -> None:
         assert await mcp_registry_store.resolve(pool, other, [server["id"]]) == []
         assert await mcp_registry_store.delete_server(pool, ws, server["id"]) is True
         assert await mcp_registry_store.list_servers(pool, ws) == []
+
+        # A number's own Twilio account: sealed in the mirror, kept across an
+        # edit that does not re-enter it, never in a read.
+        from app.backends import phones
+
+        number = {"id": "pn-1", "e164": "+15550001111", "sid": "PN1", "routing_type": "none", "project_id": None,
+                  "workspace_id": ws, "twilio_account_sid": "AC1",
+                  "twilio_auth_token_encrypted": integration_store.BOX.encrypt("tok")}
+        await phones.record_number(pool, number)
+        await phones.record_number(pool, {**number, "twilio_account_sid": None,
+                                          "twilio_auth_token_encrypted": None, "sms_enabled": True})
+        assert await phones.twilio_account(pool, "pn-1") == ("AC1", "tok")
+        read = await phones.get_number(pool, "pn-1", ws)
+        assert read["twilio_credentials"] == "number" and "tok" not in str(read)
     finally:
         await pool.close()
 

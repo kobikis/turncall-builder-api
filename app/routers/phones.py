@@ -7,9 +7,10 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from .. import runtime
+from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
 
@@ -18,12 +19,30 @@ router = APIRouter()
 
 class PhoneBind(BaseModel):
     e164: str
-    sid: str
+    # The number's Twilio SID. Optional when the number brings its own Twilio
+    # account: TurnCall looks it up there by E.164.
+    sid: str = ""
     # 'agent' | 'agent_call_init' (managed call-init, ADR-0008) | 'webhook' | 'none'
     routing_type: str
     agent_id: str | None = None
     server_url: str | None = None
     sms_enabled: bool = False
+    # The number's own Twilio account (both or neither). Write-only: the token
+    # is sealed here so a rebind can re-send it, and never returned. Omitted on
+    # an edit = keep the stored pair.
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+
+    @model_validator(mode="after")
+    def _twilio_pair(self) -> "PhoneBind":
+        if bool(self.twilio_account_sid) != bool(self.twilio_auth_token):
+            raise ValueError("twilio_account_sid and twilio_auth_token go together")
+        return self
+
+    def own_twilio(self) -> tuple[str, str] | None:
+        if self.twilio_account_sid and self.twilio_auth_token:
+            return self.twilio_account_sid.strip(), self.twilio_auth_token.strip()
+        return None
 
 
 async def _unbind_in_turncall(pool: Any, number: dict[str, Any], workspace_id: str) -> None:
@@ -155,10 +174,39 @@ def _conflict_detail(exc: httpx.HTTPStatusError, e164: str) -> str:
     )
 
 
-async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]:
+def _seal(twilio: tuple[str, str] | None) -> dict[str, Any]:
+    """The mirror's copy of a number's own Twilio account, token sealed."""
+    if twilio is None:
+        return {}
+    try:
+        return {"twilio_account_sid": twilio[0], "twilio_auth_token_encrypted": BOX.encrypt(twilio[1])}
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _public(number: dict[str, Any]) -> dict[str, Any]:
+    """What the console may see: never the sealed token."""
+    out = {k: v for k, v in number.items() if k != "twilio_auth_token_encrypted"}
+    if "twilio_credentials" not in out:
+        out["twilio_credentials"] = "number" if number.get("twilio_auth_token_encrypted") else "platform"
+    if out["twilio_credentials"] == "platform":
+        out["twilio_account_sid"] = None
+    return out
+
+
+async def _bind(
+    pool: Any,
+    body: PhoneBind,
+    workspace_id: str,
+    twilio: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     """Bind a number in the right project and mirror it. Returns the mirror row.
     An unassigned number ('none') is only mirrored locally — TurnCall's bind needs
-    a routing target, so it isn't bound there until assigned an agent/webhook."""
+    a routing target, so it isn't bound there until assigned an agent/webhook.
+
+    `twilio` is the number's own Twilio account: what the body brings, else what
+    a rebind carries over from the mirror."""
+    twilio = body.own_twilio() or twilio
     if body.routing_type == "none":
         number = {
             "id": str(uuid.uuid4()),  # local id — no TurnCall binding yet
@@ -170,15 +218,21 @@ async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]
             "server_url": None,
             "sms_enabled": body.sms_enabled,
             "workspace_id": workspace_id,
+            **_seal(twilio),
         }
         await phones.record_number(pool, number)
-        return number
+        return _public(number)
 
     routing = await _resolve_routing(pool, body, workspace_id)
     payload: dict[str, Any] = {
-        "external_number_sid": body.sid,
         "e164_number": body.e164,
         "sms_enabled": body.sms_enabled,
+        **({"external_number_sid": body.sid} if body.sid else {}),
+        **(
+            {"twilio_account_sid": twilio[0], "twilio_auth_token": twilio[1]}
+            if twilio
+            else {}
+        ),
         **routing["fields"],
     }
     data = await _bind_in_turncall(payload, routing["api_key"], body.e164)
@@ -188,7 +242,8 @@ async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]
     number = {
         "id": data["id"],
         "e164": body.e164,
-        "sid": body.sid,
+        # TurnCall's, which it looked up on the number's own account if needed.
+        "sid": data.get("external_number_sid") or body.sid,
         "routing_type": body.routing_type,
         "agent_id": routing["agent_id"],
         "project_id": routing["project_id"],
@@ -197,12 +252,13 @@ async def _bind(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]
         "server_url_secret": secret,
         "sms_enabled": body.sms_enabled,
         "workspace_id": workspace_id,
+        **_seal(twilio),
     }
     await phones.record_number(pool, number)
     # Response-only (not mirrored): whether TurnCall actually pointed the
     # Twilio number at itself — False means calls won't arrive yet.
     number["twilio_webhooks_configured"] = data.get("twilio_webhooks_configured")
-    return number
+    return _public(number)
 
 
 @router.get("/phone-numbers")
@@ -247,9 +303,19 @@ async def update_phone_number(
     if body.routing_type != "none" and existing["routing_type"] != "none":
         routing = await _resolve_routing(pool, body, workspace_id)
         if routing["project_id"] == existing["project_id"]:
+            new_twilio = body.own_twilio()
             data = await runtime.get_client().update_phone_number(
                 phone_id,
-                {"sms_enabled": body.sms_enabled, **routing["fields"]},
+                {
+                    "sms_enabled": body.sms_enabled,
+                    **routing["fields"],
+                    # Only a newly entered pair is sent; omitted keeps TurnCall's.
+                    **(
+                        {"twilio_account_sid": new_twilio[0], "twilio_auth_token": new_twilio[1]}
+                        if new_twilio
+                        else {}
+                    ),
+                },
                 routing["api_key"],
             )
             secret = data.get("server_url_secret") or existing.get("server_url_secret")
@@ -266,12 +332,14 @@ async def update_phone_number(
                 "server_url_secret": secret,
                 "sms_enabled": body.sms_enabled,
                 "workspace_id": workspace_id,
+                **_seal(new_twilio),
             }
             await phones.record_number(pool, number)
+            stored = await phones.get_number(pool, phone_id, workspace_id) or number
             return {
                 "success": True,
                 "data": {
-                    **number,
+                    **_public(stored),
                     "rebound": False,
                     "twilio_webhooks_configured": data.get(
                         "twilio_webhooks_configured"
@@ -284,9 +352,15 @@ async def update_phone_number(
     # bind, and only delete the old mirror once the new bind succeeds — a bind
     # failure otherwise leaves the number cleared in Twilio AND gone from the
     # console (with its SID), unrecoverable.
+    # The stored Twilio pair travels with the number: TurnCall never returns
+    # the token, so a rebind can only re-send the mirror's copy.
+    try:
+        carried = await phones.twilio_account(pool, phone_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, workspace_id)
-    number = await _bind(pool, body, workspace_id)
+    number = await _bind(pool, body, workspace_id, twilio=carried)
     if number["id"] != phone_id:
         await phones.delete_number(pool, phone_id)
     return {"success": True, "data": {**number, "rebound": True}}
