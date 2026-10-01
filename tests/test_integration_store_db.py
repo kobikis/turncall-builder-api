@@ -161,6 +161,8 @@ async def _run_assertions(dsn: str) -> None:
         assert "own-secret" not in str(await pipedream_store.workspace_status(pool, ws))
         await pipedream_store.delete_workspace_credential(pool, ws)
         assert (await pipedream_store.get_credential(pool, ws)).project_id == "proj_d"
+        assert await pipedream_store.delete_credential(pool) is True
+        assert await pipedream_store.get_credential(pool, ws) is None
     finally:
         await pool.close()
 

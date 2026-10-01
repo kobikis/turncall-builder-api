@@ -84,3 +84,16 @@ def test_editors_cannot_change_the_project(gate_client, status):
     status.auth_store.resolve_membership.return_value = "editor"
     gate_client.cookies.set(COOKIE, "live")
     assert gate_client.put("/integrations/pipedream", json=BODY, headers=WS).status_code == 403
+
+
+def test_unsetting_the_env_removes_the_platform_project(mocks):
+    """Otherwise a stale row keeps the card saying 'Platform project'."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import main
+
+    unset = SimpleNamespace(pipedream_client_id="", pipedream_client_secret="", pipedream_project_id="")
+    asyncio.run(main._store_pipedream_credential(object(), unset))
+    mocks.pipedream_store.delete_credential.assert_awaited_once()
+    mocks.pipedream_store.save_credential.assert_not_called()

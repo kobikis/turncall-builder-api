@@ -174,3 +174,9 @@ async def delete_workspace_credential(pool: asyncpg.Pool, workspace_id: str) -> 
 
 async def has_deployment_credential(pool: asyncpg.Pool) -> bool:
     return bool(await pool.fetchval("SELECT 1 FROM pipedream_credentials WHERE id = $1", _ID))
+
+
+async def delete_credential(pool: asyncpg.Pool) -> bool:
+    """Remove the deployment's copy (its env was unset). True if one existed."""
+    result = await pool.execute("DELETE FROM pipedream_credentials WHERE id = $1", _ID)
+    return result.endswith(" 1")
