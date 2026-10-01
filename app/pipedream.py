@@ -361,8 +361,14 @@ def _serializer() -> URLSafeTimedSerializer:
 
 def _state_key() -> str:
     """Reuses PIPEDREAM_ENCRYPTION_KEY: integrations already require it, and it is
-    stable by construction (changing it is what re-stores the credential)."""
-    key = os.environ.get("PIPEDREAM_ENCRYPTION_KEY", "")
+    stable by construction (changing it is what re-stores the credential).
+
+    A deployment where every Workspace brings its own Pipedream project need not
+    set any PIPEDREAM_* at all, so the Integrations key — required for those
+    projects' sealed secrets anyway — signs the state there instead."""
+    key = os.environ.get("PIPEDREAM_ENCRYPTION_KEY", "") or os.environ.get(
+        "INTEGRATIONS_ENCRYPTION_KEY", ""
+    )
     if not key:
         raise PipedreamError(
             "PIPEDREAM_ENCRYPTION_KEY is not set — integrations are disabled."
@@ -407,8 +413,8 @@ async def _request(
         )
     if r.status_code == 401:
         raise PipedreamError(
-            "Pipedream rejected our credentials. Check PIPEDREAM_CLIENT_ID / "
-            "PIPEDREAM_CLIENT_SECRET."
+            "Pipedream rejected our credentials. Check the workspace's Pipedream "
+            "project on Integrations, or PIPEDREAM_CLIENT_ID / PIPEDREAM_CLIENT_SECRET."
         )
     if r.status_code == 404:
         raise PipedreamError("Pipedream could not find that resource.")
@@ -434,8 +440,9 @@ async def access_token(cred: Credential) -> AccessToken:
         )
     if r.status_code >= 400:
         raise PipedreamError(
-            "Pipedream refused to issue an access token. Check "
-            "PIPEDREAM_CLIENT_ID / PIPEDREAM_CLIENT_SECRET."
+            "Pipedream refused to issue an access token. Check the workspace's "
+            "Pipedream project on Integrations, or PIPEDREAM_CLIENT_ID / "
+            "PIPEDREAM_CLIENT_SECRET."
         )
     body = r.json()
     token = body.get("access_token") or ""

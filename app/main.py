@@ -36,6 +36,7 @@ from .routers import (
     mcp_registry,
     members,
     phones,
+    pipedream_project,
     provider_integrations,
     sessions,
     skills,
@@ -146,7 +147,7 @@ for _router in (
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.
     auth, workspaces, members, github, skills, provider_integrations, mcp_registry,
-    twilio_integration,
+    twilio_integration, pipedream_project,
     integrations,
 ):
     app.include_router(_router.router)

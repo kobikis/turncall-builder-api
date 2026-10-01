@@ -82,6 +82,13 @@ Twilio account" sends its pair, the phone mirror marks the number
 `twilio_source = 'workspace'` without keeping a token copy, and saving the card
 again re-sends the pair to each of those numbers, reporting per number. A
 number can still bring its own pair (a second account or a subaccount).
-Disconnecting is refused while numbers use the account. Withdrawable in the sense that the page can be
+Disconnecting is refused while numbers use the account.
+
+**Pipedream likewise.** A Workspace can connect its own Pipedream project
+(`workspace_pipedream`); every Connected-apps path resolves the Workspace's
+project first and the deployment's `PIPEDREAM_*` second. The project's secret
+is sealed with the Integrations key, which also signs the connect state when
+`PIPEDREAM_ENCRYPTION_KEY` is unset. Disconnecting is refused while apps are
+connected in that project, since the fallback project does not hold them. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

@@ -27,23 +27,26 @@ from .. import agent_update, pipedream, pipedream_store, runtime
 from .._helpers import _backend_or_404, _normalize_config
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_editor, require_member
+from ..integration_store import IntegrationError
 from ..settings import load_settings
 
 router = APIRouter(prefix="/integrations")
 
 
-async def _credential() -> pipedream.Credential:
-    """The deployment credential, or a 503 that says what is missing."""
+async def _credential(workspace_id: str | None) -> pipedream.Credential:
+    """The Workspace's own Pipedream project, else the deployment's — or a 503
+    that says what is missing."""
     try:
-        cred = await pipedream_store.get_credential(runtime.get_pool())
-    except pipedream.PipedreamError as exc:
+        cred = await pipedream_store.get_credential(runtime.get_pool(), workspace_id)
+    except (pipedream.PipedreamError, IntegrationError) as exc:
         # A rotated encryption key, most likely. Say which key and what to do —
         # this must not read as a server bug.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if cred is None:
         raise HTTPException(
             status_code=503,
-            detail="Integrations are not configured — set PIPEDREAM_CLIENT_ID, "
+            detail="Connected apps are not configured — connect a Pipedream project "
+            "on Integrations, or set PIPEDREAM_CLIENT_ID, "
             "PIPEDREAM_CLIENT_SECRET, PIPEDREAM_PROJECT_ID, "
             "PIPEDREAM_REDIRECT_URI and PIPEDREAM_ENCRYPTION_KEY, then rebuild "
             "the api container. See docs/pipedream-setup.md.",
@@ -121,7 +124,7 @@ async def input_options(
     an app the Workspace has not connected yet, or a third party having a bad
     morning, costs the picker and not the form.
     """
-    cred = await _credential()
+    cred = await _credential(ctx.workspace_id)
     try:
         options = await pipedream.input_options(
             cred, workspace_id=ctx.workspace_id, app=app, prop=prop
@@ -135,7 +138,7 @@ async def input_options(
 async def list_connected(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     """What this Workspace has connected. Scoped by `external_user_id`, so
     another Workspace's Connected apps are not reachable from here."""
-    cred = await _credential()
+    cred = await _credential(ctx.workspace_id)
     try:
         accounts = await pipedream.list_accounts(cred, workspace_id=ctx.workspace_id)
     except pipedream.PipedreamError as exc:
@@ -149,7 +152,7 @@ async def connect(
 ) -> dict[str, Any]:
     """Start an authorization. Returns the hosted page to send the admin to —
     the console navigates there; nothing is recorded until they come back."""
-    cred = await _credential()
+    cred = await _credential(ctx.workspace_id)
     settings = load_settings()
     if not settings.pipedream_redirect_uri:
         raise HTTPException(
@@ -199,7 +202,7 @@ async def callback(
     if error:
         return _back(error=f"{_app_name(app)} was not connected.")
 
-    cred = await _credential()
+    cred = await _credential(workspace_id)
     try:
         accounts = await pipedream.list_accounts(cred, workspace_id=workspace_id, app=app)
     except pipedream.PipedreamError as exc:
@@ -219,7 +222,7 @@ async def disconnect(
     account ids are global, and an admin here must not be able to delete one by
     guessing at another tenant's.
     """
-    cred = await _credential()
+    cred = await _credential(ctx.workspace_id)
     try:
         mine = await pipedream.list_accounts(cred, workspace_id=ctx.workspace_id)
         if not any(a["id"] == account_id for a in mine):
@@ -309,7 +312,7 @@ async def mint_token(backend: dict = Depends(_calling_backend)) -> dict[str, Any
     Reused until it expires rather than minted per call: Pipedream tokens live
     an hour and a call is not the unit of anything here.
     """
-    cred = await _credential()
+    cred = await _credential(backend.get("workspace_id"))
     if not backend.get("workspace_id"):
         raise HTTPException(
             status_code=409,
@@ -368,7 +371,7 @@ async def call_config(backend: dict = Depends(_calling_backend)) -> dict[str, An
     if not pipedream.mid_call_apps(config.get("integrations")):
         return {"success": True, "data": {"agent": None}}
 
-    cred = await _credential()
+    cred = await _credential(backend.get("workspace_id"))
     port = backend["port"]
     try:
         payload = await agent_update.build_payload(

@@ -19,6 +19,7 @@ from alembic.config import Config
 from cryptography.fernet import Fernet
 
 os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+os.environ.setdefault("PIPEDREAM_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 from app import integration_store, mcp_registry_store  # noqa: E402
 from tests.conftest import __file__ as _conftest_file  # noqa: E402
@@ -143,6 +144,23 @@ async def _run_assertions(dsn: str) -> None:
         assert (await phones.get_number(pool, "pn-2", ws))["twilio_credentials"] == "workspace"
         await phones.record_number(pool, {**number, "id": "pn-3", "label": "Support line"})
         assert (await phones.get_number(pool, "pn-3", ws))["label"] == "Support line"
+
+        # A Workspace's own Pipedream project wins over the deployment's.
+        from app import pipedream_store
+
+        await pipedream_store.save_credential(
+            pool, client_id="deploy", client_secret="d", project_id="proj_d", environment="production"
+        )
+        assert (await pipedream_store.get_credential(pool, ws)).project_id == "proj_d"
+        await pipedream_store.save_workspace_credential(
+            pool, ws, client_id="own", client_secret="own-secret", project_id="proj_w", environment="development"
+        )
+        own = await pipedream_store.get_credential(pool, ws)
+        assert (own.client_id, own.client_secret, own.project_id) == ("own", "own-secret", "proj_w")
+        assert "own-secret" not in await pool.fetchval("SELECT client_secret_encrypted FROM workspace_pipedream")
+        assert "own-secret" not in str(await pipedream_store.workspace_status(pool, ws))
+        await pipedream_store.delete_workspace_credential(pool, ws)
+        assert (await pipedream_store.get_credential(pool, ws)).project_id == "proj_d"
     finally:
         await pool.close()
 
