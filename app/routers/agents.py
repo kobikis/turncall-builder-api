@@ -161,15 +161,22 @@ async def delete_agent(
 _CLIENT_CONTROLLED = ("agent_id", "server_url", "server_url_secret")
 
 
-def _pipeline_start_failure(response: httpx.Response) -> str | None:
-    """TurnCall's reason when the agent's pipeline could not start, else None."""
+def _pipeline_start_failure(response: httpx.Response) -> tuple[str, list[str]] | None:
+    """TurnCall's reason when the agent's pipeline could not start, plus the
+    provider keys it found missing; None for any other upstream error."""
     try:
         body = response.json()
     except ValueError:
         return None
-    if isinstance(body, dict) and body.get("code") == "pipeline_start_failed":
-        return str(body.get("error") or "") or None
-    return None
+    if not isinstance(body, dict) or body.get("code") != "pipeline_start_failed":
+        return None
+    reason = str(body.get("error") or "")
+    if not reason:
+        return None
+    details = body.get("details") if isinstance(body.get("details"), dict) else {}
+    missing = details.get("missing_keys")
+    keys = [str(k) for k in missing] if isinstance(missing, list) else []
+    return reason, keys
 
 
 @router.post("/agents/{agent_id}/webrtc/connect")
@@ -244,14 +251,19 @@ async def agent_webrtc_connect(
             raise HTTPException(
                 status_code=422, detail="offer rejected by upstream — check the SDP"
             ) from exc
-        reason = _pipeline_start_failure(exc.response)
-        if reason:
+        failure = _pipeline_start_failure(exc.response)
+        if failure:
             # The one upstream message written for the person placing the call:
-            # without it the test call just timed out, saying nothing.
-            raise HTTPException(
+            # without it the test call just timed out, saying nothing. The
+            # missing keys ride along as a list so the console can name them.
+            reason, missing_keys = failure
+            return JSONResponse(
                 status_code=502,
-                detail=f"{reason} — check the agent's provider keys in Integrations.",
-            ) from exc
+                content={
+                    "detail": f"{reason} — check the agent's provider keys in Integrations.",
+                    "missing_keys": missing_keys,
+                },
+            )
         raise HTTPException(status_code=502, detail="TurnCall upstream error") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(

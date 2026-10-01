@@ -366,6 +366,22 @@ def test_webrtc_connect_relays_why_the_agent_could_not_start(client, mocks):
     assert r.status_code == 502
     assert "Missing credentials" in r.json()["detail"]
     assert "Integrations" in r.json()["detail"]
+    assert r.json()["missing_keys"] == []
+
+
+def test_webrtc_connect_names_the_missing_keys(client, mocks):
+    import json
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    body = {
+        "code": "pipeline_start_failed",
+        "error": "The agent could not start (call c1): No API key for deepgram",
+        "details": {"missing_keys": ["deepgram"]},
+    }
+    mocks.client.webrtc_connect.side_effect = _http_status_error(500, json.dumps(body))
+    r = client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+    assert r.status_code == 502
+    assert r.json()["missing_keys"] == ["deepgram"]
 
 
 def test_webrtc_connect_other_upstream_errors_stay_generic(client, mocks):
