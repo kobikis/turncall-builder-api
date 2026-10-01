@@ -16,6 +16,7 @@ from .. import (
     agent_update,
     builder,
     integration_store,
+    mcp_registry_store,
     provider_integrations,
     provider_catalog,
     runtime,
@@ -546,7 +547,14 @@ async def create_agent(
             secret = ""
 
         data = await client.create_agent(
-            to_create_agent_request(config, tools_base_url, tools_secret=secret or None),
+            to_create_agent_request(
+                config,
+                tools_base_url,
+                tools_secret=secret or None,
+                registered_mcp_servers=await mcp_registry_store.resolve(
+                    pool, ctx.workspace_id, config.get("workspace_mcp_servers")
+                ),
+            ),
             key,
         )
         agent_id = data["id"]

@@ -109,8 +109,11 @@ async def connect(
 async def reapply(provider: str, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
     """Finish a projection that failed partway; agents already done are skipped."""
     pool = runtime.get_pool()
-    if await integration_store.get(pool, ctx.workspace_id, provider) is None:
+    integration = await integration_store.get(pool, ctx.workspace_id, provider)
+    if integration is None:
         raise HTTPException(status_code=404, detail=f"{provider} is not connected")
+    if integration["disconnecting"]:
+        raise HTTPException(status_code=409, detail=f"{provider} is being disconnected — finish that first")
     try:
         agents = await provider_integrations.project(pool, runtime.get_client(), ctx.workspace_id, provider)
     except integration_store.IntegrationError as exc:
@@ -145,6 +148,8 @@ async def adopt(provider: str, body: AdoptBody, ctx: AuthContext = Depends(requi
         raise HTTPException(status_code=409, detail=f"this agent carries no {provider} key of its own")
     try:
         await provider_integrations.adopt(pool, runtime.get_client(), ctx.workspace_id, backend)
+    except provider_integrations.AdoptRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
     data = await provider_integrations.cards(pool, runtime.get_client(), ctx.workspace_id)

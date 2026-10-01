@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -96,10 +97,8 @@ async def register(body: ServerBody, ctx: AuthContext = Depends(require_admin)) 
         )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
-    except Exception as exc:  # asyncpg UniqueViolationError
-        if type(exc).__name__ == "UniqueViolationError":
-            raise HTTPException(status_code=409, detail=f"a server named {body.name!r} is already registered") from exc
-        raise
+    except asyncpg.UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail=f"a server named {body.name!r} is already registered") from exc
     return {"success": True, "data": server}
 
 

@@ -7,8 +7,11 @@ the current version — re-running a finished projection changes nothing.
 
 Precedence is the engine's (turncall ADR-0020), never redefined here: an agent's
 own inline key wins over the Workspace's, which wins over the platform's. An
-agent carrying one is **pinned** — projection skips it and nothing moves its key
-without the explicit adoption action.
+agent carrying one is **pinned**: nothing moves its key without the explicit
+adoption action. It still receives the Workspace credential — its inline key
+covers only its LLM, so its transcription, voice or realtime model on the same
+account would otherwise fall to the platform key — and is recorded `pinned` so
+the card can say which agents override the Workspace for their model.
 
 A credential change never regenerates an Agent Backend: the regeneration
 condition is tools and Automations, and a credential is neither.
@@ -31,6 +34,10 @@ AWS = "aws"
 # `custom_openai` have none — their key belongs to the endpoint they name.
 _ACCOUNT = {"openai_live": "openai", "bedrock": AWS}
 _NO_ACCOUNT = {"ollama", "custom_openai"}
+
+
+class AdoptRefused(ValueError):
+    """Adoption would overwrite a Workspace key, or the provider rejects the key."""
 
 
 def account_of(provider: str | None) -> str | None:
@@ -81,12 +88,14 @@ def _why(exc: Exception) -> str:
 async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> list[dict[str, Any]]:
     """Write the Workspace's credential into every agent's TurnCall project.
 
-    Returns per-agent state: `applied`, `pinned` (skipped — its own key wins),
-    or `failed` with the reason. Safe to call again: agents already holding this
-    version are not written to.
+    Returns per-agent state: `applied`, `pinned` (written too, but its own LLM
+    key wins for the model), or `failed` with the reason. Safe to call again:
+    agents already holding this version are not written to. Does nothing while a
+    disconnect is unfinished — re-applying would put the key back into agents
+    already cleared.
     """
     integration = await integration_store.get(pool, workspace_id, provider)
-    if integration is None:
+    if integration is None or integration["disconnecting"]:
         return []
     version = integration["version"]
     document = await integration_store.get_document(pool, workspace_id, provider)
@@ -98,20 +107,29 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
     results = []
     for backend in await registry.list_backends(pool, workspace_id):
         agent_id = backend["agent_id"]
-        state, error = "applied", None
-        if pinned_account(backend.get("config")) == provider:
-            state = "pinned"
-        elif agent_id not in done:
-            try:
-                await client.put_credential(provider, document, backend["api_key"])
-            except Exception as exc:  # noqa: BLE001 — recorded, and retryable
-                state, error = "failed", _why(exc)
-                logger.warning("projection of %s to %s failed: %s", provider, agent_id, error)
+        error = None if agent_id in done else await _write(client, provider, document, backend)
+        state = _state(backend, provider, error)
         await integration_store.record_projection(
             pool, workspace_id, provider, agent_id, state=state, version=version, error=error
         )
         results.append({"agent_id": agent_id, "state": state, "error": error})
     return results
+
+
+async def _write(client: Any, provider: str, document: dict[str, Any], backend: dict[str, Any]) -> str | None:
+    """One agent's write; the reason it failed, or None."""
+    try:
+        await client.put_credential(provider, document, backend["api_key"])
+    except Exception as exc:  # noqa: BLE001 — recorded, and retryable
+        logger.warning("projection of %s to %s failed: %s", provider, backend["agent_id"], exc)
+        return _why(exc)
+    return None
+
+
+def _state(backend: dict[str, Any], provider: str, error: str | None) -> str:
+    if error:
+        return "failed"
+    return "pinned" if pinned_account(backend.get("config")) == provider else "applied"
 
 
 async def project_into_new_agent(
@@ -126,18 +144,11 @@ async def project_into_new_agent(
         if integration["disconnecting"]:
             continue
         provider = integration["provider"]
-        state, error = "applied", None
-        if pinned_account(backend.get("config")) == provider:
-            state = "pinned"
-        else:
-            try:
-                document = await integration_store.get_document(pool, workspace_id, provider)
-                await client.put_credential(provider, document, backend["api_key"])
-            except Exception as exc:  # noqa: BLE001
-                state, error = "failed", _why(exc)
+        document = await integration_store.get_document(pool, workspace_id, provider)
+        error = await _write(client, provider, document, backend)
         await integration_store.record_projection(
             pool, workspace_id, provider, backend["agent_id"],
-            state=state, version=integration["version"], error=error,
+            state=_state(backend, provider, error), version=integration["version"], error=error,
         )
 
 
@@ -181,20 +192,25 @@ async def adopt(
 ) -> str:
     """Move a pinned agent's own key into the Workspace, explicitly (#58).
 
-    Stores it as the Workspace Integration (replacing any), takes it out of the
-    agent's config, then projects it everywhere. Returns the account adopted.
-    Validation is the caller's: the key is the one already running calls.
+    Stores it as the Workspace Integration, takes it out of the agent's config,
+    then projects it everywhere. Returns the account adopted. Refuses when the
+    Workspace already has a key for this account (replacing one is a deliberate
+    Replace on the card, not a side effect of adopting) and when the provider
+    rejects the key, exactly as a typed one would be.
     """
     config = backend.get("config") or {}
     provider = pinned_account(config)
     if provider is None:
         raise ValueError("this agent carries no key of its own to adopt")
-    key = config["llm"]["api_key"]
-    document = {"api_key": key}
+    if await integration_store.get(pool, workspace_id, provider) is not None:
+        raise AdoptRefused(f"this workspace already has a {provider} key — replace or disconnect it first")
+    document = {"api_key": config["llm"]["api_key"]}
+    validation = await provider_catalog.probe(provider, document)
+    if validation["status"] == "rejected":
+        raise AdoptRefused(f"{provider} rejected this agent's key ({validation['detail']}); it was not adopted")
     await integration_store.save(
         pool, workspace_id, provider,
-        document=document, last4=last4(document),
-        validation=await provider_catalog.probe(provider, document),
+        document=document, last4=last4(document), validation=validation,
     )
     llm = {k: v for k, v in config["llm"].items() if k != "api_key"}
     await agent_update.apply_update(pool, client, backend, {**config, "llm": llm})

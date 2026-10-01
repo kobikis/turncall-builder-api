@@ -161,7 +161,7 @@ async def s2s_models(provider: str, keys: dict[str, str] | None = None) -> list[
     return await _cached(f"s2s:{provider}:{_fp(key)}", lambda c: _fetch_s2s_models(c, provider, key))
 
 
-async def s2s_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
+async def s2s_voices(provider: str) -> list[dict[str, str]]:
     return await _cached(f"s2sv:{provider}", lambda c: _fetch_s2s_voices(c, provider))
 
 

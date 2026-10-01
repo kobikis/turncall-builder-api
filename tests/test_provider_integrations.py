@@ -123,7 +123,9 @@ def test_malformed_body_is_422(client, engine, probe):
     engine.integration_store.save.assert_not_called()
 
 
-def test_projection_skips_a_pinned_agent(client, engine, probe):
+def test_a_pinned_agent_still_receives_the_workspace_key(client, engine, probe):
+    """Its own key covers only its LLM; its voice on the same account must not
+    fall to the platform key. It is recorded `pinned` so the card can say so."""
     engine.registry.list_backends.return_value = [
         backend_row(agent_id="a1", api_key="tc_a1"),
         backend_row(
@@ -138,7 +140,7 @@ def test_projection_skips_a_pinned_agent(client, engine, probe):
 
     r = client.put("/integrations/providers/openai", json={"api_key": "sk-ws"}, headers=WS)
 
-    assert [c.args[2] for c in engine.client.put_credential.await_args_list] == ["tc_a1"]
+    assert [c.args[2] for c in engine.client.put_credential.await_args_list] == ["tc_a1", "tc_p"]
     states = {a["agent_id"]: a["state"] for a in r.json()["data"]["agents"]}
     assert states == {"a1": "applied", "pinned": "pinned"}
 
@@ -273,7 +275,8 @@ def test_adopt_moves_the_agents_key_into_the_workspace(client, engine, probe):
     )
     engine.registry.get_backend.return_value = pinned
     engine.registry.list_backends.return_value = [backend_row(agent_id="p", api_key="tc_p")]
-    engine.integration_store.get.return_value = _integration("openai")
+    # None before adoption, the new Integration once saved.
+    engine.integration_store.get.side_effect = [None, _integration("openai")]
     engine.integration_store.get_document.return_value = {"api_key": "sk-own"}
 
     r = client.post("/integrations/providers/openai/adopt", json={"agent_id": "p"}, headers=WS)
@@ -361,3 +364,20 @@ def test_pickers_list_with_the_workspace_key(client, mocks, monkeypatch):
     mocks.integration_store.api_keys.return_value = {}
     client.get("/providers/llm/openai/models", headers=WS)
     assert seen == ["sk-ws", "sk-builder-env"]
+
+
+def test_adopt_never_overwrites_a_workspace_key(client, engine, probe):
+    engine.registry.get_backend.return_value = backend_row(
+        agent_id="p", config={"name": "P", "llm": {"provider": "openai", "api_key": "sk-own"}}
+    )
+    engine.integration_store.get.return_value = _integration("openai")
+    r = client.post("/integrations/providers/openai/adopt", json={"agent_id": "p"}, headers=WS)
+    assert r.status_code == 409
+    engine.integration_store.save.assert_not_called()
+
+
+def test_reapply_is_refused_while_a_disconnect_is_unfinished(client, engine):
+    engine.integration_store.get.return_value = _integration(disconnecting=True)
+    r = client.post("/integrations/providers/deepgram/apply", headers=WS)
+    assert r.status_code == 409
+    engine.client.put_credential.assert_not_called()
