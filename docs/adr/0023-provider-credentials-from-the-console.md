@@ -72,6 +72,16 @@ rather than copied here, and the picker cache is keyed by a fingerprint of the
 key that fetched it, which is what invalidates a Workspace's lists the moment
 its Integration changes. The shared webhook-numbers project is not a projection
 target — it is one project behind every Workspace, so a call routed through it
-still runs on the platform key. Withdrawable in the sense that the page can be
+still runs on the platform key.
+
+**Twilio is a card too, but not a projection.** TurnCall holds Twilio
+credentials per *number* (Twilio's own unit — webhooks name their account by
+`AccountSid`), so the Workspace's Twilio account (`twilio_accounts`, one per
+Workspace) is never written into agent projects. A bind "with the workspace's
+Twilio account" sends its pair, the phone mirror marks the number
+`twilio_source = 'workspace'` without keeping a token copy, and saving the card
+again re-sends the pair to each of those numbers, reporting per number. A
+number can still bring its own pair (a second account or a subaccount).
+Disconnecting is refused while numbers use the account. Withdrawable in the sense that the page can be
 removed — but not cheaply, since withdrawing it means an operator re-entering
 every workspace's keys into an environment file.

@@ -127,6 +127,20 @@ async def _run_assertions(dsn: str) -> None:
         assert await phones.twilio_account(pool, "pn-1") == ("AC1", "tok")
         read = await phones.get_number(pool, "pn-1", ws)
         assert read["twilio_credentials"] == "number" and "tok" not in str(read)
+
+        # The Workspace's Twilio account: one row, a number bound with it keeps
+        # no token of its own and resolves through the account.
+        from app import twilio_store
+
+        await twilio_store.save(pool, ws, account_sid="ACws", auth_token="ws-token", validation={})
+        assert (await twilio_store.get(pool, ws))["last4"] == "oken"
+        assert "ws-token" not in await pool.fetchval("SELECT auth_token_encrypted FROM twilio_accounts")
+        await phones.record_number(pool, {**number, "id": "pn-2", "e164": "+15550002222",
+                                          "twilio_account_sid": "ACws", "twilio_auth_token_encrypted": None,
+                                          "twilio_source": "workspace"})
+        assert await phones.twilio_account(pool, "pn-2") == ("ACws", "ws-token")
+        assert [n["id"] for n in await phones.on_workspace_twilio(pool, ws)] == ["pn-2"]
+        assert (await phones.get_number(pool, "pn-2", ws))["twilio_credentials"] == "workspace"
     finally:
         await pool.close()
 

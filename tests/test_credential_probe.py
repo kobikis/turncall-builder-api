@@ -49,3 +49,32 @@ def test_unreachable_is_unverified_not_rejected(monkeypatch):
 def test_a_provider_with_nothing_to_ask_is_unchecked():
     assert asyncio.run(provider_catalog.probe("aws", {"access_key_id": "A"}))["status"] == "unchecked"
     assert asyncio.run(provider_catalog.probe("heygen", {"api_key": "k"}))["status"] == "unchecked"
+
+
+def test_twilio_numbers_are_listed_with_basic_auth(monkeypatch):
+    from app import twilio_api
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"incoming_phone_numbers": [
+            {"sid": "PN1", "phone_number": "+15550001111", "friendly_name": "Main"}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(twilio_api.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    numbers = asyncio.run(twilio_api.list_numbers("AC1", "tok"))
+    assert numbers == [{"sid": "PN1", "phone_number": "+15550001111", "friendly_name": "Main"}]
+    assert seen[0].url.path.endswith("/Accounts/AC1/IncomingPhoneNumbers.json")
+    assert seen[0].headers["authorization"].startswith("Basic ")
+
+
+def test_twilio_rejection_is_named(monkeypatch):
+    from app import twilio_api
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(twilio_api.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(lambda r: httpx.Response(401)), **kw))
+    with pytest.raises(twilio_api.TwilioRejected):
+        asyncio.run(twilio_api.list_numbers("AC1", "bad"))

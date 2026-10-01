@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
 
-from .. import runtime
+from .. import runtime, twilio_store
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -32,6 +32,9 @@ class PhoneBind(BaseModel):
     # an edit = keep the stored pair.
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
+    # Bind with the Workspace's connected Twilio account (Integrations page)
+    # instead of entering a pair here.
+    use_workspace_twilio: bool = False
 
     @model_validator(mode="after")
     def _twilio_pair(self) -> "PhoneBind":
@@ -174,12 +177,20 @@ def _conflict_detail(exc: httpx.HTTPStatusError, e164: str) -> str:
     )
 
 
-def _seal(twilio: tuple[str, str] | None) -> dict[str, Any]:
-    """The mirror's copy of a number's own Twilio account, token sealed."""
+def _seal(twilio: tuple[str, str] | None, source: str | None = None) -> dict[str, Any]:
+    """The mirror's copy of a number's Twilio account. A number on the
+    Workspace's account keeps no token of its own — the account row is the copy,
+    which is what lets a rotation reach it."""
     if twilio is None:
         return {}
+    if source == "workspace":
+        return {"twilio_account_sid": twilio[0], "twilio_source": "workspace"}
     try:
-        return {"twilio_account_sid": twilio[0], "twilio_auth_token_encrypted": BOX.encrypt(twilio[1])}
+        return {
+            "twilio_account_sid": twilio[0],
+            "twilio_auth_token_encrypted": BOX.encrypt(twilio[1]),
+            "twilio_source": "number",
+        }
     except IntegrationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -188,10 +199,41 @@ def _public(number: dict[str, Any]) -> dict[str, Any]:
     """What the console may see: never the sealed token."""
     out = {k: v for k, v in number.items() if k != "twilio_auth_token_encrypted"}
     if "twilio_credentials" not in out:
-        out["twilio_credentials"] = "number" if number.get("twilio_auth_token_encrypted") else "platform"
+        out["twilio_credentials"] = (
+            "workspace" if number.get("twilio_source") == "workspace"
+            else "number" if number.get("twilio_auth_token_encrypted")
+            else "platform"
+        )
+    out.pop("twilio_source", None)
     if out["twilio_credentials"] == "platform":
         out["twilio_account_sid"] = None
     return out
+
+
+async def _twilio_for(
+    pool: Any,
+    body: PhoneBind,
+    workspace_id: str,
+    carried: tuple[str, str] | None,
+    carried_source: str | None,
+) -> tuple[tuple[str, str] | None, str | None]:
+    """Which Twilio account this bind sends, and where it came from: the
+    Workspace's (asked for), a pair entered on the form, else what a rebind
+    carried over."""
+    if body.use_workspace_twilio:
+        try:
+            creds = await twilio_store.credentials(pool, workspace_id)
+        except IntegrationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if creds is None:
+            raise HTTPException(
+                status_code=400,
+                detail="This workspace has no Twilio account connected — connect it on Integrations",
+            )
+        return creds, "workspace"
+    if body.own_twilio():
+        return body.own_twilio(), "number"
+    return carried, carried_source if carried else None
 
 
 async def _bind(
@@ -199,6 +241,7 @@ async def _bind(
     body: PhoneBind,
     workspace_id: str,
     twilio: tuple[str, str] | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """Bind a number in the right project and mirror it. Returns the mirror row.
     An unassigned number ('none') is only mirrored locally — TurnCall's bind needs
@@ -206,7 +249,7 @@ async def _bind(
 
     `twilio` is the number's own Twilio account: what the body brings, else what
     a rebind carries over from the mirror."""
-    twilio = body.own_twilio() or twilio
+    twilio, source = await _twilio_for(pool, body, workspace_id, twilio, source)
     if body.routing_type == "none":
         number = {
             "id": str(uuid.uuid4()),  # local id — no TurnCall binding yet
@@ -218,7 +261,7 @@ async def _bind(
             "server_url": None,
             "sms_enabled": body.sms_enabled,
             "workspace_id": workspace_id,
-            **_seal(twilio),
+            **_seal(twilio, source),
         }
         await phones.record_number(pool, number)
         return _public(number)
@@ -252,7 +295,7 @@ async def _bind(
         "server_url_secret": secret,
         "sms_enabled": body.sms_enabled,
         "workspace_id": workspace_id,
-        **_seal(twilio),
+        **_seal(twilio, source),
     }
     await phones.record_number(pool, number)
     # Response-only (not mirrored): whether TurnCall actually pointed the
@@ -303,7 +346,7 @@ async def update_phone_number(
     if body.routing_type != "none" and existing["routing_type"] != "none":
         routing = await _resolve_routing(pool, body, workspace_id)
         if routing["project_id"] == existing["project_id"]:
-            new_twilio = body.own_twilio()
+            new_twilio, new_source = await _twilio_for(pool, body, workspace_id, None, None)
             data = await runtime.get_client().update_phone_number(
                 phone_id,
                 {
@@ -332,7 +375,7 @@ async def update_phone_number(
                 "server_url_secret": secret,
                 "sms_enabled": body.sms_enabled,
                 "workspace_id": workspace_id,
-                **_seal(new_twilio),
+                **_seal(new_twilio, new_source),
             }
             await phones.record_number(pool, number)
             stored = await phones.get_number(pool, phone_id, workspace_id) or number
@@ -360,7 +403,9 @@ async def update_phone_number(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, workspace_id)
-    number = await _bind(pool, body, workspace_id, twilio=carried)
+    number = await _bind(
+        pool, body, workspace_id, twilio=carried, source=existing.get("twilio_credentials")
+    )
     if number["id"] != phone_id:
         await phones.delete_number(pool, phone_id)
     return {"success": True, "data": {**number, "rebound": True}}

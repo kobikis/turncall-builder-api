@@ -40,6 +40,7 @@ from .routers import (
     sessions,
     skills,
     takeaways,
+    twilio_integration,
     workspaces,
 )
 from .settings import load_settings
@@ -145,6 +146,7 @@ for _router in (
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.
     auth, workspaces, members, github, skills, provider_integrations, mcp_registry,
+    twilio_integration,
     integrations,
 ):
     app.include_router(_router.router)
