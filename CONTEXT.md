@@ -208,9 +208,9 @@ Backend's data plane.
 _Avoid_: orchestrator, gateway
 
 **Console**:
-The builder-web management UI: a sidebar with an Agents section and a Phone
-Numbers section (each list → detail → edit), plus the Builder reached as the
-"new agent" path. Modeled on the Vapi dashboard.
+The builder-web management UI: a sidebar with Agents, Phone Numbers,
+Integrations, Members and Skills (each list → detail → edit), plus the Builder
+reached as the "new agent" path.
 _Avoid_: dashboard, admin panel
 
 **Number binding**:
