@@ -42,10 +42,11 @@ from app import (
 )
 from app.backends import generator, phones, registry, scaffold, toolgen
 
+from app.turncall_client import TurnCallClient
+
 # Captured before the fixture patches the module: the mock delegates to the real
 # function, so the tests exercise it rather than a copy of it.
 _REAL_AS_PROJECTION_TARGET = phones.as_projection_target
-from app.turncall_client import TurnCallClient
 
 # The Workspace every existing endpoint test acts within (see `client` fixture).
 TEST_WORKSPACE_ID = "d0000000-0000-0000-0000-000000000001"
