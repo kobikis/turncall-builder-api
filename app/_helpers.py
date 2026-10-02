@@ -197,7 +197,16 @@ def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     """Translate a TurnCall HTTPStatusError into an HTTPException carrying its
     message, so every proxy endpoint surfaces TurnCall failures identically."""
     try:
-        detail = exc.response.json().get("error") or exc.response.text
+        body = exc.response.json()
+        detail = body.get("error") or exc.response.text
+        # A schema refusal says only "Validation error" up top; the reason —
+        # which field, what is wrong — is in details.errors.
+        reasons = [
+            f"{'.'.join(str(p) for p in e.get('loc', [])[1:])}: {e.get('msg')}"
+            for e in ((body.get("details") or {}).get("errors") or [])
+        ]
+        if reasons:
+            detail = f"{detail}: " + "; ".join(reasons)
     except Exception:
         detail = exc.response.text
     return HTTPException(status_code=exc.response.status_code, detail=detail)
