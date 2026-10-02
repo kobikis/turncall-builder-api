@@ -43,6 +43,17 @@ def test_builtin_tools_become_full_definitions():
     assert "webhook_url" not in tool  # built-in, not a webhook tool
 
 
+def test_do_not_call_is_a_builtin_with_its_own_description():
+    req = to_create_agent_request(
+        {"name": "Bot", "system_prompt": "hi", "tools": ["do_not_call"]}
+    )
+    tool = req["config"]["tools"][0]
+    assert tool["name"] == "do_not_call"
+    # Not the name echoed back: the model has to know when to use it.
+    assert tool["description"] != "do_not_call"
+    assert "webhook_url" not in tool
+
+
 def test_name_required():
     with pytest.raises(ValueError):
         to_create_agent_request({"system_prompt": "hi"})

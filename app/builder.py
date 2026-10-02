@@ -141,11 +141,12 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": ["end_call", "transfer_call", "send_dtmf"],
+                "enum": ["end_call", "transfer_call", "send_dtmf", "do_not_call"],
             },
             "description": "Built-in tools to enable. Only include ones the use case "
             "clearly needs. send_dtmf lets the agent press keypad digits (navigate "
-            "an IVR, enter a code) during a call.",
+            "an IVR, enter a code) during a call. do_not_call puts the caller's "
+            "number on the do-not-call list and ends the call.",
         },
         "server_url": {
             "type": ["string", "null"],
@@ -426,7 +427,9 @@ written once and the date changes every night."""
 _D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
 'aura-2-helena-en'. Enable end_call/transfer_call only when the use case needs \
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
-(navigate an IVR, enter a PIN/extension)."""
+(navigate an IVR, enter a PIN/extension). Enable do_not_call for agents that \
+place outbound calls (reminders, follow-ups, sales), so a caller who asks not \
+to be called again is taken off the list there and then."""
 
 _D_PIPELINE = """Voice pipeline: default to cascade — leave pipeline_mode \
 unset and use the tts block. Anything else (speech-to-speech, voicemail \

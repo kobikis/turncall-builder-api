@@ -14,6 +14,10 @@ _BUILTIN_DESCRIPTIONS = {
     "end_call": "Call this as soon as the caller is done or says goodbye. You "
     "will then say a short goodbye, and the call ends after it.",
     "transfer_call": "Transfer the call to a human or another phone number.",
+    # Same order as end_call — the tool first, the goodbye after (turncall#240).
+    "do_not_call": "Call this when the caller asks not to be called again. "
+    "Their number goes on the do-not-call list; then confirm they won't be "
+    "called again and say a short goodbye — the call ends after it.",
     "send_dtmf": "Send keypad tones (DTMF) during the call — e.g. to navigate an "
     "IVR menu or enter a code.",
 }
