@@ -174,3 +174,36 @@ def test_update_agent_rejects_broken_config(client, mocks):
     r = client.put("/agents/a1", json={"config": {"custom_tools": [{"x": 1}]}})
     assert r.status_code == 422
     mocks.client.update_agent.assert_not_called()
+
+
+def test_update_agent_surfaces_turncalls_refusal(client, mocks):
+    """TurnCall is the authority on the agent schema; its 422 and reason must
+    reach the console. It escaped as an unhandled HTTPStatusError — a bare
+    500 — so an author saw "Request failed" with no hint of what to fix."""
+    import httpx
+
+    mocks.registry.get_backend.return_value = backend_row()
+    response = httpx.Response(
+        422,
+        # TurnCall's real 422 shape: the reason lives in details.errors.
+        json={
+            "success": False,
+            "error": "Validation error",
+            "details": {
+                "errors": [
+                    {
+                        "loc": ["body", "config", "s2s", "delegation"],
+                        "msg": "Value error, s2s.delegation in responses mode needs a model",
+                    }
+                ]
+            },
+        },
+        request=httpx.Request("PUT", "http://turncall/v1/agents/a1"),
+    )
+    mocks.client.update_agent.side_effect = httpx.HTTPStatusError(
+        "422", request=response.request, response=response
+    )
+    r = client.put("/agents/a1", json={"config": {"name": "A", "system_prompt": "hi"}})
+    assert r.status_code == 422
+    assert "config.s2s.delegation: Value error, s2s.delegation in responses mode needs a model" in r.text
+    mocks.registry.update_config.assert_not_called()

@@ -166,6 +166,9 @@ def to_create_agent_request(
             "provider": provider,
             "model": s2s.get("model") or default_model,
             "voice": s2s.get("voice") or default_voice,
+            # openai_live's delegate (turncall#243), set in the Advanced JSON.
+            # Passed through untouched: TurnCall validates it and answers a 422.
+            **({"delegation": s2s["delegation"]} if s2s.get("delegation") else {}),
         }
 
     # AWS region for the bedrock LLM / aws S2S providers. Region only — the

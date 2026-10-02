@@ -11,7 +11,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .. import agent_update, runtime
-from .._helpers import _backend_view, _normalize_config, _validate_agent_config
+from .._helpers import (
+    _backend_view,
+    _normalize_config,
+    _turncall_http_error,
+    _validate_agent_config,
+)
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
 from ..tasks import spawn
@@ -93,7 +98,14 @@ async def update_agent(
         raise HTTPException(status_code=404, detail="agent not found")
 
     _validate_agent_config(body.config)  # guard before _normalize_config / mapper
-    result = await agent_update.apply_update(pool, runtime.get_client(), b, body.config)
+    try:
+        result = await agent_update.apply_update(
+            pool, runtime.get_client(), b, body.config
+        )
+    except httpx.HTTPStatusError as exc:
+        # TurnCall refused the config (e.g. a 422 naming the field): pass its
+        # status and reason through rather than a bare 500.
+        raise _turncall_http_error(exc) from exc
     return {"success": True, "data": {"agent_id": agent_id, **result}}
 
 

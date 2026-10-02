@@ -503,3 +503,26 @@ class TestAttachedApps:
     def test_an_unknown_app_does_not_take_the_rest_of_the_list_with_it(self):
         servers = self._config(["slack_v2", "dropbox"])["mcp_servers"]
         assert [s["headers"]["x-pd-app-slug"] for s in servers] == ["slack_v2"]
+
+
+def test_s2s_delegation_reaches_turncall():
+    """gpt-live-1 calls no tools itself; its delegate does (turncall#243). The
+    block is set in the Advanced JSON editor and was dropped here, so an
+    openai_live agent built in the console could never use its tools."""
+    delegation = {"mode": "responses", "model": "gpt-6-astra", "timeout_seconds": 45}
+    cfg = to_create_agent_request(
+        {
+            "name": "Bot",
+            "system_prompt": "hi",
+            "pipeline_mode": "s2s",
+            "s2s": {"provider": "openai_live", "delegation": delegation},
+        }
+    )["config"]
+    assert cfg["s2s"]["delegation"] == delegation
+
+
+def test_s2s_without_delegation_emits_none():
+    cfg = to_create_agent_request(
+        {"name": "Bot", "system_prompt": "hi", "pipeline_mode": "s2s"}
+    )["config"]
+    assert "delegation" not in cfg["s2s"]
