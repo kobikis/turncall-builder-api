@@ -8,10 +8,11 @@ from . import pipedream
 from .backends.scaffold import validate_tool_names
 
 _BUILTIN_DESCRIPTIONS = {
-    # The call ends once this runs and the agent says nothing after it, so the
-    # goodbye has to come first (turncall#240).
-    "end_call": "Hang up once the conversation is complete. Say a short goodbye "
-    "first, in the same reply — nothing you say after calling this is heard.",
+    # The call ends after the agent's reply to this tool's result, so the
+    # goodbye comes after the call (turncall#240). Asked to say it first,
+    # gpt-4o-mini said goodbye and only called the tool on the caller's next turn.
+    "end_call": "Call this as soon as the caller is done or says goodbye. You "
+    "will then say a short goodbye, and the call ends after it.",
     "transfer_call": "Transfer the call to a human or another phone number.",
     "send_dtmf": "Send keypad tones (DTMF) during the call — e.g. to navigate an "
     "IVR menu or enter a code.",
