@@ -352,6 +352,13 @@ class TurnCallClient:
             json={"knowledge_base_id": kb_id, "mode": mode},
         )
 
+    async def list_agent_knowledge_bases(
+        self, agent_id: str, api_key: str
+    ) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"/v1/agents/{agent_id}/knowledge-bases", api_key=api_key
+        )
+
     async def list_documents(self, kb_id: str, api_key: str) -> list[dict[str, Any]]:
         return await self._request(
             "GET", f"/v1/knowledge-bases/{kb_id}/documents", api_key=api_key

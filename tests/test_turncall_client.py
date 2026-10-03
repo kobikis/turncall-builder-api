@@ -196,3 +196,20 @@ async def test_call_tool_invocations_path():
 
     client = _client_with(handler)
     assert await client.get_call_tool_invocations("c1", "k") == [{"tool_name": "x"}]
+
+
+@pytest.mark.asyncio
+async def test_list_agent_knowledge_bases_reads_the_agents_links():
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        captured["method"] = request.method
+        return httpx.Response(200, json={"success": True, "data": [{"mode": "prompt"}]})
+
+    out = await _client_with(handler).list_agent_knowledge_bases("a1", "k")
+    assert out == [{"mode": "prompt"}]
+    assert (captured["method"], captured["url"]) == (
+        "GET",
+        "http://tc.test/v1/agents/a1/knowledge-bases",
+    )

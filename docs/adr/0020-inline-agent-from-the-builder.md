@@ -70,6 +70,12 @@ proceeds with no MCP tools rather than waiting past
   lesson, recorded because it will recur: the inline path needed sweeping for
   every `agent` dereference, not just the one in the traceback. In-call
   integrations now reach all three voice transports.
+- **An inline agent has no knowledge-base links.** TurnCall reads KBs off the
+  agent row, so an agent with attached apps answered every call without its KB
+  (call 1f3438e8: "we don't serve sushi" with a sushi menu linked). Since
+  kobikis/turncall#260 an inline config names its own in `knowledge_bases`, and
+  `call-config` copies the agent's links into it. Best-effort, like the rest of
+  this path: a KB read that fails costs the call its KB, never its credentials.
 
 ## Status
 
