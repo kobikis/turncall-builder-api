@@ -522,6 +522,78 @@ def test_only_pipedream_servers_are_given_the_token(client, mocks):
     assert servers[1]["headers"]["Authorization"] == "Bearer pd_minted"
 
 
+def _link(**over):
+    """A link as TurnCall's GET /v1/agents/{id}/knowledge-bases returns it."""
+    row = {
+        "agent_id": AGENT,
+        "knowledge_base_id": "kb-1",
+        "mode": "prompt",
+        "priority": 0,
+        "top_k": 5,
+        "similarity_threshold": 0.3,
+        "tool_description": None,
+        "created_at": "2026-10-03T00:00:00Z",
+    }
+    row.update(over)
+    return row
+
+
+def test_the_calls_config_carries_the_agents_knowledge_bases(client, mocks):
+    """An inline agent has no row for TurnCall to read KB links off, so the
+    config names them itself (turncall#260) — or every call loses the KB."""
+    _configured(mocks)
+    _target(mocks)
+    _agent_backend(mocks, api_key="tc_agent_key")
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_minted", expires_at=1.0
+    )
+    mocks.client.list_agent_knowledge_bases.return_value = [
+        _link(),
+        _link(knowledge_base_id="kb-2", mode="tool", tool_description="Search the menu"),
+    ]
+
+    agent = _call_config(client).json()["data"]["agent"]
+
+    mocks.client.list_agent_knowledge_bases.assert_awaited_once_with(AGENT, "tc_agent_key")
+    assert agent["knowledge_bases"] == [
+        {
+            "knowledge_base_id": "kb-1",
+            "mode": "prompt",
+            "priority": 0,
+            "top_k": 5,
+            "similarity_threshold": 0.3,
+            "tool_description": None,
+        },
+        {
+            "knowledge_base_id": "kb-2",
+            "mode": "tool",
+            "priority": 0,
+            "top_k": 5,
+            "similarity_threshold": 0.3,
+            "tool_description": "Search the menu",
+        },
+    ]
+
+
+def test_unreadable_knowledge_bases_cost_the_call_only_them(client, mocks):
+    """The apps are why the config is inline; a KB read that fails must not
+    take the credentials down with it."""
+    _configured(mocks)
+    _target(mocks)
+    _agent_backend(mocks, api_key="tc_agent_key")
+    mocks.pipedream.access_token.return_value = pipedream.AccessToken(
+        token="pd_minted", expires_at=1.0
+    )
+    mocks.client.list_agent_knowledge_bases.side_effect = RuntimeError("down")
+
+    r = _call_config(client)
+
+    assert r.status_code == 200
+    agent = r.json()["data"]["agent"]
+    assert agent["mcp_servers"][0]["headers"]["Authorization"] == "Bearer pd_minted"
+    assert "knowledge_bases" not in agent
+
+
 def test_an_unknown_backend_gets_no_config(client, mocks):
     _configured(mocks)
     mocks.registry.get_backend_by_builder_token.return_value = None

@@ -16,6 +16,7 @@ which is what names the Workspace and the app.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from urllib.parse import urlencode
 
@@ -29,6 +30,8 @@ from ..backends import registry
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..integration_store import IntegrationError
 from ..settings import load_settings
+
+logger = logging.getLogger("turncall_builder")
 
 router = APIRouter(prefix="/integrations")
 
@@ -387,4 +390,38 @@ async def call_config(backend: dict = Depends(_calling_backend)) -> dict[str, An
         # A config the mapper refuses (a bad tool name) must not read as a server
         # fault — the backend falls back to agent_id and the call still happens.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    knowledge_bases = await _knowledge_bases(backend)
+    if knowledge_bases:
+        payload["config"]["knowledge_bases"] = knowledge_bases
     return {"success": True, "data": {"agent": payload["config"]}}
+
+
+# The link fields TurnCall reads off an inline agent's `knowledge_bases`.
+_KB_FIELDS = (
+    "knowledge_base_id",
+    "mode",
+    "priority",
+    "top_k",
+    "similarity_threshold",
+    "tool_description",
+)
+
+
+async def _knowledge_bases(backend: dict) -> list[dict[str, Any]]:
+    """The Agent's KB links, for its inline config (turncall#260).
+
+    TurnCall reads links off an agent row, and an inline agent has none, so the
+    config has to name them or the call answers without the KB. Best-effort: the
+    apps are why the config is inline, and a KB read that fails must not cost the
+    call its credentials too.
+    """
+    try:
+        links = await runtime.get_client().list_agent_knowledge_bases(
+            backend["agent_id"], backend["api_key"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "call-config: knowledge bases unreadable for %s: %s", backend["agent_id"], exc
+        )
+        return []
+    return [{k: link.get(k) for k in _KB_FIELDS} for link in links]
