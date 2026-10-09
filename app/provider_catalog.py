@@ -4,10 +4,13 @@ Populates the config form's model + voice dropdowns with the actual, current
 options instead of a hand-maintained list. Keys come from the Workspace's
 Integration when it has one (#56), so the pickers list what the account that will
 run the call actually has; otherwise from the builder's own env (OPENAI_API_KEY,
-ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY, DEEPGRAM_API_KEY;
+ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY, DEEPGRAM_API_KEY,
+GOOGLE_API_KEY, ASSEMBLYAI_API_KEY;
 OpenRouter's model list is public). Best-effort: a provider
 with no key / no list API / an error yields [] (the console still allows free
 text), and a stale cache is served over a transient failure. Cached ~1h.
+Deepgram's Flux models are the exception: its list never names them, so they
+are always offered.
 
 AWS is the exception: listing Bedrock models needs signed SigV4 credentials the
 builder has no reason to hold (they belong to the TurnCall runtime), so its
@@ -57,7 +60,18 @@ _STT_MODELS = {
     "openai": ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
     "elevenlabs": ["scribe_v1"],
     "cartesia": ["ink-whisper"],
+    # Universal-Streaming English is TurnCall's default; the multilingual sibling
+    # costs the same; Universal-3 Pro is 3x the price (turncall#203).
+    "assemblyai": [
+        "universal-streaming-english",
+        "universal-streaming-multilingual",
+        "universal-3-5-pro",
+        "universal-3-6-pro",
+    ],
 }
+# Deepgram Flux (turncall#204): a model on the deepgram provider that Deepgram's
+# /v1/models does not list (checked 2026-10-09), so it is added by hand.
+_DEEPGRAM_FLUX = ["flux-general-en", "flux-general-multi"]
 
 # S2S (speech-to-speech / realtime). OpenAI models are fetched live; its voice set
 # is fixed (a subset of the TTS voices). Gemini Live has no key here + a large,
@@ -120,6 +134,7 @@ _ENV = {
     "deepgram": "DEEPGRAM_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
     "cartesia": "CARTESIA_API_KEY",
+    "assemblyai": "ASSEMBLYAI_API_KEY",
 }
 _ACCOUNT = {"openai_live": "openai"}
 
@@ -153,7 +168,10 @@ async def tts_voices(provider: str, keys: dict[str, str] | None = None) -> list[
 
 async def stt_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
     key = _key(provider, keys)
-    return await _cached(f"stt:{provider}:{_fp(key)}", lambda c: _fetch_stt_models(c, provider, key))
+    models = await _cached(f"stt:{provider}:{_fp(key)}", lambda c: _fetch_stt_models(c, provider, key))
+    if provider == "deepgram":  # after the cache, so a failed fetch keeps Flux
+        return sorted(set(models) | set(_DEEPGRAM_FLUX))
+    return models
 
 
 async def s2s_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
@@ -193,6 +211,16 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str, key: str) 
         )
         r.raise_for_status()
         return [m["id"] for m in r.json().get("data", []) if m.get("id")]
+    if provider == "google":
+        if not key:
+            return []
+        # Gemini chat models only: Gemma/AQA and the TTS, image and audio
+        # Geminis also answer generateContent but are not a cascade LLM.
+        skip = ("live", "audio", "tts", "image", "embedding")
+        return [
+            m for m in await _google_models(client, key, "generateContent")
+            if m.startswith("gemini") and not any(x in m for x in skip)
+        ]
     if provider == "bedrock":
         return list(_BEDROCK_MODELS)
     return []  # ollama / custom_openai target a per-agent endpoint
@@ -229,23 +257,26 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) 
         dialog = sorted(i for i in ids if "live" in i and not any(x in i for x in skip))
         return dialog or list(_OPENAI_LIVE_MODELS)
     if provider == "google":
-        if key:
-            r = await client.get(
-                "https://generativelanguage.googleapis.com/v1beta/models",
-                params={"key": key, "pageSize": 1000},
-            )
-            r.raise_for_status()
-            live = [
-                m["name"].removeprefix("models/")
-                for m in r.json().get("models", [])
-                if "bidiGenerateContent" in (m.get("supportedGenerationMethods") or [])
-            ]
-            if live:
-                return sorted(live)
-        return list(_GOOGLE_S2S_MODELS)  # no key / empty — published fallback
+        live = await _google_models(client, key, "bidiGenerateContent") if key else []
+        return live or list(_GOOGLE_S2S_MODELS)  # no key / empty — published fallback
     if provider == "aws":
         return list(_AWS_S2S_MODELS)
     return []
+
+
+async def _google_models(client: httpx.AsyncClient, key: str, method: str) -> list[str]:
+    """The account's Gemini API models supporting `method`, sorted."""
+    r = await client.get(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        headers={"x-goog-api-key": key},
+        params={"pageSize": 1000},  # the API's maximum; ponytail: no nextPageToken, a few hundred models today
+    )
+    r.raise_for_status()
+    return sorted(
+        m["name"].removeprefix("models/")
+        for m in r.json().get("models", [])
+        if method in (m.get("supportedGenerationMethods") or [])
+    )
 
 
 def _pair(value: str, label: str) -> dict[str, str]:
@@ -350,6 +381,8 @@ _PROBES: dict[str, tuple[str, Any]] = {
         lambda k: {"X-API-Key": k, "Cartesia-Version": "2024-06-10"},
     ),
     "tavus": ("https://tavusapi.com/v2/replicas", lambda k: {"x-api-key": k}),
+    # AssemblyAI has no models endpoint; its transcript list authenticates.
+    "assemblyai": ("https://api.assemblyai.com/v2/transcript?limit=1", lambda k: {"Authorization": k}),
 }
 
 

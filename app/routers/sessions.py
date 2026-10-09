@@ -169,9 +169,9 @@ BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
 
 # The providers the builder supports (static). Models + voices are fetched live
 # per provider — see /providers/llm/{p}/models and /providers/tts/{p}/voices.
-_LLM_PROVIDERS = ["openai", "anthropic", "openrouter", "ollama", "custom_openai", "bedrock"]
+_LLM_PROVIDERS = ["openai", "anthropic", "google", "openrouter", "ollama", "custom_openai", "bedrock"]
 _TTS_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
-_STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
+_STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia", "assemblyai"]
 _S2S_PROVIDERS = ["openai", "openai_live", "google", "aws"]
 
 
