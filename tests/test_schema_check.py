@@ -31,6 +31,15 @@ def test_emitted_fields_match_the_mapper():
         "s2s",
         "voicemail_detection",
         "guardrails",
+        "language",
+        "smart_turn_detection",
+        "smart_turn_stop_secs",
+        "silence_timeout_ms",
+        "interruption_enabled",
+        "user_idle_timeout_ms",
+        "idle_message",
+        "max_call_duration_seconds",
+        "avatar",
     }
 
 

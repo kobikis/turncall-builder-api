@@ -550,3 +550,69 @@ class TestStt:
         assert "stt" not in to_create_agent_request(
             {"name": "Bot", "system_prompt": "hi"}
         )["config"]
+
+
+def _config(**fields):
+    return to_create_agent_request({"name": "Bot", "system_prompt": "hi", **fields})["config"]
+
+
+class TestAgentSettingsReachTurnCall:
+    """#71: the mapper is an allowlist, so everything off it was dropped —
+    even when set in the Advanced JSON."""
+
+    def test_llm_sampling_failover_and_endpoint_pass_through(self):
+        llm = {
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "temperature": 0,
+            "max_tokens": 300,
+            "reasoning_effort": "low",
+            "base_url": "https://gateway.example.com/v1",
+            "failover": [{"provider": "openai", "model": "gpt-4o-mini"}],
+        }
+
+        assert _config(llm=llm)["llm"] == llm
+
+    def test_llm_keeps_its_defaults(self):
+        assert _config(llm={"temperature": 0.2})["llm"] == {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.2,
+        }
+
+    def test_tts_pronunciations_and_failover_pass_through(self):
+        tts = {
+            "provider": "cartesia",
+            "voice": "uuid",
+            "pronunciations": {"Metformin": "mɛtˈfɔɹmɪn"},
+            "failover": [{"provider": "deepgram", "voice": "aura-2-helena-en"}],
+        }
+
+        assert _config(tts=tts)["tts"] == {**tts, "model": "sonic-3"}
+
+    def test_turn_taking_and_call_guards_pass_through(self):
+        settings = {
+            "language": "es",
+            "smart_turn_detection": False,
+            "smart_turn_stop_secs": 0.5,
+            "silence_timeout_ms": 600,
+            "interruption_enabled": False,
+            "user_idle_timeout_ms": 0,
+            "idle_message": "¿Sigue ahí?",
+            "max_call_duration_seconds": 300,
+            "avatar": {"enabled": True, "provider": "tavus", "replica_id": "r1"},
+        }
+
+        config = _config(**settings)
+
+        assert {k: config[k] for k in settings} == settings
+
+    def test_unset_means_no_key_at_all(self):
+        """An absent key is TurnCall's default; a null or an empty string is not."""
+        config = _config(
+            language="", idle_message=None, smart_turn_detection=None, avatar=None
+        )
+
+        for key in ("language", "idle_message", "smart_turn_detection", "avatar"):
+            assert key not in config
+        assert "temperature" not in _config(llm={"temperature": None})["llm"]
