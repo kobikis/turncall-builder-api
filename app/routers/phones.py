@@ -199,10 +199,14 @@ async def _bind_in_turncall(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 409:
             raise HTTPException(status_code=409, detail=_conflict_detail(exc, e164)) from exc
-        # TurnCall's sentence, not its JSON: "no Telnyx account…" (#73).
+        # TurnCall's sentence, not its JSON (#73). A number the carrier
+        # account cannot see (422) or no carrier account at all (503) is the
+        # user's to fix, so it keeps its status; anything else is upstream.
+        status = exc.response.status_code
         reason = str(_turncall_http_error(exc).detail)[:300]
         raise HTTPException(
-            status_code=502, detail=f"TurnCall rejected the bind: {reason}"
+            status_code=status if status in (422, 503) else 502,
+            detail=f"TurnCall rejected the bind: {reason}",
         ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(

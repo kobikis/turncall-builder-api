@@ -105,7 +105,7 @@ def test_a_telnyx_bind_without_an_account_says_so(client, mocks):
     }, request=httpx.Request("POST", "http://tc/x"))
     mocks.client.bind_phone_number.side_effect = httpx.HTTPStatusError("x", request=resp.request, response=resp)
     r = client.post("/phone-numbers", json=_body(carrier="telnyx"))
-    assert r.status_code == 502
+    assert r.status_code == 503
     assert r.json()["detail"] == (
         "TurnCall rejected the bind: No Telnyx account: set a telnyx credential or TELNYX_API_KEY"
     )
