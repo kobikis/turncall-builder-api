@@ -35,6 +35,7 @@ from .routers import (
     knowledge,
     mcp_registry,
     members,
+    outbound,
     phones,
     pipedream_project,
     provider_integrations,
@@ -152,7 +153,7 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 
 
 for _router in (
-    sessions, agents, agent_activity, phones, calls, evals, knowledge, takeaways,
+    sessions, agents, agent_activity, phones, calls, outbound, evals, knowledge, takeaways,
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.
     auth, workspaces, members, github, skills, provider_integrations, mcp_registry,

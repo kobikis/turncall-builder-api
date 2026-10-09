@@ -175,6 +175,43 @@ class TurnCallClient:
             params={"page": page, "limit": limit},
         )
 
+    async def place_outbound_call(
+        self, *, agent_id: str, from_number_id: str, to_number: str, api_key: str
+    ) -> dict[str, Any]:
+        """Dial `to_number` from one of the project's numbers as `agent_id`.
+        TurnCall checks the suppression list and the outbound limits first."""
+        return await self._request(
+            "POST",
+            "/v1/calls/outbound",
+            api_key=api_key,
+            json={"agent_id": agent_id, "from_number_id": from_number_id, "to_number": to_number},
+        )
+
+    # ------------------------------------------------- suppression list
+
+    async def list_suppressed(
+        self, api_key: str, *, page: int = 1, limit: int = 100
+    ) -> dict[str, Any]:
+        """The project's never-dial numbers, newest first, paged (turncall#227)."""
+        return await self._request(
+            "GET",
+            "/v1/suppression-list",
+            api_key=api_key,
+            extract="json",
+            params={"page": page, "limit": limit},
+        )
+
+    async def suppress_number(self, number: str, api_key: str) -> dict[str, Any]:
+        """Add a number; one already listed returns its existing entry."""
+        return await self._request(
+            "POST", "/v1/suppression-list", api_key=api_key, json={"number": number}
+        )
+
+    async def unsuppress_number(self, entry_id: str, api_key: str) -> None:
+        await self._request(
+            "DELETE", f"/v1/suppression-list/{entry_id}", api_key=api_key, extract="none"
+        )
+
     async def get_call_transcript(self, call_id: str, api_key: str) -> dict[str, Any]:
         return await self._request(
             "GET", f"/v1/calls/{call_id}/transcript", api_key=api_key

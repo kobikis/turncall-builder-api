@@ -227,6 +227,13 @@ Console's Phone Numbers list, so listing is one local query, not an N-project
 fan-out.
 _Avoid_: phone book, directory
 
+**Do-not-call list**:
+The numbers an Agent never calls: TurnCall's suppression list for the Agent's
+project. Every outbound call checks it, and the `do_not_call` tool adds callers
+who ask not to be called again. The builder's routes say `do-not-call`; its
+TurnCall client keeps TurnCall's name.
+_Avoid_: suppression list (in Console copy), blocklist
+
 **Call-init**:
 Per-call, dynamic agent selection + property injection. A Number bound with
 `webhook` routing makes TurnCall POST a call-init request to the customer's
