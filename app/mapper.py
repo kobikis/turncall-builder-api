@@ -154,6 +154,13 @@ def to_create_agent_request(
         "tts": _tts_block(tts),
         "tools": tools,
     }
+    # STT as the console set it — provider, model, and anything from the
+    # Advanced JSON (keyterms, failover); TurnCall validates it. It was never
+    # sent, so every agent heard callers through Deepgram whatever the console
+    # showed. An empty model is TurnCall's "the provider's own default".
+    stt = {k: v for k, v in (cfg.get("stt") or {}).items() if v not in (None, "")}
+    if stt:
+        config["stt"] = stt
     # Speech-to-speech pipeline: a native audio model replaces STT→LLM→TTS. The
     # tts block above is left in place but ignored by TurnCall in s2s mode; the
     # voice comes from the s2s block.

@@ -526,3 +526,27 @@ def test_s2s_without_delegation_emits_none():
         {"name": "Bot", "system_prompt": "hi", "pipeline_mode": "s2s"}
     )["config"]
     assert "delegation" not in cfg["s2s"]
+
+
+class TestStt:
+    def test_the_consoles_choice_reaches_turncall(self):
+        """It was never sent: every agent heard callers through Deepgram."""
+        stt = {"provider": "cartesia", "model": "ink-whisper", "keyterms": ["Acme"]}
+
+        config = to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "stt": stt}
+        )["config"]
+
+        assert config["stt"] == stt
+
+    def test_an_empty_model_is_the_providers_default(self):
+        config = to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "stt": {"provider": "openai", "model": ""}}
+        )["config"]
+
+        assert config["stt"] == {"provider": "openai"}
+
+    def test_absent_means_no_key_at_all(self):
+        assert "stt" not in to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi"}
+        )["config"]

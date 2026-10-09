@@ -23,6 +23,7 @@ def test_emitted_fields_match_the_mapper():
         "system_prompt",
         "first_message",
         "llm",
+        "stt",
         "tts",
         "tools",
         "analysis",
