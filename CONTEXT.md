@@ -214,15 +214,19 @@ reached as the "new agent" path.
 _Avoid_: dashboard, admin panel
 
 **Number binding**:
-A Twilio phone number bound to exactly one Agent, routing that number's inbound
-calls to it. Binding lives in the Agent's TurnCall project and auto-configures
-the Twilio webhook (TurnCall does this on bind — the builder never calls Twilio).
+A phone number bound to exactly one Agent, routing that number's inbound
+calls to it. Its **carrier** — Twilio, Telnyx or Asterisk (a PBX over ARI;
+turncall ADR-0022) — is fixed at bind. Binding lives in the Agent's TurnCall
+project; on Twilio and Telnyx TurnCall points the number at itself on bind
+(the builder never calls the carrier), and an Asterisk number is routed by
+the PBX's own dialplan. SMS and a number's own Twilio account are Twilio-only.
 Re-pointing to a different Agent moves the binding across projects.
 _Avoid_: DID, line, phone
 
 **Number registry**:
 The builder's `phone_numbers` table mirroring every Number binding it made
-(`e164`, `sid`, `agent_id`, `project_id`, `sms_enabled`). Source of truth for the
+(`e164`, `sid`, `carrier`, `agent_id`, `project_id`, `sms_enabled`; rows from
+before carriers read as `twilio`). Source of truth for the
 Console's Phone Numbers list, so listing is one local query, not an N-project
 fan-out.
 _Avoid_: phone book, directory

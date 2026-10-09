@@ -3,24 +3,32 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import provider_integrations, runtime, twilio_store
+from .._helpers import _turncall_http_error
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
 
+TWILIO = "twilio"
+Carrier = Literal["twilio", "telnyx", "asterisk"]
+
 
 class PhoneBind(BaseModel):
     e164: str
+    # Who the number belongs to (turncall ADR-0022). Fixed at bind: null on an
+    # edit keeps the number's own; null on a bind is Twilio.
+    carrier: Carrier | None = None
     # The number's Twilio SID. Optional when the number brings its own Twilio
-    # account: TurnCall looks it up there by E.164.
+    # account, and on Telnyx: TurnCall looks it up by E.164. An Asterisk
+    # number has none.
     sid: str = ""
     # 'agent' | 'agent_call_init' (managed call-init, ADR-0008) | 'webhook' | 'none'
     routing_type: str
@@ -53,6 +61,27 @@ class PhoneBind(BaseModel):
         if self.twilio_account_sid and self.twilio_auth_token:
             return self.twilio_account_sid.strip(), self.twilio_auth_token.strip()
         return None
+
+
+def _check_carrier(body: PhoneBind, carrier: str) -> None:
+    """Refuse Twilio's features on another carrier with a sentence, before
+    TurnCall would: a number's own Twilio account and SMS are Twilio-only."""
+    if carrier == TWILIO:
+        return
+    twilio_only = [
+        name
+        for name, used in (
+            ("SMS", body.sms_enabled),
+            ("the workspace's Twilio account", body.use_workspace_twilio),
+            ("a Twilio account", body.own_twilio() is not None),
+        )
+        if used
+    ]
+    if twilio_only:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{twilio_only[0]} applies to Twilio numbers only, not {carrier}.",
+        )
 
 
 async def _unbind_in_turncall(pool: Any, number: dict[str, Any], workspace_id: str) -> None:
@@ -170,9 +199,14 @@ async def _bind_in_turncall(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 409:
             raise HTTPException(status_code=409, detail=_conflict_detail(exc, e164)) from exc
+        # TurnCall's sentence, not its JSON (#73). A number the carrier
+        # account cannot see (422) or no carrier account at all (503) is the
+        # user's to fix, so it keeps its status; anything else is upstream.
+        status = exc.response.status_code
+        reason = str(_turncall_http_error(exc).detail)[:300]
         raise HTTPException(
-            status_code=502,
-            detail=f"TurnCall rejected the bind: {exc.response.text[:200]}",
+            status_code=status if status in (422, 503) else 502,
+            detail=f"TurnCall rejected the bind: {reason}",
         ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -260,6 +294,7 @@ async def _bind(
     workspace_id: str,
     twilio: tuple[str, str] | None = None,
     source: str | None = None,
+    carrier: str | None = None,
 ) -> dict[str, Any]:
     """Bind a number in the right project and mirror it. Returns the mirror row.
     An unassigned number ('none') is only mirrored locally — TurnCall's bind needs
@@ -267,6 +302,8 @@ async def _bind(
 
     `twilio` is the number's own Twilio account: what the body brings, else what
     a rebind carries over from the mirror."""
+    carrier = carrier or body.carrier or TWILIO
+    _check_carrier(body, carrier)
     twilio, source = await _twilio_for(pool, body, workspace_id, twilio, source)
     if body.routing_type == "none":
         number = {
@@ -279,6 +316,7 @@ async def _bind(
             "server_url": None,
             "sms_enabled": body.sms_enabled,
             "label": body.label,
+            "carrier": carrier,
             "workspace_id": workspace_id,
             **_seal(twilio, source),
         }
@@ -287,6 +325,7 @@ async def _bind(
 
     routing = await _resolve_routing(pool, body, workspace_id)
     payload: dict[str, Any] = {
+        "carrier": carrier,
         "e164_number": body.e164,
         "sms_enabled": body.sms_enabled,
         **({"external_number_sid": body.sid} if body.sid else {}),
@@ -314,13 +353,16 @@ async def _bind(
         "server_url_secret": secret,
         "sms_enabled": body.sms_enabled,
         "label": body.label,
+        "carrier": carrier,
         "workspace_id": workspace_id,
         **_seal(twilio, source),
     }
     await phones.record_number(pool, number)
     # Response-only (not mirrored): whether TurnCall actually pointed the
-    # Twilio number at itself — False means calls won't arrive yet.
+    # number at itself — False means calls won't arrive yet. The twilio_ one
+    # is null off Twilio; webhooks_configured is every carrier's (ADR-0022).
     number["twilio_webhooks_configured"] = data.get("twilio_webhooks_configured")
+    number["webhooks_configured"] = data.get("webhooks_configured")
     return _public(number)
 
 
@@ -362,6 +404,13 @@ async def update_phone_number(
     existing = await phones.get_number(pool, phone_id, workspace_id)
     if not existing:
         raise HTTPException(status_code=404, detail="phone number not found")
+    carrier = existing.get("carrier") or TWILIO
+    if body.carrier and body.carrier != carrier:
+        raise HTTPException(
+            status_code=422,
+            detail=f"This number is on {carrier}; a number's carrier is fixed when it is bound.",
+        )
+    _check_carrier(body, carrier)
 
     if body.routing_type != "none" and existing["routing_type"] != "none":
         routing = await _resolve_routing(pool, body, workspace_id)
@@ -395,6 +444,7 @@ async def update_phone_number(
                 "server_url_secret": secret,
                 "sms_enabled": body.sms_enabled,
                 "label": body.label,
+                "carrier": carrier,
                 "workspace_id": workspace_id,
                 **_seal(new_twilio, new_source),
             }
@@ -408,6 +458,7 @@ async def update_phone_number(
                     "twilio_webhooks_configured": data.get(
                         "twilio_webhooks_configured"
                     ),
+                    "webhooks_configured": data.get("webhooks_configured"),
                 },
             }
 
@@ -425,7 +476,12 @@ async def update_phone_number(
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, workspace_id)
     number = await _bind(
-        pool, body, workspace_id, twilio=carried, source=existing.get("twilio_credentials")
+        pool,
+        body,
+        workspace_id,
+        twilio=carried,
+        source=existing.get("twilio_credentials"),
+        carrier=carrier,
     )
     if number["id"] != phone_id:
         await phones.delete_number(pool, phone_id)
