@@ -70,26 +70,40 @@ class _Telnyx(_ApiKey):
         return value
 
 
+_NAME = r"^[A-Za-z0-9_.-]{1,64}$"
+
+
+class _Asterisk(BaseModel):
+    """A PBX reached over ARI (#84), in the shape TurnCall validates. One for
+    every agent's project: TurnCall shares one ARI connection per account
+    (kobikis/turncall#274). Never dialled from here — TurnCall applies its own
+    URL allowlist when the credential is projected."""
+
+    model_config = ConfigDict(extra="forbid")
+    ari_url: str = Field(min_length=1, max_length=2048)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=4096)
+    app: str | None = Field(default=None, pattern=_NAME)
+    media_connection: str | None = Field(default=None, pattern=_NAME)
+    transfer_context: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,80}$")
+
+    @field_validator("ari_url")
+    @classmethod
+    def _http_base(cls, value: str) -> str:
+        value = value.rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("ari_url must be the http(s) base of Asterisk's ARI, e.g. https://pbx:8088")
+        return value
+
+
 _SCHEMAS: dict[str, type[BaseModel]] = {
     provider_integrations.AWS: _AWSSet,
     provider_integrations.TELNYX: _Telnyx,
-}
-
-# Not yet (#84): TurnCall opens one ARI connection per project holding the
-# credential, ARI hands an app's events to the newest only, and every agent is
-# its own project — so a workspace PBX would answer one agent's numbers.
-# kobikis/turncall#274 keys the edge by account; then this goes.
-_NOT_YET = {
-    provider_integrations.ASTERISK: (
-        "A workspace's own Asterisk can't serve more than one agent yet "
-        "(kobikis/turncall#274). Asterisk numbers use the platform's PBX until then."
-    ),
+    provider_integrations.ASTERISK: _Asterisk,
 }
 
 
 def _document(provider: str, body: dict[str, Any]) -> dict[str, Any]:
-    if provider in _NOT_YET:
-        raise HTTPException(status_code=422, detail=_NOT_YET[provider])
     # A blank optional field means TurnCall's default, which is its absence.
     stripped = {
         k: (v.strip() or None) if isinstance(v, str) else v for k, v in body.items()
