@@ -141,6 +141,19 @@ class TurnCallClient:
             "DELETE", f"/v1/projects/{project_id}", api_key=api_key, extract="none"
         )
 
+    async def get_project(self, project_id: str, api_key: str) -> dict[str, Any]:
+        """The agent's project, with its `limits` (null = the platform default)."""
+        return await self._request("GET", f"/v1/projects/{project_id}", api_key=api_key)
+
+    async def set_project_limits(
+        self, project_id: str, limits: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Replace the project's limits (turncall#206): a null or left-out field
+        goes back to the platform default. Admin key, its own project only."""
+        return await self._request(
+            "PUT", f"/v1/projects/{project_id}/limits", api_key=api_key, json=limits
+        )
+
     async def bind_phone_number(
         self, payload: dict[str, Any], api_key: str
     ) -> dict[str, Any]:

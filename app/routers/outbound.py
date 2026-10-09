@@ -7,7 +7,6 @@ to it during calls. Refusals are TurnCall's, passed through rather than retried.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import httpx
@@ -39,13 +38,7 @@ def _outbound_error(exc: httpx.HTTPStatusError, to_number: str) -> HTTPException
         body = {}
     if body.get("code") == "number_suppressed":
         return HTTPException(409, f"{to_number} is on this agent's do-not-call list.")
-    error = _turncall_http_error(exc)
-    retry_ms = (body.get("details") or {}).get("retry_after_ms")
-    if exc.response.status_code != 429 or retry_ms is None:
-        return error
-    return HTTPException(
-        429, error.detail, headers={"Retry-After": str(math.ceil(retry_ms / 1000))}
-    )
+    return _turncall_http_error(exc)
 
 
 @router.post("/agents/{agent_id}/calls/outbound", status_code=201)

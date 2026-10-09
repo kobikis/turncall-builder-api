@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .. import runtime
-from .._helpers import _backend_or_404, ranged_audio
+from .._helpers import _backend_or_404, _turncall_http_error, ranged_audio
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
@@ -38,6 +38,9 @@ async def agent_test_chat(
             customer_number=body.customer_number,
         )
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            # A limit (#76): TurnCall's message names it, so it is shown as is.
+            raise _turncall_http_error(exc) from exc
         raise HTTPException(status_code=exc.response.status_code, detail="chat failed") from exc
     return {"success": True, "data": data}
 
