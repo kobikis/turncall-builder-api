@@ -32,6 +32,7 @@ def emitted_config_fields() -> set[str]:
         "system_prompt": "x",
         "first_message": "hi",
         "llm": {"provider": "openai", "model": "gpt-4o-mini"},
+        "stt": {"provider": "deepgram"},
         "tts": {"provider": "deepgram", "voice": "aura-2-helena-en"},
         "tools": ["end_call"],
         "custom_tools": [{"name": "t", "description": "d"}],
