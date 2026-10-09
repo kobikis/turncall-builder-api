@@ -381,6 +381,8 @@ _PROBES: dict[str, tuple[str, Any]] = {
         lambda k: {"X-API-Key": k, "Cartesia-Version": "2024-06-10"},
     ),
     "tavus": ("https://tavusapi.com/v2/replicas", lambda k: {"x-api-key": k}),
+    # Telnyx: the balance needs the key and changes nothing (#84).
+    "telnyx": ("https://api.telnyx.com/v2/balance", lambda k: {"Authorization": f"Bearer {k}"}),
     # AssemblyAI has no models endpoint; its transcript list authenticates.
     "assemblyai": ("https://api.assemblyai.com/v2/transcript?limit=1", lambda k: {"Authorization": k}),
 }
