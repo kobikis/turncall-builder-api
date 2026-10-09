@@ -200,6 +200,50 @@ class TurnCallClient:
             json={"agent_id": agent_id, "from_number_id": from_number_id, "to_number": to_number},
         )
 
+    # -------------------------------------------------------- campaigns
+
+    async def create_campaign(self, body: dict[str, Any], api_key: str) -> dict[str, Any]:
+        """Queue a campaign (turncall#229); the campaign worker dials it."""
+        return await self._request("POST", "/v1/campaigns", api_key=api_key, json=body)
+
+    async def list_campaigns(
+        self, api_key: str, *, page: int = 1, limit: int = 20
+    ) -> dict[str, Any]:
+        """Newest first, each with its target counts per status."""
+        return await self._request(
+            "GET", "/v1/campaigns", api_key=api_key, extract="json",
+            params={"page": page, "limit": limit},
+        )
+
+    async def get_campaign(self, campaign_id: str, api_key: str) -> dict[str, Any]:
+        return await self._request("GET", f"/v1/campaigns/{campaign_id}", api_key=api_key)
+
+    async def list_campaign_targets(
+        self,
+        campaign_id: str,
+        api_key: str,
+        *,
+        status: str | None = None,
+        page: int = 1,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Each target's status and outcome, in list order."""
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if status:
+            params["status"] = status
+        return await self._request(
+            "GET", f"/v1/campaigns/{campaign_id}/targets", api_key=api_key,
+            extract="json", params=params,
+        )
+
+    async def control_campaign(
+        self, campaign_id: str, action: Literal["pause", "resume", "cancel"], api_key: str
+    ) -> dict[str, Any]:
+        """`pause`, `resume` or `cancel` (turncall#232)."""
+        return await self._request(
+            "POST", f"/v1/campaigns/{campaign_id}/{action}", api_key=api_key
+        )
+
     # ------------------------------------------------- suppression list
 
     async def list_suppressed(
@@ -224,6 +268,10 @@ class TurnCallClient:
         await self._request(
             "DELETE", f"/v1/suppression-list/{entry_id}", api_key=api_key, extract="none"
         )
+
+    async def get_call(self, call_id: str, api_key: str) -> dict[str, Any]:
+        """One call record, the same shape the list returns."""
+        return await self._request("GET", f"/v1/calls/{call_id}", api_key=api_key)
 
     async def get_call_transcript(self, call_id: str, api_key: str) -> dict[str, Any]:
         return await self._request(

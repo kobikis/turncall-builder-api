@@ -14,8 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import runtime
-from .._helpers import _backend_or_404, _turncall_http_error
-from ..backends import phones
+from .._helpers import _require_agents_number, _backend_or_404, _turncall_http_error
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
@@ -48,11 +47,7 @@ async def place_outbound_call(
     """Call `to_number` from one of the agent's own numbers. The call then
     shows in the agent's Calls, like any other."""
     b = await _backend_or_404(agent_id, ctx.workspace_id)
-    number = await phones.get_number(runtime.get_pool(), body.from_number_id, ctx.workspace_id)
-    # Only a number bound in the agent's project can dial as it: a webhook
-    # number lives in a shared project the agent is not part of.
-    if not number or number.get("agent_id") != agent_id or number.get("project_id") != b["project_id"]:
-        raise HTTPException(422, "Choose one of this agent's own phone numbers to call from.")
+    await _require_agents_number(b, body.from_number_id, ctx.workspace_id)
     try:
         data = await runtime.get_client().place_outbound_call(
             agent_id=b["agent_id"],

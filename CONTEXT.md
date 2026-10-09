@@ -238,6 +238,14 @@ who ask not to be called again. The builder's routes say `do-not-call`; its
 TurnCall client keeps TurnCall's name.
 _Avoid_: suppression list (in Console copy), blocklist
 
+**Campaign**:
+TurnCall's outbound calls to a list of targets, dialled by its campaign worker
+with a calling window, retries by ending and a per-number pace. In the builder
+a Campaign belongs to one Agent and dials from one of its numbers: TurnCall's
+weighted campaigns split targets between agents of one project, and every
+Agent is its own project, so they are not offered.
+_Avoid_: blast, dialer job
+
 **Call-init**:
 Per-call, dynamic agent selection + property injection. A Number bound with
 `webhook` routing makes TurnCall POST a call-init request to the customer's
