@@ -8,10 +8,12 @@ shows presence, a last-four and what the key was checked against.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .. import integration_store, provider_catalog, provider_integrations, runtime
 from .._helpers import _readable
@@ -47,9 +49,52 @@ class _AWSSet(BaseModel):
         return self
 
 
+class _Telnyx(_ApiKey):
+    """A Telnyx account (#84): its key, and the public key that verifies its
+    webhooks — without it TurnCall refuses every webhook the account sends."""
+
+    public_key: str = Field(min_length=1, max_length=256)
+
+    @field_validator("public_key")
+    @classmethod
+    def _ed25519(cls, value: str) -> str:
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raw = b""
+        if len(raw) != 32:
+            raise ValueError(
+                "public_key must be the account's base64 Ed25519 public key, "
+                "as Mission Control shows it (Keys & Credentials > Public Key)"
+            )
+        return value
+
+
+_SCHEMAS: dict[str, type[BaseModel]] = {
+    provider_integrations.AWS: _AWSSet,
+    provider_integrations.TELNYX: _Telnyx,
+}
+
+# Not yet (#84): TurnCall opens one ARI connection per project holding the
+# credential, ARI hands an app's events to the newest only, and every agent is
+# its own project — so a workspace PBX would answer one agent's numbers.
+# kobikis/turncall#274 keys the edge by account; then this goes.
+_NOT_YET = {
+    provider_integrations.ASTERISK: (
+        "A workspace's own Asterisk can't serve more than one agent yet "
+        "(kobikis/turncall#274). Asterisk numbers use the platform's PBX until then."
+    ),
+}
+
+
 def _document(provider: str, body: dict[str, Any]) -> dict[str, Any]:
-    stripped = {k: v.strip() if isinstance(v, str) else v for k, v in body.items()}
-    schema = _AWSSet if provider == provider_integrations.AWS else _ApiKey
+    if provider in _NOT_YET:
+        raise HTTPException(status_code=422, detail=_NOT_YET[provider])
+    # A blank optional field means TurnCall's default, which is its absence.
+    stripped = {
+        k: (v.strip() or None) if isinstance(v, str) else v for k, v in body.items()
+    }
+    schema = _SCHEMAS.get(provider, _ApiKey)
     try:
         return schema.model_validate(stripped).model_dump(exclude_none=True)
     except ValidationError as exc:

@@ -30,6 +30,8 @@ from .backends import phones, registry
 logger = logging.getLogger("turncall_builder")
 
 AWS = "aws"
+TELNYX = "telnyx"
+ASTERISK = "asterisk"
 # Role providers billed to an account spelled differently; `ollama` and
 # `custom_openai` have none — their key belongs to the endpoint they name.
 _ACCOUNT = {"openai_live": "openai", "bedrock": AWS}
