@@ -40,7 +40,9 @@ from ..tasks import spawn
 logger = logging.getLogger("turncall_builder")
 router = APIRouter()
 
-SUBSCRIBED_EVENTS = ["call.started", "call.ended", "call.initializing"]
+# call.rejected: an inbound call refused over the agent's live-call limit (#76)
+# never gets a call row, so the Calls tab's event feed is the only place it shows.
+SUBSCRIBED_EVENTS = ["call.started", "call.ended", "call.initializing", "call.rejected"]
 
 
 class TurnRequest(BaseModel):

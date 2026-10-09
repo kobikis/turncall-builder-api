@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import httpx
@@ -195,9 +196,14 @@ def _readable(exc: ValidationError) -> str:
 
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     """Translate a TurnCall HTTPStatusError into an HTTPException carrying its
-    message, so every proxy endpoint surfaces TurnCall failures identically."""
+    message, so every proxy endpoint surfaces TurnCall failures identically.
+    A limit's 429 keeps its wait as Retry-After (#74, #76)."""
+    headers = None
     try:
         body = exc.response.json()
+        retry_ms = (body.get("details") or {}).get("retry_after_ms")
+        if exc.response.status_code == 429 and isinstance(retry_ms, int | float):
+            headers = {"Retry-After": str(math.ceil(retry_ms / 1000))}
         detail = body.get("error") or exc.response.text
         # A schema refusal says only "Validation error" up top; the reason —
         # which field, what is wrong — is in details.errors.
@@ -209,7 +215,7 @@ def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
             detail = f"{detail}: " + "; ".join(reasons)
     except Exception:
         detail = exc.response.text
-    return HTTPException(status_code=exc.response.status_code, detail=detail)
+    return HTTPException(status_code=exc.response.status_code, detail=detail, headers=headers)
 
 
 def _normalize_config(

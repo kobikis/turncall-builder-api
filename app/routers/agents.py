@@ -259,6 +259,10 @@ async def agent_webrtc_connect(
             "turncall webrtc connect failed agent=%s status=%s body=%s",
             agent_id, status, exc.response.text[:500],
         )
+        if status == 429:
+            # A limit (#76): its message is written for the caller and names
+            # the limit, so it is the one upstream body passed through.
+            raise _turncall_http_error(exc) from exc
         if 400 <= status < 500 and status not in (401, 403):
             raise HTTPException(
                 status_code=422, detail="offer rejected by upstream — check the SDP"
