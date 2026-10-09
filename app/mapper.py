@@ -33,11 +33,38 @@ _TTS_DEFAULT_MODEL = {
 }
 
 
+# Top-level agent settings TurnCall defines and the builder has no opinion on:
+# sent as set, so TurnCall validates them and its defaults apply when unset.
+_PASSTHROUGH = (
+    "language",
+    "smart_turn_detection",
+    "smart_turn_stop_secs",
+    "silence_timeout_ms",
+    "interruption_enabled",
+    "user_idle_timeout_ms",
+    "idle_message",
+    "max_call_duration_seconds",
+    "avatar",
+)
+
+
+def _set(block: dict[str, Any] | None) -> dict[str, Any]:
+    """The keys actually set. A null or an empty string means "unset", and
+    the way to say that to TurnCall is to leave the key out — its schema
+    reads absence as the default and rejects null. False and 0 are values."""
+    return {k: v for k, v in (block or {}).items() if v is not None and v != ""}
+
+
 def _tts_block(tts: dict[str, Any]) -> dict[str, Any]:
     """TTS config with a provider-appropriate model so TurnCall doesn't leak a
-    Deepgram model default into ElevenLabs/Cartesia/OpenAI."""
+    Deepgram model default into ElevenLabs/Cartesia/OpenAI. Everything else
+    set on it (pronunciations, failover, speed) passes through."""
     provider = tts.get("provider", "deepgram")
-    block: dict[str, Any] = {"provider": provider, "voice": tts.get("voice", "aura-2-helena-en")}
+    block: dict[str, Any] = {
+        **_set(tts),
+        "provider": provider,
+        "voice": tts.get("voice", "aura-2-helena-en"),
+    }
     model = tts.get("model") or _TTS_DEFAULT_MODEL.get(provider)
     if model:
         block["model"] = model
@@ -143,13 +170,14 @@ def to_create_agent_request(
     config: dict[str, Any] = {
         "system_prompt": cfg.get("system_prompt", ""),
         "first_message": cfg.get("first_message"),
+        # Everything set on the block passes through — sampling, failover,
+        # base_url, and an agent's own api_key, which pins the agent to that
+        # account over the Workspace Integration (ADR-0023). TurnCall
+        # validates it; only provider and model get the builder's defaults.
         "llm": {
+            **_set(llm),
             "provider": llm.get("provider", "openai"),
             "model": llm.get("model", "gpt-4o-mini"),
-            # An agent's own key, set deliberately in the advanced config: it
-            # pins the agent to that account over the Workspace Integration
-            # (ADR-0023). Dropped here before, so a pin silently did nothing.
-            **({"api_key": llm["api_key"]} if llm.get("api_key") else {}),
         },
         "tts": _tts_block(tts),
         "tools": tools,
@@ -158,9 +186,10 @@ def to_create_agent_request(
     # Advanced JSON (keyterms, failover); TurnCall validates it. It was never
     # sent, so every agent heard callers through Deepgram whatever the console
     # showed. An empty model is TurnCall's "the provider's own default".
-    stt = {k: v for k, v in (cfg.get("stt") or {}).items() if v not in (None, "")}
+    stt = _set(cfg.get("stt"))
     if stt:
         config["stt"] = stt
+    config.update(_set({k: cfg.get(k) for k in _PASSTHROUGH}))
     # Speech-to-speech pipeline: a native audio model replaces STT→LLM→TTS. The
     # tts block above is left in place but ignored by TurnCall in s2s mode; the
     # voice comes from the s2s block.

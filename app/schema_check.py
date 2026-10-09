@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from . import mapper
 from .mapper import to_create_agent_request
 
 logger = logging.getLogger("turncall_builder")
@@ -38,6 +39,7 @@ def emitted_config_fields() -> set[str]:
         "custom_tools": [{"name": "t", "description": "d"}],
         "analysis": {"enabled": True},
         "guardrails": {"prohibited_topics": ["x"]},
+        **{field: "x" for field in mapper._PASSTHROUGH},
     }
     s2s_probe = {
         **base,
