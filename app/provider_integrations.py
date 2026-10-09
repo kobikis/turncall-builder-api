@@ -74,7 +74,12 @@ def accounts_used(config: dict[str, Any] | None) -> set[str]:
 
 def last4(document: dict[str, Any]) -> str:
     """The one fragment ever shown: enough to tell two keys apart, not to use one."""
-    secret = document.get("api_key") or document.get("access_key_id") or document.get("role_arn")
+    secret = (
+        document.get("api_key")
+        or document.get("access_key_id")
+        or document.get("role_arn")
+        or document.get("password")  # asterisk
+    )
     return (secret or "")[-4:]
 
 

@@ -1,4 +1,4 @@
-"""A workspace's own Telnyx account, and Asterisk held back (#84, turncall ADR-0020/0022)."""
+"""A workspace's own Telnyx and Asterisk accounts (#84, turncall ADR-0020/0022)."""
 
 from __future__ import annotations
 
@@ -60,12 +60,35 @@ def test_a_telnyx_account_without_a_valid_public_key_is_refused(client, engine, 
     engine.integration_store.save.assert_not_called()
 
 
-def test_a_workspace_asterisk_is_refused_until_one_pbx_can_serve_several_agents(client, engine):
-    # turncall#274: one ARI connection per project, and every agent is a project.
-    r = client.put("/integrations/providers/asterisk", json=ARI, headers=WS)
+def test_a_workspace_asterisk_takes_its_ari_login(client, engine):
+    # One PBX for every agent's project: turncall#274 keys its ARI edge by account.
+    engine.integration_store.save.return_value = _integration("asterisk")
+    r = client.put(
+        "/integrations/providers/asterisk",
+        json={**ARI, "ari_url": f" {ARI['ari_url']}/ ", "app": "", "transfer_context": "to-ops"},
+        headers=WS,
+    )
+    assert r.status_code == 200, r.text
+    kw = engine.integration_store.save.await_args.kwargs
+    assert kw["document"] == {**ARI, "transfer_context": "to-ops"}
+    assert kw["last4"] == "pass"
+
+
+@pytest.mark.parametrize("body", [
+    {"ari_url": "https://pbx.example.com:8088", "username": "turncall"},
+    {**ARI, "ari_url": "pbx.example.com:8088"},
+    {**ARI, "app": "turn call"},
+    {**ARI, "secret": "x"},
+])
+def test_a_malformed_asterisk_login_is_refused(client, engine, body):
+    r = client.put("/integrations/providers/asterisk", json=body, headers=WS)
     assert r.status_code == 422
-    assert "turncall#274" in r.json()["detail"]
     engine.integration_store.save.assert_not_called()
+
+
+def test_an_asterisk_login_is_not_checked_by_dialling_the_url_it_names():
+    result = asyncio.run(provider_catalog.probe("asterisk", ARI))
+    assert result["status"] == "unchecked"
 
 
 def test_a_telnyx_key_is_checked_against_an_endpoint_that_authenticates(monkeypatch):
