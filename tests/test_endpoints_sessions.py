@@ -28,6 +28,12 @@ def test_providers_lists_stt_llm_tts_s2s(client):
     assert set(d["s2s"]) == {"openai", "openai_live", "google", "aws"}
 
 
+def test_providers_offer_assemblyai_stt_and_google_llm(client):
+    d = client.get("/providers").json()["data"]
+    assert "assemblyai" in d["stt"]
+    assert "google" in d["llm"]
+
+
 def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     from app.routers import sessions
 

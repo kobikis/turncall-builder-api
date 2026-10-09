@@ -51,6 +51,14 @@ def test_a_provider_with_nothing_to_ask_is_unchecked():
     assert asyncio.run(provider_catalog.probe("heygen", {"api_key": "k"}))["status"] == "unchecked"
 
 
+def test_assemblyai_key_is_checked_against_its_transcript_list(monkeypatch):
+    seen = _answering(monkeypatch, 200)
+    result = asyncio.run(provider_catalog.probe("assemblyai", {"api_key": "k"}))
+    assert result["status"] == "valid"
+    assert seen[0].url.host == "api.assemblyai.com"
+    assert seen[0].headers["authorization"] == "k"
+
+
 def test_twilio_numbers_are_listed_with_basic_auth(monkeypatch):
     from app import twilio_api
 
