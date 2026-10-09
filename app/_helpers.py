@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import runtime
-from .backends import registry
+from .backends import phones, registry
 from .pipedream import CATALOG
 
 
@@ -192,6 +192,21 @@ def _readable(exc: ValidationError) -> str:
         )
         seen[f"{path}: {err['msg']}" if path else err["msg"]] = None
     return "; ".join(seen) or "The configuration is not valid."
+
+
+async def _require_agents_number(
+    backend: dict[str, Any], number_id: str, workspace_id: str
+) -> None:
+    """Refuse a number that cannot dial as this agent: only one bound in the
+    agent's project can. A webhook number lives in a shared project the agent is not part
+    of, so TurnCall would refuse it anyway, with a less useful message."""
+    number = await phones.get_number(runtime.get_pool(), number_id, workspace_id)
+    if (
+        not number
+        or number.get("agent_id") != backend["agent_id"]
+        or number.get("project_id") != backend["project_id"]
+    ):
+        raise HTTPException(422, "Choose one of this agent's own phone numbers to call from.")
 
 
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:

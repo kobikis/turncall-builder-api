@@ -28,6 +28,7 @@ from .routers import (
     agents,
     ambience,
     auth,
+    campaigns,
     calls,
     evals,
     github,
@@ -154,7 +155,8 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 
 
 for _router in (
-    sessions, agents, agent_activity, phones, calls, outbound, limits, evals, knowledge,
+    sessions, agents, agent_activity, phones, calls, outbound, limits, campaigns, evals,
+    knowledge,
     takeaways,
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.

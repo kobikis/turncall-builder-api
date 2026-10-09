@@ -57,6 +57,20 @@ async def agent_calls(
     return await runtime.get_client().list_calls(b["api_key"], page, limit)
 
 
+@router.get("/agents/{agent_id}/calls/{call_id}")
+async def agent_call(
+    agent_id: str, call_id: str, ctx: AuthContext = Depends(require_member)
+) -> dict[str, Any]:
+    """One call, for a link to a call older than the list's first page (a
+    campaign target's, #67). Another agent's call is TurnCall's 404."""
+    b = await _backend_or_404(agent_id, ctx.workspace_id)
+    try:
+        data = await runtime.get_client().get_call(call_id, b["api_key"])
+    except httpx.HTTPStatusError as exc:
+        raise _turncall_http_error(exc) from exc
+    return {"success": True, "data": data}
+
+
 @router.get("/agents/{agent_id}/calls/{call_id}/transcript")
 async def agent_call_transcript(
     agent_id: str, call_id: str, ctx: AuthContext = Depends(require_member)
