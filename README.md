@@ -109,8 +109,8 @@ migrations run against. It mints a TurnCall API key and writes
 a reset — the builder cannot create agents without that key.
 
 Set `INTEGRATIONS_ENCRYPTION_KEY` once (same generator as the others) to use the
-Integrations page: workspaces then connect their own provider keys, Twilio
-account and Pipedream project there, and the keys in either `.env` become a
+Integrations page: workspaces then connect their own provider keys, carriers
+(Twilio, Telnyx, their own Asterisk) and Pipedream project there, and the keys in either `.env` become a
 fallback rather than a requirement. See
 [ADR-0023](docs/adr/0023-provider-credentials-from-the-console.md).
 

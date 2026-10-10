@@ -8,7 +8,7 @@ under a future version is worth an issue before you start.
 Versions below are planning milestones, not release tags.
 
 
-A conversational agent builder for TurnCall, modeled on Vapi Composer. The user
+A conversational agent builder for TurnCall. The user
 describes an agent in plain language; the app asks follow-up questions until the
 design is clear, generates a TurnCall agent config, displays it (editable), and
 on demand creates the agent in TurnCall and shows the events that agent's calls
@@ -113,7 +113,7 @@ store (self-contained repo, no shared-DB dependency); each generated repo is
 
 ## V3 — Management console (Agents + Phone Numbers)
 
-The builder-web becomes a Vapi-style console (ADR-0006): a sidebar with **Agents**
+The builder-web becomes a management console (ADR-0006): a sidebar with **Agents**
 and **Phone Numbers** sections; the Composer is the "new agent" path.
 
 New backend endpoints (`turncall-builder-api`), all using each agent's stored
@@ -201,6 +201,30 @@ Not built: a third app, per-tool mid-call selection, binding an end-of-call
 action's inputs to takeaway fields (which is what a *follow-up* booking would
 need), and a second integrations provider.
 
+## V6 — Engine parity (shipped)
+
+Everything the engine gained in its production-reach work (turncall#212) is
+now reachable from the console, so an agent built here is not a subset of one
+written by hand.
+
+- **Every setting reaches TurnCall.** The STT choice, LLM sampling and
+  reasoning effort, backup models and voices (`llm`/`tts.failover`),
+  pronunciations, turn-taking, the idle and max-duration guards, language and
+  the avatar are sent with the agent instead of dropped by the mapper (#70,
+  #71); an inline agent sent through call-init names its own knowledge bases
+  (#69).
+- **New providers** — AssemblyAI STT, Google Gemini as the LLM, Deepgram Flux
+  (#72).
+- **Carriers** — a workspace connects its own Telnyx account and its own
+  Asterisk, and binds numbers on either beside Twilio (#73, #84).
+- **Outbound and campaigns** — call a number from an agent, a campaign over a
+  list, and the agent's do-not-call list (#74, #75). An outbound call that would
+  lose its Connected-app tools is refused rather than placed without them (#80).
+- **Limits** — an agent's live calls, dialling rate and message rate, and
+  TurnCall's limit refusals shown in its own words (#76).
+- **Test variables** — Test Chat and Test Voice fill the agent's
+  `{{placeholders}}` the way call-init would (#88).
+
 ## Partly shipped
 
 - **GitHub integration** — push each Agent Backend to the user's own GitHub so
@@ -210,8 +234,8 @@ need), and a second integrations provider.
   run-it-yourself README, so a clone can actually start. The API half has
   shipped too: connect a fine-grained token, link an agent to a repo you already
   own, push — with divergence detected rather than overwritten. Setup in
-  [github-setup.md](./docs/github-setup.md). Not yet built: pushing
-  automatically after materialize, and the console UI.
+  [github-setup.md](./docs/github-setup.md). The console's **Code** tab drives
+  it (builder-web#3). Not yet built: pushing automatically after materialize.
   Still open: whether an editor may push the workspace's agent code to a GitHub
   account only they control.
 
