@@ -8,7 +8,7 @@ under a future version is worth an issue before you start.
 Versions below are planning milestones, not release tags.
 
 
-A conversational agent builder for TurnCall, modeled on Vapi Composer. The user
+A conversational agent builder for TurnCall. The user
 describes an agent in plain language; the app asks follow-up questions until the
 design is clear, generates a TurnCall agent config, displays it (editable), and
 on demand creates the agent in TurnCall and shows the events that agent's calls
@@ -113,7 +113,7 @@ store (self-contained repo, no shared-DB dependency); each generated repo is
 
 ## V3 — Management console (Agents + Phone Numbers)
 
-The builder-web becomes a Vapi-style console (ADR-0006): a sidebar with **Agents**
+The builder-web becomes a management console (ADR-0006): a sidebar with **Agents**
 and **Phone Numbers** sections; the Composer is the "new agent" path.
 
 New backend endpoints (`turncall-builder-api`), all using each agent's stored
