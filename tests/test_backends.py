@@ -317,7 +317,7 @@ def test_the_backend_asks_the_builder_for_a_pipedream_token():
 # --- call-init with attached apps (ADR-0018/0020, #27) ------------------------
 
 
-def _call_init(monkeypatch, tmp_path, *, builder=None, **env):
+def _call_init(monkeypatch, tmp_path, *, builder=None, request=None, **env):
     """Drive the generated /call-init, with `builder` standing in for builder-api.
 
     `builder` is called instead of the HTTP POST — None means the backend has no
@@ -342,7 +342,7 @@ def _call_init(monkeypatch, tmp_path, *, builder=None, **env):
     if builder is not None:
         monkeypatch.setitem(ns, "httpx", _FakeHttpx(builder))
 
-    body = json_mod.dumps({"payload": {"customer": {"number": "+14445556666"}}})
+    body = json_mod.dumps(request or {"payload": {"customer": {"number": "+14445556666"}}})
     ts = str(int(time.time()))
     sig = "v1=" + hmac.new(b"cisecret", f"{ts}.{body}".encode(), hashlib.sha256).hexdigest()
     return TestClient(ns["app"]).post(
@@ -1019,6 +1019,21 @@ def test_call_init_still_carries_the_caller(monkeypatch, tmp_path):
     resp = _call_init(monkeypatch, tmp_path)
 
     assert "phone number" in resp.json()["dynamic_data"]["knowledge_context"]
+
+
+def test_call_init_reads_turncalls_message_and_knows_an_outbound_call(monkeypatch, tmp_path):
+    """TurnCall sends `message`, and on a call the agent places (turncall#277)
+    the customer is the person called, not a caller."""
+    request = {
+        "message": {
+            "type": "call-init",
+            "call": {"type": "outboundPhoneCall"},
+            "customer": {"number": "+14445556666"},
+        }
+    }
+    context = _call_init(monkeypatch, tmp_path, request=request).json()["dynamic_data"]["knowledge_context"]
+
+    assert "You are calling +14445556666." in context
 
 
 def test_a_broken_timezone_does_not_fail_the_call(monkeypatch, tmp_path):

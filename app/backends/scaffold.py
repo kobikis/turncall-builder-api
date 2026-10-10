@@ -527,13 +527,15 @@ async def call_init(request: Request) -> dict:
     agent_id exactly as it always did.
     """
     raw = await _verified_body(request, CALL_INIT_SECRET)
-    payload = json.loads(raw).get("payload", {{}})
+    body = json.loads(raw)
+    # TurnCall sends the request as `message`; `payload` is the older shape.
+    payload = body.get("message") or body.get("payload") or {{}}
     caller = (payload.get("customer") or {{}}).get("number") or "unknown"
+    # On a call this agent places (turncall#277) the customer is the person called.
+    outbound = (payload.get("call") or {{}}).get("type") == "outboundPhoneCall"
+    who = "You are calling" if outbound else "The caller\'s phone number is"
     # ponytail: stub lookup — replace with your CRM/database lookup for this caller.
-    context = (
-        _now_line()
-        + f" The caller\'s phone number is {{caller}}. No CRM record loaded (stub)."
-    )
+    context = _now_line() + f" {{who}} {{caller}}. No CRM record loaded (stub)."
     agent = await _inline_agent()
     return {{
         # Exactly one of these: TurnCall ignores an inline agent when agent_id is

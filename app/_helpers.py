@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import runtime
 from .backends import phones, registry
-from .pipedream import CATALOG
+from .pipedream import CATALOG, mid_call_apps
 
 
 class _ToolShape(BaseModel):
@@ -198,7 +198,8 @@ async def _require_agents_number(
     backend: dict[str, Any], number_id: str, workspace_id: str
 ) -> None:
     """Refuse a number that cannot dial as this agent: only one bound in the
-    agent's project can. A webhook number lives in a shared project the agent is not part
+    agent's project can, and for an agent with mid-call apps only one with
+    caller-info routing. A webhook number lives in a shared project the agent is not part
     of, so TurnCall would refuse it anyway, with a less useful message."""
     number = await phones.get_number(runtime.get_pool(), number_id, workspace_id)
     if (
@@ -207,6 +208,18 @@ async def _require_agents_number(
         or number.get("project_id") != backend["project_id"]
     ):
         raise HTTPException(422, "Choose one of this agent's own phone numbers to call from.")
+    # A mid-call app's tools reach a call only through call-init (a Pipedream
+    # token lives an hour), and an outbound call runs call-init only from a
+    # number with caller-info routing (turncall#277). Any other number would
+    # call without them (#80).
+    apps = mid_call_apps((backend.get("config") or {}).get("integrations"))
+    if apps and number.get("routing_type") != "agent_call_init":
+        raise HTTPException(
+            422,
+            f"This agent uses {', '.join(apps)} during calls, and only a number set to "
+            f"\"Agent + caller info\" gives an outbound call those tools. Switch "
+            f"{number.get('e164')} to it, or call from a number that uses it.",
+        )
 
 
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:

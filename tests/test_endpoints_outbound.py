@@ -106,3 +106,38 @@ def test_a_turncall_failure_listing_the_do_not_call_list_keeps_its_status(client
     r = client.get("/agents/a1/do-not-call")
     assert r.status_code == 503
     assert r.json()["detail"] == "down"
+
+
+# An agent with a mid-call Connected app gets that app's tools only through
+# call-init (the Pipedream token lives an hour), and an outbound call runs
+# call-init only from a number with caller-info routing (turncall#277) (#80).
+MID_CALL = backend_row(config={"name": "Agent", "system_prompt": "hi", "integrations": ["slack_v2"]})
+
+
+def test_a_mid_call_app_agent_calls_from_a_caller_info_number(client, mocks):
+    mocks.registry.get_backend.return_value = MID_CALL
+    mocks.phones.get_number.return_value = {**NUMBER, "routing_type": "agent_call_init"}
+    mocks.client.place_outbound_call.return_value = {"id": "c1", "status": "queued"}
+    r = client.post("/agents/a1/calls/outbound", json={"from_number_id": "pn1", "to_number": "+15552223333"})
+    assert r.status_code == 201
+
+
+def test_a_mid_call_app_agent_is_refused_a_plain_number_naming_why(client, mocks):
+    mocks.registry.get_backend.return_value = MID_CALL
+    mocks.phones.get_number.return_value = {**NUMBER, "routing_type": "agent"}
+    r = client.post("/agents/a1/calls/outbound", json={"from_number_id": "pn1", "to_number": "+15552223333"})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "slack_v2" in detail and "caller info" in detail and "+15550001111" in detail
+    mocks.client.place_outbound_call.assert_not_awaited()
+
+
+def test_an_end_of_call_only_app_needs_no_caller_info_number(client, mocks):
+    end_of_call = {"app": "slack_v2", "call_ended": {"action": "slack_v2-post-message", "summary_arg": "text"}}
+    mocks.registry.get_backend.return_value = backend_row(
+        config={"name": "Agent", "system_prompt": "hi", "integrations": [end_of_call]}
+    )
+    mocks.phones.get_number.return_value = {**NUMBER, "routing_type": "agent"}
+    mocks.client.place_outbound_call.return_value = {"id": "c1", "status": "queued"}
+    r = client.post("/agents/a1/calls/outbound", json={"from_number_id": "pn1", "to_number": "+15552223333"})
+    assert r.status_code == 201

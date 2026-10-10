@@ -107,3 +107,15 @@ def test_one_call_is_read_for_a_targets_link(client, agent):
     assert r.status_code == 200
     assert r.json()["data"]["id"] == "call-1"
     agent.client.get_call.assert_awaited_once_with("call-1", "tc_key")
+
+
+def test_a_mid_call_app_agent_campaigns_only_from_a_caller_info_number(client, agent):
+    """Its calls would otherwise all run without the app's tools (#80)."""
+    agent.registry.get_backend.return_value = backend_row(
+        config={"name": "Agent", "system_prompt": "hi", "integrations": ["slack_v2"]}
+    )
+    agent.phones.get_number.return_value = {**NUMBER, "routing_type": "agent"}
+    r = client.post("/agents/a1/campaigns", json=CAMPAIGN)
+    assert r.status_code == 422
+    assert "caller info" in r.json()["detail"]
+    agent.client.create_campaign.assert_not_awaited()
