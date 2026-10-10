@@ -25,7 +25,7 @@ from .. import (
     workspace_skills,
 )
 from .._helpers import (
-    _agent_kb,
+    _upload_document,
     _backend_view,
     _normalize_config,
     _validate_agent_config,
@@ -98,16 +98,13 @@ async def _session_or_404(sid: str, workspace_id: str) -> dict[str, Any]:
 async def _agent_kb_doc_names(agent_id: str, workspace_id: str) -> list[str]:
     """Filenames in the agent's knowledge base, so the builder knows the agent
     already has that content. Best-effort — never blocks a chat turn."""
-    from .knowledge import _agent_kb
+    from .knowledge import _documents
 
     try:
         b = await registry.get_backend(runtime.get_pool(), agent_id, workspace_id)
         if not b:
             return []
-        kb = await _agent_kb(b)
-        if not kb:
-            return []
-        docs = await runtime.get_client().list_documents(kb["id"], b["api_key"])
+        docs = await _documents(b["agent_id"], b["api_key"])
         return [d["filename"] for d in docs if d.get("filename")]
     except Exception:
         return []
@@ -612,26 +609,18 @@ async def _forward_staged_documents(
     if not docs:
         return {"uploaded": [], "failed": []}
 
-    try:
-        kb = await _agent_kb(agent_id, api_key, create=True)
-    except Exception:  # noqa: BLE001
-        logger.exception("staged docs: no knowledge base for agent %s", agent_id)
-        return {"uploaded": [], "failed": [d["name"] for d in docs]}
-    if kb is None:  # create=True always returns one; belt and braces
-        return {"uploaded": [], "failed": [d["name"] for d in docs]}
-
-    client = runtime.get_client()
     uploaded: list[str] = []
     failed: list[str] = []
     for doc in docs:
         name = doc["name"]
         try:
-            await client.upload_document(
-                kb["id"],
+            # Each in a knowledge base of its own, read whole (ADR-0024).
+            await _upload_document(
+                agent_id,
+                api_key,
                 name,
                 session_docs.read_raw(sid, name),
                 mimetypes.guess_type(name)[0] or "application/octet-stream",
-                api_key,
             )
             uploaded.append(name)
         except Exception:  # noqa: BLE001

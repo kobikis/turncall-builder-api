@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import secrets
 from typing import Any
 
 import httpx
@@ -13,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from . import runtime
 from .backends import phones, registry
 from .pipedream import CATALOG, mid_call_apps
+
+logger = logging.getLogger(__name__)
 
 
 class _ToolShape(BaseModel):
@@ -316,26 +320,59 @@ async def _backend_or_404(
 KNOWLEDGE_KB_NAME = "builder-knowledge"
 
 
-async def _agent_kb(
-    agent_id: str, api_key: str, create: bool = False
-) -> dict[str, Any] | None:
-    """Resolve the agent's implicit Agent Knowledge KB (ADR-0009). The agent's
-    project holds at most this one KB; created + linked on first upload.
+def _is_builder_kb(kb: dict[str, Any]) -> bool:
+    """One of the agent's document knowledge bases (ADR-0024): the original
+    single one, or one made per document since."""
+    name = kb.get("name") or ""
+    return name == KNOWLEDGE_KB_NAME or name.startswith(f"{KNOWLEDGE_KB_NAME}-")
 
-    Shared rather than private to the knowledge router because Create also has
-    to reach it, to forward the documents staged on the Session.
-    """
+
+async def _agent_kbs(api_key: str) -> list[dict[str, Any]]:
+    """The agent's document knowledge bases. Its project holds only its own,
+    so listing them is the lookup — no registry column (ADR-0009)."""
+    kbs = await runtime.get_client().list_knowledge_bases(api_key)
+    return [kb for kb in kbs if _is_builder_kb(kb)]
+
+
+async def _upload_document(
+    agent_id: str,
+    api_key: str,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    *,
+    mode: str = "prompt",
+    top_k: int | None = None,
+    tool_description: str | None = None,
+) -> dict[str, Any]:
+    """A document in a knowledge base of its own, linked in `mode` (ADR-0024):
+    TurnCall sets how an agent reads knowledge per link, so a mode per
+    document needs a knowledge base per document. One that fails to upload
+    takes its empty knowledge base with it."""
     client = runtime.get_client()
-    for kb in await client.list_knowledge_bases(api_key):
-        if kb["name"] == KNOWLEDGE_KB_NAME:
-            return kb
-    if not create:
-        return None
-    kb = await client.create_knowledge_base(KNOWLEDGE_KB_NAME, api_key)
-    # prompt mode: builder KBs are small (menus, FAQs), so inject the full text
-    # into the agent's prompt — always present, never missed by a retrieval query.
-    await client.link_knowledge_base(agent_id, kb["id"], api_key, mode="prompt")
-    return kb
+    name = f"{KNOWLEDGE_KB_NAME}-{secrets.token_hex(4)}"
+    kb = await client.create_knowledge_base(name, api_key)
+    try:
+        await client.link_knowledge_base(
+            agent_id, kb["id"], api_key, mode, top_k=top_k, tool_description=tool_description
+        )
+        return await client.upload_document(kb["id"], filename, content, content_type, api_key)
+    except Exception:
+        await _drop_kb(agent_id, kb["id"], api_key)
+        raise
+
+
+async def _drop_kb(agent_id: str, kb_id: str, api_key: str) -> None:
+    """Unlink and delete a document's knowledge base, best-effort: TurnCall
+    refuses to delete one an agent still links."""
+    client = runtime.get_client()
+    try:
+        await client.unlink_knowledge_base(agent_id, kb_id, api_key)
+        await client.delete_knowledge_base(kb_id, api_key)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "knowledge base %s left behind for agent %s", kb_id, agent_id, exc_info=True
+        )
 
 
 def ranged_audio(audio: bytes, request: Request, media_type: str) -> Response:
