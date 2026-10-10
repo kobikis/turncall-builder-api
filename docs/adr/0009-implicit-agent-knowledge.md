@@ -1,5 +1,8 @@
 # One implicit knowledge base per agent (Agent Knowledge)
 
+> Superseded in part by ADR-0024: each document now has a knowledge base, and
+> a retrieval mode, of its own.
+
 TurnCall's knowledge model is three-level: knowledge bases contain documents,
 and agents link to KBs with a retrieval mode (`prompt`/`auto`/`tool`), top_k,
 and threshold. The Console's Knowledge tab exposes none of that: each agent

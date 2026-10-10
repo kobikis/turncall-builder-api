@@ -466,6 +466,11 @@ class TurnCallClient:
             json=body,
         )
 
+    async def delete_knowledge_base(self, kb_id: str, api_key: str) -> None:
+        await self._request(
+            "DELETE", f"/v1/knowledge-bases/{kb_id}", api_key=api_key, extract="none"
+        )
+
     async def unlink_knowledge_base(self, agent_id: str, kb_id: str, api_key: str) -> None:
         await self._request(
             "DELETE",

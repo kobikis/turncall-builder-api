@@ -148,20 +148,46 @@ def test_list_documents_with_kb(client, mocks):
     assert r.json()["data"]["documents"][0]["id"] == "d1"
 
 
-def test_upload_document_creates_kb_on_first_upload(client, mocks):
+def test_each_upload_gets_a_knowledge_base_of_its_own(client, mocks):
+    """TurnCall sets how an agent reads knowledge per link, so a mode per
+    document needs a knowledge base per document (ADR-0024)."""
     mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = []  # triggers create+link
-    mocks.client.create_knowledge_base.return_value = KB
-    mocks.client.upload_document.return_value = {"id": "d1", "status": "ready"}
+    mocks.client.create_knowledge_base.return_value = {"id": "kb-9", "name": "builder-knowledge-ab12cd34"}
+    mocks.client.upload_document.return_value = {"id": "d1", "status": "processing"}
     r = client.post(
         "/agents/a1/knowledge/documents",
         files={"file": ("f.txt", b"hello", "text/plain")},
     )
     assert r.status_code == 200
-    mocks.client.create_knowledge_base.assert_awaited_once()
-    mocks.client.link_knowledge_base.assert_awaited_once()
-    # Linked in prompt mode so small docs are always in the agent's context.
-    assert mocks.client.link_knowledge_base.await_args.kwargs.get("mode") == "prompt"
+    assert mocks.client.create_knowledge_base.await_args.args[0].startswith("builder-knowledge-")
+    link = mocks.client.link_knowledge_base.await_args
+    assert link.args[:2] == ("a1", "kb-9")
+    assert link.args[3] == "prompt"  # whole, as every document was before modes
+    assert mocks.client.upload_document.await_args.args[0] == "kb-9"
+
+
+def test_an_upload_can_choose_its_mode(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.create_knowledge_base.return_value = {"id": "kb-9", "name": "builder-knowledge-x"}
+    client.post(
+        "/agents/a1/knowledge/documents",
+        files={"file": ("menu.pdf", b"%PDF", "application/pdf")},
+        data={"mode": "auto"},
+    )
+    assert mocks.client.link_knowledge_base.await_args.args[3] == "auto"
+
+
+def test_a_failed_upload_takes_its_empty_knowledge_base_with_it(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.create_knowledge_base.return_value = {"id": "kb-9", "name": "builder-knowledge-x"}
+    mocks.client.upload_document.side_effect = _http_status_error(415, "unsupported")
+    r = client.post(
+        "/agents/a1/knowledge/documents",
+        files={"file": ("f.bin", b"x", "application/octet-stream")},
+    )
+    assert r.status_code == 415
+    mocks.client.unlink_knowledge_base.assert_awaited_once()
+    assert mocks.client.delete_knowledge_base.await_args.args[0] == "kb-9"
 
 
 def test_upload_document_surfaces_turncall_error(client, mocks):
@@ -545,72 +571,96 @@ def test_webrtc_connect_refuses_a_malformed_variables_header(client, mocks, head
     mocks.client.webrtc_connect.assert_not_awaited()
 
 
-# ---- knowledge retrieval mode -----------------------------------------------
+# ---- knowledge retrieval mode, per document (ADR-0024) ----------------------
 
-PROMPT_LINK = {"knowledge_base_id": "kb-1", "mode": "prompt", "top_k": 5, "tool_description": None}
-
-
-def test_list_documents_says_how_the_agent_reads_them(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row()
-    mocks.client.list_knowledge_bases.return_value = [KB]
-    mocks.client.list_documents.return_value = []
-    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
-    r = client.get("/agents/a1/knowledge/documents")
-    assert r.json()["data"]["retrieval"] == {"mode": "prompt", "top_k": 5, "tool_description": None}
+MENU_KB = {"id": "kb-1", "name": "builder-knowledge"}
+FAQ_KB = {"id": "kb-2", "name": "builder-knowledge-ab12cd34"}
+OTHER_KB = {"id": "kb-x", "name": "something-else"}
 
 
-def test_retrieval_relinks_in_the_new_mode(client, mocks):
+def _two_documents(mocks, menu_mode="prompt", faq_mode="auto"):
     mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = [KB]
-    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
-    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto", "top_k": 3})
+    mocks.client.list_knowledge_bases.return_value = [MENU_KB, FAQ_KB, OTHER_KB]
+    mocks.client.list_documents.side_effect = lambda kb_id, _key: {
+        "kb-1": [{"id": "d-menu", "knowledge_base_id": "kb-1", "filename": "menu.pdf"}],
+        "kb-2": [{"id": "d-faq", "knowledge_base_id": "kb-2", "filename": "faq.md"}],
+    }[kb_id]
+    mocks.client.list_agent_knowledge_bases.return_value = [
+        {"knowledge_base_id": "kb-1", "mode": menu_mode, "top_k": 5, "tool_description": None},
+        {"knowledge_base_id": "kb-2", "mode": faq_mode, "top_k": 5, "tool_description": None},
+    ]
+
+
+def test_each_document_says_how_the_agent_reads_it(client, mocks):
+    _two_documents(mocks)
+    docs = client.get("/agents/a1/knowledge/documents").json()["data"]["documents"]
+    assert {d["filename"]: d["retrieval"]["mode"] for d in docs} == {
+        "menu.pdf": "prompt",
+        "faq.md": "auto",
+    }
+
+
+def test_one_documents_mode_changes_and_not_the_others(client, mocks):
+    _two_documents(mocks)
+    r = client.put("/agents/a1/knowledge/documents/d-menu/retrieval", json={"mode": "auto", "top_k": 3})
     assert r.status_code == 200, r.text
-    assert r.json()["data"]["mode"] == "auto"
-    mocks.client.unlink_knowledge_base.assert_awaited_once()
+    assert mocks.client.unlink_knowledge_base.await_args.args[:2] == ("a1", "kb-1")
     link = mocks.client.link_knowledge_base.await_args
-    assert link.args[3] == "auto"
-    assert link.kwargs["top_k"] == 3
+    assert (link.args[1], link.args[3], link.kwargs["top_k"]) == ("kb-1", "auto", 3)
 
 
-def test_retrieval_unchanged_touches_nothing(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = [KB]
-    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
-    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "prompt"})
+def test_an_unchanged_mode_touches_nothing(client, mocks):
+    _two_documents(mocks)
+    r = client.put("/agents/a1/knowledge/documents/d-faq/retrieval", json={"mode": "auto"})
     assert r.status_code == 200
     mocks.client.unlink_knowledge_base.assert_not_awaited()
     mocks.client.link_knowledge_base.assert_not_awaited()
 
 
 def test_tool_mode_gets_a_description_when_none_is_given(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = [KB]
-    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
-    client.put("/agents/a1/knowledge/retrieval", json={"mode": "tool"})
+    _two_documents(mocks)
+    client.put("/agents/a1/knowledge/documents/d-menu/retrieval", json={"mode": "tool"})
     assert mocks.client.link_knowledge_base.await_args.kwargs["tool_description"]
 
 
 def test_a_refused_relink_puts_the_old_link_back(client, mocks):
     """TurnCall has no update for a link: unlink, then link. If the new link
-    is refused the agent must not be left with no knowledge at all."""
-    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = [KB]
-    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    is refused the document must not be left unread."""
+    _two_documents(mocks)
     mocks.client.link_knowledge_base.side_effect = [_http_status_error(422, "no"), None]
-    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto"})
+    r = client.put("/agents/a1/knowledge/documents/d-menu/retrieval", json={"mode": "auto"})
     assert r.status_code == 422
     restored = mocks.client.link_knowledge_base.await_args_list[-1]
-    assert restored.args[3] == "prompt"
+    assert (restored.args[1], restored.args[3]) == ("kb-1", "prompt")
 
 
-def test_retrieval_without_documents_is_409(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    mocks.client.list_knowledge_bases.return_value = []
-    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto"})
-    assert r.status_code == 409
-    mocks.client.link_knowledge_base.assert_not_awaited()
+def test_mode_of_an_unknown_document_is_404(client, mocks):
+    _two_documents(mocks)
+    r = client.put("/agents/a1/knowledge/documents/nope/retrieval", json={"mode": "auto"})
+    assert r.status_code == 404
 
 
 def test_retrieval_refuses_an_unknown_mode(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
-    assert client.put("/agents/a1/knowledge/retrieval", json={"mode": "magic"}).status_code == 422
+    _two_documents(mocks)
+    r = client.put("/agents/a1/knowledge/documents/d-menu/retrieval", json={"mode": "magic"})
+    assert r.status_code == 422
+
+
+def test_deleting_a_document_deletes_its_knowledge_base(client, mocks):
+    _two_documents(mocks)
+    r = client.delete("/agents/a1/knowledge/documents/d-faq")
+    assert r.status_code == 200
+    assert mocks.client.delete_document.await_args.args[:2] == ("kb-2", "d-faq")
+    assert mocks.client.delete_knowledge_base.await_args.args[0] == "kb-2"
+
+
+def test_search_covers_every_document_best_first(client, mocks):
+    _two_documents(mocks)
+    mocks.client.search_knowledge_base.side_effect = lambda kb_id, _q, _key: {
+        "kb-1": {"results": [{"content": "Salmon roll", "similarity": 0.4}]},
+        "kb-2": {"results": [{"content": "We open at 10", "similarity": 0.8}]},
+    }[kb_id]
+    r = client.post("/agents/a1/knowledge/search", json={"query": "hours"})
+    assert [x["content"] for x in r.json()["data"]["results"]] == ["We open at 10", "Salmon roll"]
+    # Only the agent's own document knowledge bases are searched.
+    assert {c.args[0] for c in mocks.client.search_knowledge_base.await_args_list} == {"kb-1", "kb-2"}
