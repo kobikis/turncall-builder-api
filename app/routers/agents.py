@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +18,7 @@ from .._helpers import (
     _normalize_config,
     _turncall_http_error,
     _validate_agent_config,
+    check_variables,
 )
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -172,6 +175,33 @@ async def delete_agent(
 # caller point TurnCall's leg at an arbitrary target instead of this agent.
 _CLIENT_CONTROLLED = ("agent_id", "server_url", "server_url_secret")
 
+# The browser's transport sends the offer from a prebuilt Request whose body it
+# replaces with the SDP alone, so a test call's `{{variables}}` ride in a
+# header: URL-encoded JSON, since a header is ASCII and a value may not be.
+VARIABLES_HEADER = "X-Call-Variables"
+
+
+def _header_variables(request: Request) -> dict[str, str] | None:
+    """The test call's variables, or None when the header is absent. One that
+    is not a flat, bounded JSON object is the caller's to fix: 400."""
+    raw = request.headers.get(VARIABLES_HEADER)
+    if raw is None:
+        return None
+    try:
+        variables = json.loads(unquote(raw))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"{VARIABLES_HEADER} must be URL-encoded JSON"
+        ) from exc
+    if not isinstance(variables, dict):
+        raise HTTPException(
+            status_code=400, detail=f"{VARIABLES_HEADER} must be a JSON object"
+        )
+    try:
+        return check_variables(variables)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 def _pipeline_start_failure(response: httpx.Response) -> tuple[str, list[str]] | None:
     """TurnCall's reason when the agent's pipeline could not start, plus the
@@ -244,6 +274,9 @@ async def agent_webrtc_connect(
         # credentials, which is what it did before this existed.
         routing = {"agent_id": agent_id}
     rd.update(routing)
+    variables = _header_variables(request)
+    if variables:
+        rd["variables"] = variables
     body["request_data"] = rd
     body.update(routing)
     try:
