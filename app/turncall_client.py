@@ -442,16 +442,36 @@ class TurnCallClient:
         )
 
     async def link_knowledge_base(
-        self, agent_id: str, kb_id: str, api_key: str, mode: str = "auto"
+        self,
+        agent_id: str,
+        kb_id: str,
+        api_key: str,
+        mode: str = "auto",
+        *,
+        top_k: int | None = None,
+        tool_description: str | None = None,
     ) -> None:
         """Attach the KB to the agent. Default retrieval mode is auto; the builder
-        uses prompt so a small doc set is always in the agent's context."""
+        links prompt on first upload, and the console can change it after."""
+        body: dict[str, Any] = {"knowledge_base_id": kb_id, "mode": mode}
+        if top_k is not None:
+            body["top_k"] = top_k
+        if tool_description:
+            body["tool_description"] = tool_description
         await self._request(
             "POST",
             f"/v1/agents/{agent_id}/knowledge-bases",
             api_key=api_key,
             extract="none",
-            json={"knowledge_base_id": kb_id, "mode": mode},
+            json=body,
+        )
+
+    async def unlink_knowledge_base(self, agent_id: str, kb_id: str, api_key: str) -> None:
+        await self._request(
+            "DELETE",
+            f"/v1/agents/{agent_id}/knowledge-bases/{kb_id}",
+            api_key=api_key,
+            extract="none",
         )
 
     async def list_agent_knowledge_bases(

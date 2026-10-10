@@ -543,3 +543,74 @@ def test_webrtc_connect_refuses_a_malformed_variables_header(client, mocks, head
     )
     assert r.status_code == 400
     mocks.client.webrtc_connect.assert_not_awaited()
+
+
+# ---- knowledge retrieval mode -----------------------------------------------
+
+PROMPT_LINK = {"knowledge_base_id": "kb-1", "mode": "prompt", "top_k": 5, "tool_description": None}
+
+
+def test_list_documents_says_how_the_agent_reads_them(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.list_knowledge_bases.return_value = [KB]
+    mocks.client.list_documents.return_value = []
+    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    r = client.get("/agents/a1/knowledge/documents")
+    assert r.json()["data"]["retrieval"] == {"mode": "prompt", "top_k": 5, "tool_description": None}
+
+
+def test_retrieval_relinks_in_the_new_mode(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.list_knowledge_bases.return_value = [KB]
+    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto", "top_k": 3})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["mode"] == "auto"
+    mocks.client.unlink_knowledge_base.assert_awaited_once()
+    link = mocks.client.link_knowledge_base.await_args
+    assert link.args[3] == "auto"
+    assert link.kwargs["top_k"] == 3
+
+
+def test_retrieval_unchanged_touches_nothing(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.list_knowledge_bases.return_value = [KB]
+    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "prompt"})
+    assert r.status_code == 200
+    mocks.client.unlink_knowledge_base.assert_not_awaited()
+    mocks.client.link_knowledge_base.assert_not_awaited()
+
+
+def test_tool_mode_gets_a_description_when_none_is_given(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.list_knowledge_bases.return_value = [KB]
+    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    client.put("/agents/a1/knowledge/retrieval", json={"mode": "tool"})
+    assert mocks.client.link_knowledge_base.await_args.kwargs["tool_description"]
+
+
+def test_a_refused_relink_puts_the_old_link_back(client, mocks):
+    """TurnCall has no update for a link: unlink, then link. If the new link
+    is refused the agent must not be left with no knowledge at all."""
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.list_knowledge_bases.return_value = [KB]
+    mocks.client.list_agent_knowledge_bases.return_value = [PROMPT_LINK]
+    mocks.client.link_knowledge_base.side_effect = [_http_status_error(422, "no"), None]
+    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto"})
+    assert r.status_code == 422
+    restored = mocks.client.link_knowledge_base.await_args_list[-1]
+    assert restored.args[3] == "prompt"
+
+
+def test_retrieval_without_documents_is_409(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.list_knowledge_bases.return_value = []
+    r = client.put("/agents/a1/knowledge/retrieval", json={"mode": "auto"})
+    assert r.status_code == 409
+    mocks.client.link_knowledge_base.assert_not_awaited()
+
+
+def test_retrieval_refuses_an_unknown_mode(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    assert client.put("/agents/a1/knowledge/retrieval", json={"mode": "magic"}).status_code == 422
