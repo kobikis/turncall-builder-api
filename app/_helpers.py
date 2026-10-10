@@ -222,6 +222,29 @@ async def _require_agents_number(
         )
 
 
+# TurnCall's bounds on a conversation's `{{variables}}` (turncall#281/#282),
+# checked here too so a test that crosses them is told which, rather than a
+# proxied 4xx whose upstream body is never echoed to the browser.
+MAX_VARIABLES = 50
+MAX_VARIABLES_CHARS = 4_096
+
+
+def check_variables(variables: dict[str, Any]) -> dict[str, str]:
+    """A test's variables as strings, or ValueError naming what is wrong."""
+    if not all(isinstance(v, str | int | float | bool) for v in variables.values()):
+        raise ValueError("variables must be strings, numbers or booleans")
+    as_text = {str(k): str(v) for k, v in variables.items()}
+    if len(as_text) > MAX_VARIABLES:
+        raise ValueError(f"at most {MAX_VARIABLES} variables, got {len(as_text)}")
+    size = sum(len(k) + len(v) for k, v in as_text.items())
+    if size > MAX_VARIABLES_CHARS:
+        raise ValueError(
+            f"variables total {size} characters, names included; "
+            f"the most is {MAX_VARIABLES_CHARS}"
+        )
+    return as_text
+
+
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     """Translate a TurnCall HTTPStatusError into an HTTPException carrying its
     message, so every proxy endpoint surfaces TurnCall failures identically.

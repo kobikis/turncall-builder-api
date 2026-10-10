@@ -1,6 +1,9 @@
 """Calls, knowledge, takeaways, credentials endpoints (per-agent proxies)."""
 
+import json
+
 import httpx
+import pytest
 from app.backends import registry
 
 from tests.conftest import backend_row
@@ -477,3 +480,66 @@ def test_unreachable_turncall_is_a_502_not_a_500(client, mocks):
     assert r.status_code == 502
     assert "unreachable" in r.json()["detail"].lower()
     assert client.get("/agents/a1/calls/c1/events").status_code == 502
+
+
+# ---- test variables: the agent's {{placeholders}} on a test chat or call ----
+
+
+def test_test_chat_forwards_variables(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.send_chat.return_value = {"reply": "hi Ada", "session_id": "s1"}
+    r = client.post(
+        "/agents/a1/chat", json={"message": "hi", "variables": {"name": "Ada"}}
+    )
+    assert r.status_code == 200
+    assert mocks.client.send_chat.await_args.kwargs["variables"] == {"name": "Ada"}
+
+
+def test_test_chat_refuses_variables_past_turncalls_bound(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    too_many = {f"v{n}": "x" for n in range(51)}
+    r = client.post("/agents/a1/chat", json={"message": "hi", "variables": too_many})
+    assert r.status_code == 422
+    assert "at most 50" in r.text
+    mocks.client.send_chat.assert_not_awaited()
+
+
+def test_webrtc_connect_carries_the_header_variables_to_turncall(client, mocks):
+    """The transport replaces the offer's body with the SDP alone, so a test
+    call's variables come in a header — URL-encoded JSON, since a header is
+    ASCII and an address need not be."""
+    from urllib.parse import quote
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.webrtc_connect.return_value = {"sdp": "answer"}
+    variables = {"address": "רחוב הרצל 12", "vip": True}
+    r = client.post(
+        "/agents/a1/webrtc/connect",
+        json={"sdp": "o"},
+        headers={"X-Call-Variables": quote(json.dumps(variables))},
+    )
+    assert r.status_code == 200
+    fwd_body = mocks.client.webrtc_connect.await_args.args[0]
+    assert fwd_body["request_data"]["variables"] == {
+        "address": "רחוב הרצל 12",
+        "vip": "True",
+    }
+
+
+def test_webrtc_connect_without_the_header_sends_no_variables(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.client.webrtc_connect.return_value = {"sdp": "answer"}
+    client.post("/agents/a1/webrtc/connect", json={"sdp": "o"})
+    assert "variables" not in mocks.client.webrtc_connect.await_args.args[0]["request_data"]
+
+
+@pytest.mark.parametrize("header", ["not json", "%5B1%5D", "%7B%22a%22%3A%7B%7D%7D"])
+def test_webrtc_connect_refuses_a_malformed_variables_header(client, mocks, header):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    r = client.post(
+        "/agents/a1/webrtc/connect",
+        json={"sdp": "o"},
+        headers={"X-Call-Variables": header},
+    )
+    assert r.status_code == 400
+    mocks.client.webrtc_connect.assert_not_awaited()

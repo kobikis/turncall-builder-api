@@ -7,10 +7,15 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from .. import runtime
-from .._helpers import _backend_or_404, _turncall_http_error, ranged_audio
+from .._helpers import (
+    _backend_or_404,
+    _turncall_http_error,
+    check_variables,
+    ranged_audio,
+)
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
@@ -20,6 +25,14 @@ class TestChat(BaseModel):
     message: str
     session_id: str | None = None
     customer_number: str = "+15550000000"
+    # The agent's `{{placeholders}}`, as call-init would fill them on a real
+    # call. TurnCall bounds them and keeps them on the session.
+    variables: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("variables")
+    @classmethod
+    def _bounded(cls, value: dict[str, str]) -> dict[str, str]:
+        return check_variables(value)
 
 
 @router.post("/agents/{agent_id}/chat")
@@ -36,6 +49,7 @@ async def agent_test_chat(
             b["api_key"],
             session_id=body.session_id,
             customer_number=body.customer_number,
+            variables=body.variables,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:

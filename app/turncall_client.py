@@ -316,9 +316,11 @@ class TurnCallClient:
         *,
         session_id: str | None = None,
         customer_number: str = "+15550000000",
+        variables: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send a message to the agent over the text Chat API (for in-console
-        testing). Threads session_id to keep the test conversation going."""
+        testing). Threads session_id to keep the test conversation going;
+        `variables` fill the agent's `{{placeholders}}` (turncall#281)."""
         body: dict[str, Any] = {
             "agent_id": agent_id,
             "message": message,
@@ -328,6 +330,8 @@ class TurnCallClient:
         }
         if session_id:
             body["session_id"] = session_id
+        if variables:
+            body["variables"] = variables
         return await self._request("POST", "/v1/chat", api_key=api_key, json=body)
 
     # ------------------------------------------------------------- evals
