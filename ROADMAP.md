@@ -227,13 +227,15 @@ written by hand.
 
 ## Kubernetes (built, not yet merged)
 
-- **One Helm release for everything** — `charts/turncall-stack` installs TurnCall
+- **One Helm release for everything** — the chart in
+  [turncall-charts](https://github.com/kobikis/turncall-charts) installs TurnCall
   (with its own Postgres and Redis), builder-api and the console. Agent Backends
   run as Deployments named for the agent, on one shared runtime image
   (ADR-0025); the console reads a backend through builder-api instead of its
-  host port. `global.publicBaseUrl` is TurnCall's public URL for both halves.
-  For development: single-pod data stores, dev secrets, local image tags.
-  Production is two releases from each chart's `values-production.yaml`.
+  host port. `publicBaseUrl` is TurnCall's public URL for both halves.
+  `values-local.yaml` is for development (single-pod data stores, dev
+  secrets, local image tags); `values-production.yaml` is the production
+  starting point.
 
 ## Partly shipped
 

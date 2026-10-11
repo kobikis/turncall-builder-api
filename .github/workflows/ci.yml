@@ -46,22 +46,6 @@ jobs:
       - run: pip install ruff==0.15.18
       - run: ruff check app/ tests/
 
-  # The Helm chart (ADR-0025): a template error fails here, not at an install.
-  helm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: v4.3.0
-      # turncall-stack is not linted here: it pulls TurnCall's chart from a
-      # sibling checkout of a private repo.
-      - run: helm lint --strict charts/turncall-builder -f charts/turncall-builder/ci/values.yaml
-      - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/ci/values.yaml
-      - run: helm lint --strict charts/turncall-builder -f charts/turncall-builder/values-production.yaml
-      - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/values-production.yaml
-      - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/ci/values.yaml --set 'imagePullSecrets[0].name=ghcr' --set ingress.enabled=true
-
   test:
     runs-on: ubuntu-latest
     services:
