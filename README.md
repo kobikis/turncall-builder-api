@@ -141,6 +141,12 @@ one chart for TurnCall and, with `builder.enabled`, builder-api and the console
 or a production starting point (`values-production.yaml`). Its README has the
 install.
 
+This repo publishes two images to ghcr.io (amd64 + arm64,
+`.github/workflows/publish.yml`): `turncall-builder-api` and
+`turncall-agent-runtime`. A merge to `main` publishes `:main` and
+`:sha-<commit>`; a release (`gh release create v1.2.3 --generate-notes`)
+publishes `:1.2.3`, `:1.2` and `:latest`.
+
 What this repo contributes to it:
 
 - **The Kubernetes runtime for Agent Backends** (ADR-0025, `BACKEND_RUNTIME=kubernetes`,
