@@ -1,6 +1,6 @@
 TurnCall and the builder are installing in {{ .Release.Namespace }}.
 
-  kubectl -n {{ .Release.Namespace }} get pods      # the two TurnCall workers restart ~twice on first install
+  kubectl -n {{ .Release.Namespace }} get pods
 
 The console (log in as guest@turncall.local / guest after seeding it):
 
