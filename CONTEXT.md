@@ -158,7 +158,8 @@ _Avoid_: schema (ambiguous with the full TurnCall schema)
 The generated, dockerized, per-agent backend service — one per created agent.
 It owns that agent's backend logic: custom tool webhooks, its `/events`
 receiver + event store, and any custom endpoints. Lives in its own generated
-repo, run as its own docker compose.
+repo, run as its own docker compose — or, on Kubernetes, as its own
+Deployment and Service on a shared runtime image (ADR-0025).
 _Avoid_: tool service, sidecar, microservice
 
 **Scaffold**:

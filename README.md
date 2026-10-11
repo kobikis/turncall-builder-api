@@ -133,6 +133,27 @@ Refuses to run when `TURNCALL_ENV=production`.
 
 > After a TurnCall reset, re-provision the platform key + DBs with `make turncall-setup`.
 
+## Kubernetes
+
+The Helm chart is in [turncall-charts](https://github.com/kobikis/turncall-charts):
+one chart for TurnCall and, with `builder.enabled`, builder-api and the console
+— everything on a laptop (`values-local.yaml`, with its own Postgres and Redis)
+or a production starting point (`values-production.yaml`). Its README has the
+install.
+
+What this repo contributes to it:
+
+- **The Kubernetes runtime for Agent Backends** (ADR-0025, `BACKEND_RUNTIME=kubernetes`,
+  which the chart sets): each backend is a Deployment named for its agent and a
+  Service, applied through the API server with the pod's service account
+  instead of `docker compose`.
+- **`agent-runtime/`**: the one image every backend runs, its code mounted from
+  a ConfigMap — nothing is built in the cluster.
+- **`python -m app.ensure_database`**: creates the builder's database on first
+  start, where there is no `createdb` to exec.
+- **The console reads a backend through this API**
+  (`/agents/{id}/backend/{events|automations}`), never its host port.
+
 ## Contributing
 
 Bug fixes and docs: open a PR. Features: open an issue first.

@@ -1,6 +1,8 @@
 """Agent endpoints: list, get, create saga, update, start, delete."""
 
 
+import httpx
+
 from tests.conftest import backend_row
 
 
@@ -207,3 +209,53 @@ def test_update_agent_surfaces_turncalls_refusal(client, mocks):
     assert r.status_code == 422
     assert "config.s2s.delegation: Value error, s2s.delegation in responses mode needs a model" in r.text
     mocks.registry.update_config.assert_not_called()
+
+
+# ---- the backend's feeds, relayed (ADR-0025) ---------------------------------
+
+
+def _relay_to(monkeypatch, handler):
+    from app.routers import agents as agents_router
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        agents_router.httpx, "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
+
+
+def test_backend_feed_relays_through_the_api(client, mocks, monkeypatch):
+    mocks.registry.get_backend.return_value = backend_row()
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"data": {"events": [{"event": "call.ended"}]}})
+
+    _relay_to(monkeypatch, handler)
+    r = client.get("/agents/a1/backend/events")
+    assert r.status_code == 200
+    assert r.json()["data"]["events"][0]["event"] == "call.ended"
+    assert seen == ["http://host.docker.internal:9001/events"]  # registry.backend_url
+
+
+def test_backend_feed_refuses_other_paths(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    assert client.get("/agents/a1/backend/call-init").status_code == 422
+
+
+def test_backend_feed_unreachable_is_502(client, mocks, monkeypatch):
+    mocks.registry.get_backend.return_value = backend_row()
+
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    _relay_to(monkeypatch, handler)
+    assert client.get("/agents/a1/backend/events").status_code == 502
+
+
+def test_browser_url_is_the_relay_not_a_host_port(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.generator.running_container_names.return_value = set()
+    r = client.get("/agents/a1")
+    assert r.json()["data"]["backend"]["browser_url"] == "/agents/a1/backend"

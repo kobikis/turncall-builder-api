@@ -26,3 +26,6 @@ own, edit, and deploy independently. Trade-offs accepted:
   flow); teardown is manual.
 
 Supersedes the V1-C plan's "builder hosts one shared events/tools endpoint".
+
+On Kubernetes, where there is no Docker socket, ADR-0025 runs the same
+backends as Deployments instead; this ADR still holds under docker compose.

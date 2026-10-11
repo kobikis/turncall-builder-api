@@ -499,7 +499,7 @@ async def create_agent(
             "data": {
                 "agent_id": sess["agent_id"],
                 "created": False,
-                "backend": _backend_view(b["port"], b["status"]) if b else None,
+                "backend": _backend_view(sess["agent_id"], b["port"], b["status"]) if b else None,
                 "knowledge": knowledge,
                 "turncall": {"project_id": b["project_id"], "api_key": b["api_key"]}
                 if b
@@ -684,7 +684,7 @@ async def _generate_backend(
             row.get("call_init_secret") or "",
         )
     )
-    return _backend_view(port, "generating")
+    return _backend_view(agent_id, port, "generating")
 
 
 async def _run_build(
@@ -726,7 +726,7 @@ async def _run_build(
             call_init_secret=call_init_secret,
             builder_token=builder_token,
         )
-        ok, _ = await generator.materialize_and_run(service_dir, files)
+        ok, _ = await generator.materialize_and_run(service_dir, files, port)
         # Degraded: container is up, but with no signing secret every verified
         # endpoint fails closed — the console badges it so it never looks idle.
         status = "degraded" if ok and not secret else "running" if ok else "failed"

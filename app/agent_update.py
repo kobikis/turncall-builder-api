@@ -102,7 +102,9 @@ async def _run_regen(pool: Any, backend: dict, config: dict) -> None:
             logger.info(
                 "added %s to %s's .env", ", ".join(gained), backend["agent_id"]
             )
-        ok, _ = await generator.materialize_and_run(backend["service_dir"], files)
+        ok, _ = await generator.materialize_and_run(
+            backend["service_dir"], files, backend["port"]
+        )
         secret = backend.get("webhook_secret")
         status = "degraded" if ok and not secret else "running" if ok else "failed"
         await registry.set_status(pool, backend["agent_id"], status)

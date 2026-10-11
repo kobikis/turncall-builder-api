@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 
+from . import kube
 from .scaffold import slugify
 
 BASE_PORT = 9001
@@ -186,4 +187,6 @@ async def mark_deleted(pool: asyncpg.Pool, agent_id: str) -> None:
 
 def backend_url(port: int) -> str:
     """URL other containers (TurnCall, the builder) use to reach the backend."""
+    if kube.ENABLED:
+        return kube.service_url(port)
     return f"http://host.docker.internal:{port}"

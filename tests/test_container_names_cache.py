@@ -31,7 +31,7 @@ async def test_restart_does_not_force_rebuild():
     forces a multi-second image rebuild); compose builds only if the image is
     missing."""
     with patch.object(generator, "_run", new=AsyncMock(return_value=(0, "up"))) as run:
-        ok, _ = await generator.restart("/srv/agent")
+        ok, _ = await generator.restart("/srv/agent", 9001)
     assert ok is True
     cmd = run.await_args.args[0]
     assert cmd == ["docker", "compose", "up", "-d"]

@@ -181,7 +181,7 @@ async def _sync_call_init_secret(backend: dict[str, Any] | None, secret: str | N
     if backend and secret:
         generator.set_env_value(backend["service_dir"], "CALL_INIT_SECRET", secret)
         await registry.set_call_init_secret(runtime.get_pool(), backend["agent_id"], secret)
-        await generator.restart(backend["service_dir"])
+        await generator.restart(backend["service_dir"], backend["port"])
 
 
 async def _bind_in_turncall(
