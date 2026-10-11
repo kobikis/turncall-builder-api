@@ -17,3 +17,6 @@ storage/
 .idea/
 .DS_Store
 .coverage
+# `helm dependency build` output: copies of the two charts.
+charts/turncall-stack/charts/
+charts/turncall-stack/Chart.lock

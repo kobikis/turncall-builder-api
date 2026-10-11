@@ -1,0 +1,16 @@
+apiVersion: v2
+name: turncall-stack
+description: Everything in one release - TurnCall with its own Postgres and Redis, and the builder
+type: application
+version: 0.1.0
+# Paths to the two charts in sibling checkouts (turncall/ beside
+# turncall-builder-api/). `helm dependency build` copies them in.
+dependencies:
+  - name: turncall
+    alias: turncall
+    version: 0.1.0
+    repository: file://../../../turncall/charts/turncall
+  - name: turncall-builder
+    alias: builder
+    version: 0.1.0
+    repository: file://../turncall-builder

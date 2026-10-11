@@ -50,14 +50,14 @@ async def test_run_build_exception_failed(mocks):
 @pytest.mark.asyncio
 async def test_run_restart_success_running(mocks):
     mocks.generator.restart.return_value = (True, "ok")
-    await agents._run_restart(object(), "a1", "/srv", "secret")
+    await agents._run_restart(object(), "a1", "/srv", 9001, "secret")
     assert _last_status(mocks) == "running"
 
 
 @pytest.mark.asyncio
 async def test_run_restart_failure_failed(mocks):
     mocks.generator.restart.return_value = (False, "boom")
-    await agents._run_restart(object(), "a1", "/srv", "secret")
+    await agents._run_restart(object(), "a1", "/srv", 9001, "secret")
     assert _last_status(mocks) == "failed"
 
 

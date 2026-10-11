@@ -1,0 +1,66 @@
+# The builder on Kubernetes, beside a TurnCall installed with its own chart
+# (turncall/charts/turncall). builder-api creates each agent's backend as a
+# Deployment + Service in this release's namespace (ADR-0025), so it holds a
+# Role over those objects there. README "Kubernetes".
+
+# TurnCall's public https URL (its PUBLIC_BASE_URL), which the console shows
+# as a number's webhook. `global`, so turncall-stack sets TurnCall's and this
+# from one value; config.TURNCALL_PUBLIC_URL wins when both are set.
+global:
+  publicBaseUrl: ""
+
+# The prefix of every object's name, instead of <release>-turncall-builder.
+fullnameOverride: ""
+
+api:
+  image:
+    repository: ghcr.io/kobikis/turncall-builder-api
+    tag: ""            # empty = appVersion
+    pullPolicy: IfNotPresent
+  resources: {}
+  service:
+    port: 8000
+
+web:
+  image:
+    repository: ghcr.io/kobikis/turncall-builder-web
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources: {}
+  service:
+    port: 80
+
+# The image every Agent Backend runs (agent-runtime/Dockerfile): the
+# scaffold's requirements, with each backend's code mounted from a ConfigMap.
+agentRuntime:
+  image: ghcr.io/kobikis/turncall-agent-runtime:latest
+  # Each backend's SQLite (its event feed) lives on a volume this size.
+  dataSize: 1Gi
+  # How long a build or restart waits for the backend's pod to be ready
+  # before the agent reads as failed.
+  readyTimeoutSeconds: 180
+
+# Where TurnCall's API is, from inside the cluster: its chart's Service,
+# `<release>-turncall` on port 80 (or `<release>` when the release is named
+# turncall). Also what the generated backends' TurnCall calls go to.
+turncallUrl: http://turncall
+
+# Generated repos (ADR-0004) live here: the user's code, committed to git on
+# every generation. Kept on `helm uninstall`.
+generated:
+  size: 5Gi
+
+# Plain settings as environment variables: AGENT_TIMEZONE, BUILDER_PROVIDER,
+# BUILDER_MODEL, PUBLIC_BASE_URL, TURNCALL_PUBLIC_URL, PIPEDREAM_ENVIRONMENT…
+# (.env.example). The chart sets BACKEND_RUNTIME, AGENT_RUNTIME_IMAGE,
+# BUILDER_URL, GENERATED_DIR and TURNCALL_BASE_URL itself.
+config: {}
+
+# Secrets as environment variables: DATABASE_URL (required — the builder's
+# own database; it is created if missing), PLATFORM_API_KEY (= TurnCall's),
+# ANTHROPIC_API_KEY / OPENAI_API_KEY, BUILDER_SESSION_SECRET,
+# INTEGRATIONS_ENCRYPTION_KEY, GOOGLE_CLIENT_ID/SECRET, PIPEDREAM_*…
+secretEnv: {}
+
+# A Secret you manage with the same keys, used instead of secretEnv.
+existingSecret: ""

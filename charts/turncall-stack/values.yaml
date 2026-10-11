@@ -1,0 +1,74 @@
+# TurnCall + the builder in one release, for a laptop or a single-node cluster
+# — the docker compose stacks on Kubernetes. Not for production: Postgres and
+# Redis are one pod each, files are on one volume, the secrets are dev values.
+#
+#   helm dependency build charts/turncall-stack
+#   helm install turncall charts/turncall-stack -n turncall --create-namespace -f my-keys.yaml
+#
+# my-keys.yaml (keep it out of git):
+#   turncall:
+#     secretEnv: {OPENAI_API_KEY: ..., DEEPGRAM_API_KEY: ..., TWILIO_ACCOUNT_SID: ..., TWILIO_AUTH_TOKEN: ...}
+#   builder:
+#     secretEnv: {ANTHROPIC_API_KEY: ...}
+#
+# The images are local tags; point each `image` at your registry's instead.
+# pullPolicy Always: Docker Desktop's cluster pulls local tags from the Docker
+# engine, so a rebuilt image is picked up on the next pod start
+# (`kubectl rollout restart`). With IfNotPresent a node keeps the first build
+# of a tag forever. On kind or minikube, where images are loaded onto the
+# nodes and there is nothing to pull from, set IfNotPresent.
+
+# TurnCall's public https URL — what Twilio/Telnyx call, and what the console
+# shows as a number's webhook. Needed before a phone number can be bound. On a
+# laptop: ngrok to `kubectl port-forward svc/turncall 8090:80`.
+global:
+  publicBaseUrl: ""   # e.g. https://abc.ngrok.app
+
+# Shared by both halves: the builder bootstraps TurnCall projects with it.
+platformKey: &platformKey turncall-local-platform-key
+
+turncall:
+  # Fixed names, so the builder's settings below can point at them whatever
+  # the release is called.
+  fullnameOverride: turncall
+  image:
+    repository: turncall
+    tag: dev
+    pullPolicy: Always
+  postgresql:
+    enabled: true
+  redis:
+    enabled: true
+  localStorage:
+    enabled: true
+  config:
+    STORAGE_BACKEND: local
+  secretEnv:
+    PLATFORM_API_KEY: *platformKey
+    API_KEY_HASH_SECRET: turncall-local-dev-pepper-do-not-change
+    # Fernet key, dev only. Never rotate it once credentials are stored.
+    CREDENTIAL_ENCRYPTION_KEY: MBH9WQ_Nj4EVJvaKpupko4y_7wNcF33eaCeFBF_EgoE=
+  api:
+    replicas: 1
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 2Gi}
+  maxCallDurationSeconds: 600
+
+builder:
+  fullnameOverride: turncall-builder
+  api:
+    image: {repository: turncall-builder-api, tag: dev, pullPolicy: Always}
+  web:
+    image: {repository: turncall-builder-web, tag: dev, pullPolicy: Always}
+  agentRuntime:
+    image: turncall-agent-runtime:dev
+  turncallUrl: http://turncall
+  config:
+    AGENT_TIMEZONE: UTC
+  secretEnv:
+    # Its own database on TurnCall's Postgres, created on first start.
+    DATABASE_URL: postgresql://turncall:turncall@turncall-postgresql:5432/builder
+    PLATFORM_API_KEY: *platformKey
+    BUILDER_SESSION_SECRET: builder-local-dev-session-secret
+    INTEGRATIONS_ENCRYPTION_KEY: ZiqiQs9DmIlqu2QkparasbHLGeE1yJW94iVx0muKGqE=

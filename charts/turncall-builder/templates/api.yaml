@@ -1,0 +1,97 @@
+{{- $name := printf "%s-api" (include "builder.fullname" .) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "builder.fullname" . }}-generated
+  labels:
+    {{- include "builder.labels" . | nindent 4 }}
+  annotations:
+    # The generated repos are the user's code.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.generated.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "builder.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "builder.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "builder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  # One process: the generated repos are on a ReadWriteOnce volume, and
+  # backend builds run as tasks inside it (app/tasks.py).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "builder.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "builder.selectorLabels" (dict "ctx" . "component" "api") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      enableServiceLinks: false
+      initContainers:
+        # Create the builder's database if it is new, then migrate. Retries
+        # until Postgres answers, so it can come up in the same install.
+        - name: migrate
+          image: {{ include "builder.image" (dict "ctx" . "image" .Values.api.image) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["sh", "-c", "until python -m app.ensure_database && alembic upgrade head; do sleep 3; done"]
+          envFrom:
+            - secretRef:
+                name: {{ include "builder.secretName" . }}
+      containers:
+        - name: api
+          image: {{ include "builder.image" (dict "ctx" . "image" .Values.api.image) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "builder.fullname" . }}
+            - secretRef:
+                name: {{ include "builder.secretName" . }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+          volumeMounts:
+            - name: generated
+              mountPath: /generated
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: generated
+          persistentVolumeClaim:
+            claimName: {{ include "builder.fullname" . }}-generated

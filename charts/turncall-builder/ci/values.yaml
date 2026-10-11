@@ -1,0 +1,3 @@
+# For `helm lint` / `helm template` in CI: the one required value.
+secretEnv:
+  DATABASE_URL: postgresql://turncall:turncall@turncall-postgresql:5432/builder

@@ -1,4 +1,5 @@
-"""Materialize an Agent Backend repo on disk and run it as docker compose (ADR-0004).
+"""Materialize an Agent Backend repo on disk and run it as docker compose (ADR-0004),
+or on Kubernetes with BACKEND_RUNTIME=kubernetes (ADR-0025, `kube.py`).
 
 The builder container has the Docker CLI + a mounted docker socket, so `docker
 compose up` here creates sibling containers on the host. service_dir is on a
@@ -15,6 +16,8 @@ import asyncio
 import logging
 import os
 import time
+
+from . import kube
 
 logger = logging.getLogger("turncall_builder")
 
@@ -118,7 +121,9 @@ async def _commit_all(service_dir: str, message: str) -> None:
     await _run(_GIT + ["commit", "-q", "-m", message], service_dir)
 
 
-async def materialize_and_run(service_dir: str, files: dict[str, str]) -> tuple[bool, str]:
+async def materialize_and_run(
+    service_dir: str, files: dict[str, str], port: int
+) -> tuple[bool, str]:
     """Write the repo, preserve user edits in git, and `docker compose up -d --build`.
 
     Returns (ok, logs). ok reflects the compose step only (git steps are best
@@ -137,6 +142,10 @@ async def materialize_and_run(service_dir: str, files: dict[str, str]) -> tuple[
     logs.append(f"$ git init\n{out}")
     await _commit_all(service_dir, "builder: generate")
 
+    if kube.ENABLED:
+        ok, out = await kube.apply(service_dir, port)
+        logs.append(out)
+        return ok, "\n".join(logs)
     rc, out = await _run(["docker", "compose", "up", "-d", "--build"], service_dir)
     logs.append(f"$ docker compose up -d --build\n{out}")
     return rc == 0, "\n".join(logs)
@@ -155,12 +164,15 @@ async def running_container_names() -> set[str] | None:
     now = time.monotonic()
     if _names_cache is not None and now - _names_cache[0] < _NAMES_TTL_S:
         return _names_cache[1]
-    rc, out = await _run(["docker", "ps", "--format", "{{.Names}}"], "/")
-    names = (
-        None
-        if rc != 0
-        else {line.strip() for line in out.splitlines() if line.strip()}
-    )
+    if kube.ENABLED:
+        names = await kube.running_names()
+    else:
+        rc, out = await _run(["docker", "ps", "--format", "{{.Names}}"], "/")
+        names = (
+            None
+            if rc != 0
+            else {line.strip() for line in out.splitlines() if line.strip()}
+        )
     _names_cache = (now, names)
     return names
 
@@ -186,6 +198,8 @@ async def reap_orphan_agent_containers(live_slugs: set[str]) -> list[str]:
     """Force-remove agent backend containers whose registry row is gone, freeing
     the host ports they hold so the next generation can bind. Best-effort: docker
     failures are logged, never raised. Returns the names removed."""
+    if kube.ENABLED:
+        return await kube.reap_orphans(live_slugs)
     rc, out = await _run(["docker", "ps", "-a", "--format", "{{.Names}}"], "/")
     if rc != 0:
         logger.warning("orphan reap skipped: docker ps failed\n%s", out)
@@ -202,16 +216,20 @@ async def reap_orphan_agent_containers(live_slugs: set[str]) -> list[str]:
     return removed
 
 
-async def restart(service_dir: str) -> tuple[bool, str]:
+async def restart(service_dir: str, port: int) -> tuple[bool, str]:
     """Recreate the container to pick up an .env/config change. No `--build` —
     the code is unchanged, so reuse the existing image (compose still builds it
     if it's missing). Code changes go through materialize_and_run, which builds.
     Avoids a multi-second image rebuild on every call-init bind + Start."""
+    if kube.ENABLED:
+        return await kube.apply(service_dir, port)
     rc, out = await _run(["docker", "compose", "up", "-d"], service_dir)
     return rc == 0, out
 
 
-async def teardown(service_dir: str) -> tuple[bool, str]:
+async def teardown(service_dir: str, port: int) -> tuple[bool, str]:
     """Stop and remove the backend container. The repo stays on disk."""
+    if kube.ENABLED:
+        return await kube.teardown(service_dir, port)
     rc, out = await _run(["docker", "compose", "down"], service_dir)
     return rc == 0, out

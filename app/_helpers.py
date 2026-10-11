@@ -301,9 +301,15 @@ def _normalize_config(
     return {k: v for k, v in out.items() if k not in unused}
 
 
-def _backend_view(port: int, status: str) -> dict[str, Any]:
-    # browser_url is what the UI polls (host), backend_url is container-to-container.
-    return {"port": port, "browser_url": f"http://localhost:{port}", "status": status}
+def browser_path(agent_id: str) -> str:
+    """Where the console reads an agent's backend: through this API, which
+    reaches it at backend_url — never the backend's own port, which a browser
+    cannot reach once the backend runs on Kubernetes (ADR-0025)."""
+    return f"/agents/{agent_id}/backend"
+
+
+def _backend_view(agent_id: str, port: int, status: str) -> dict[str, Any]:
+    return {"port": port, "browser_url": browser_path(agent_id), "status": status}
 
 
 async def _backend_or_404(

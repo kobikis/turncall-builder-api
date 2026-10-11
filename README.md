@@ -133,6 +133,52 @@ Refuses to run when `TURNCALL_ENV=production`.
 
 > After a TurnCall reset, re-provision the platform key + DBs with `make turncall-setup`.
 
+## Kubernetes
+
+`charts/turncall-stack` installs everything in one release: TurnCall with its
+own Postgres and Redis, builder-api, and the console (builder-web). Agent
+Backends become a Deployment + Service each in the same namespace instead of a
+docker compose stack (ADR-0025), on one shared image (`agent-runtime/`). It
+takes TurnCall's chart from a sibling checkout (`../turncall`).
+
+```bash
+cat > my-keys.yaml <<'YAML'
+turncall:
+  secretEnv:
+    OPENAI_API_KEY: sk-...
+    DEEPGRAM_API_KEY: ...
+builder:
+  secretEnv:
+    ANTHROPIC_API_KEY: sk-ant-...
+global:
+  # TurnCall's public https URL, for phone numbers (ngrok http 8090, below)
+  publicBaseUrl: https://<yours>.ngrok.app
+YAML
+
+helm dependency build charts/turncall-stack
+helm install turncall charts/turncall-stack -n turncall --create-namespace -f my-keys.yaml
+kubectl -n turncall port-forward svc/turncall 8090:80   # what ngrok forwards to
+
+kubectl -n turncall exec deploy/turncall-builder-api -- python -m scripts.seed_guest
+kubectl -n turncall port-forward svc/turncall-builder-web 5173:80   # http://localhost:5173
+```
+
+It is a development install — single-pod Postgres and Redis, dev secrets
+(`charts/turncall-stack/values.yaml`). The images are local tags
+(`turncall:dev`, `turncall-builder-api:dev`, `turncall-builder-web:dev`,
+`turncall-agent-runtime:dev`); point each `image` at your registry's instead.
+After either chart changes, re-run `helm dependency build`, then
+`helm upgrade turncall charts/turncall-stack -n turncall --reset-then-reuse-values`
+(the new chart's defaults plus the values you installed with — `--reuse-values`
+alone keeps the old defaults too). After rebuilding an image under the same
+tag, `kubectl -n turncall rollout restart deploy` picks it up (`pullPolicy:
+Always`, see `values.yaml`).
+
+`charts/turncall-builder` alone runs the builder against a TurnCall you already
+have: set `turncallUrl` and `secretEnv.DATABASE_URL`. builder-api holds a
+namespaced Role over ConfigMaps, Secrets, Services, PVCs and Deployments — what
+it needs to run backends, in its own namespace only.
+
 ## Contributing
 
 Bug fixes and docs: open a PR. Features: open an issue first.

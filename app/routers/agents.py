@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
 import httpx
@@ -18,6 +18,7 @@ from .._helpers import (
     _normalize_config,
     _turncall_http_error,
     _validate_agent_config,
+    browser_path,
     check_variables,
 )
 from ..backends import generator, phones, registry
@@ -53,7 +54,7 @@ async def list_agents(ctx: AuthContext = Depends(require_member)) -> dict[str, A
             "name": (r.get("config") or {}).get("name") or r["slug"],
             "port": r["port"],
             "status": _live_status(r, names),
-            "browser_url": f"http://localhost:{r['port']}",
+            "browser_url": browser_path(r["agent_id"]),
         }
         for r in rows
     ]
@@ -81,7 +82,7 @@ async def get_agent(
             # Normalized so optional routing fields show as null (editable).
             "config": _normalize_config(b["config"], b["port"]) if b.get("config") else None,
             "turncall_agent": live,  # live TurnCall agent (null if key is stale)
-            "backend": _backend_view(b["port"], _live_status(b, names)),
+            "backend": _backend_view(agent_id, b["port"], _live_status(b, names)),
             "tool_statuses": b.get("tool_statuses"),  # {name: generated|stub|external}
             # Shown by the console when tools route externally, so the user's
             # server can verify X-TurnCall-Signature (trusted local console).
@@ -122,19 +123,41 @@ async def start_agent(
     if not b:
         raise HTTPException(status_code=404, detail="agent not found")
     await registry.set_status(pool, agent_id, "generating")
-    spawn(_run_restart(pool, agent_id, b["service_dir"], b.get("webhook_secret")))
-    return {"success": True, "data": _backend_view(b["port"], "generating")}
+    spawn(
+        _run_restart(pool, agent_id, b["service_dir"], b["port"], b.get("webhook_secret"))
+    )
+    return {"success": True, "data": _backend_view(agent_id, b["port"], "generating")}
 
 
-async def _run_restart(pool: Any, agent_id: str, service_dir: str, secret: str | None) -> None:
+async def _run_restart(
+    pool: Any, agent_id: str, service_dir: str, port: int, secret: str | None
+) -> None:
     """Background worker: recreate the container and record the outcome."""
     try:
-        ok, _ = await generator.restart(service_dir)
+        ok, _ = await generator.restart(service_dir, port)
         status = "degraded" if ok and not secret else "running" if ok else "failed"
     except Exception:  # noqa: BLE001
         logger.exception("backend restart failed for %s", agent_id)
         status = "failed"
     await registry.set_status(pool, agent_id, status)
+
+
+@router.get("/agents/{agent_id}/backend/{feed}")
+async def backend_feed(
+    agent_id: str, feed: Literal["events", "automations"],
+    ctx: AuthContext = Depends(require_member),
+) -> JSONResponse:
+    """The backend's own read endpoints, relayed for the console (browser_path).
+    The backend serves them unauthenticated; here they take a member's login."""
+    b = await registry.get_backend(runtime.get_pool(), agent_id, ctx.workspace_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="agent not found")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{registry.backend_url(b['port'])}/{feed}")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"backend unreachable: {exc}") from exc
 
 
 @router.delete("/agents/{agent_id}")
@@ -158,7 +181,7 @@ async def delete_agent(
             status_code=409,
             detail=f"{len(bound)} phone number(s) still route to this agent — unbind them first",
         )
-    await generator.teardown(b["service_dir"])
+    await generator.teardown(b["service_dir"], b["port"])
     # Each agent has its own dedicated project (1:1), so delete the whole
     # project (ADR-0011) — one call removes the agent + key + KB and leaves no
     # orphaned project. Best-effort: the registry teardown proceeds regardless.

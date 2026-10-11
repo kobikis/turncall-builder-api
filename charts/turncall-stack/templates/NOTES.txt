@@ -1,0 +1,13 @@
+TurnCall and the builder are installing in {{ .Release.Namespace }}.
+
+  kubectl -n {{ .Release.Namespace }} get pods      # the two TurnCall workers restart ~twice on first install
+
+The console (log in as guest@turncall.local / guest after seeding it):
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ .Values.builder.fullnameOverride }}-api -- python -m scripts.seed_guest
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Values.builder.fullnameOverride }}-web 5173:80
+  open http://localhost:5173
+
+TurnCall's API (platform key: the chart's platformKey):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Values.turncall.fullnameOverride }} 8090:80

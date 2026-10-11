@@ -75,4 +75,6 @@ real call.
 ## Reachability
 
 `server_url` must be reachable **by TurnCall's container**. Local endpoint →
-`http://host.docker.internal:<port>/…`; otherwise a public HTTPS URL.
+`http://host.docker.internal:<port>/…`; on Kubernetes, a Service in the
+cluster (`http://<name>.<namespace>.svc.cluster.local/…` — what a managed
+Agent Backend gets, ADR-0025); otherwise a public HTTPS URL.

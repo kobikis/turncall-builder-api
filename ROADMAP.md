@@ -225,6 +225,15 @@ written by hand.
 - **Test variables** — Test Chat and Test Voice fill the agent's
   `{{placeholders}}` the way call-init would (#88).
 
+## Kubernetes (built, not yet merged)
+
+- **One Helm release for everything** — `charts/turncall-stack` installs TurnCall
+  (with its own Postgres and Redis), builder-api and the console. Agent Backends
+  run as Deployments named for the agent, on one shared runtime image
+  (ADR-0025); the console reads a backend through builder-api instead of its
+  host port. `global.publicBaseUrl` is TurnCall's public URL for both halves.
+  For development: single-pod data stores, dev secrets, local image tags.
+
 ## Partly shipped
 
 - **GitHub integration** — push each Agent Backend to the user's own GitHub so
