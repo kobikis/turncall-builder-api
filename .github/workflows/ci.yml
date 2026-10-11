@@ -54,10 +54,36 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v4.3.0
-      # turncall-stack is not linted here: it pulls TurnCall's chart from a
-      # sibling checkout of a private repo.
       - run: helm lint --strict charts/turncall-builder -f charts/turncall-builder/ci/values.yaml
       - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/ci/values.yaml
+      - run: helm lint --strict charts/turncall-builder -f charts/turncall-builder/values-production.yaml
+      - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/values-production.yaml
+      - run: helm template turncall-builder charts/turncall-builder -f charts/turncall-builder/ci/values.yaml --set 'imagePullSecrets[0].name=ghcr' --set ingress.enabled=true
+
+  # turncall-stack takes TurnCall's chart from a sibling checkout
+  # (file://../../../turncall/charts/turncall), and kobikis/turncall is
+  # private: TURNCALL_CHECKOUT_TOKEN is a fine-grained token with read-only
+  # Contents on it. TurnCall's main, so a stack change that needs an unmerged
+  # TurnCall chart change goes red here until that merges — the merge order.
+  helm-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out TurnCall beside this repo
+        env:
+          TOKEN: ${{ secrets.TURNCALL_CHECKOUT_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::TURNCALL_CHECKOUT_TOKEN is not set: add a fine-grained token with read-only Contents on kobikis/turncall as a repository secret."
+            exit 1
+          fi
+          git clone --quiet --depth 1 "https://x-access-token:${TOKEN}@github.com/kobikis/turncall.git" ../turncall
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
+      - run: helm dependency build charts/turncall-stack
+      - run: helm lint --strict charts/turncall-stack
+      - run: helm template turncall charts/turncall-stack --set global.publicBaseUrl=https://turncall.example.com
 
   test:
     runs-on: ubuntu-latest

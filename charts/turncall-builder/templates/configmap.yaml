@@ -1,4 +1,4 @@
-{{- range list "BACKEND_RUNTIME" "AGENT_RUNTIME_IMAGE" "BUILDER_URL" "GENERATED_DIR" "TURNCALL_BASE_URL" }}
+{{- range list "AGENT_IMAGE_PULL_SECRETS" "BACKEND_RUNTIME" "AGENT_RUNTIME_IMAGE" "BUILDER_URL" "GENERATED_DIR" "TURNCALL_BASE_URL" }}
 {{- if hasKey $.Values.config . }}
 {{- fail (printf "%s is set by the chart, not config" .) }}
 {{- end }}
@@ -17,6 +17,7 @@ data:
   AGENT_RUNTIME_IMAGE: {{ .Values.agentRuntime.image | quote }}
   AGENT_DATA_SIZE: {{ .Values.agentRuntime.dataSize | quote }}
   AGENT_READY_TIMEOUT_SECONDS: {{ .Values.agentRuntime.readyTimeoutSeconds | quote }}
+  AGENT_IMAGE_PULL_SECRETS: {{ include "builder.pullSecretNames" . | quote }}
   # Where generated backends ask the builder for tokens and call configs.
   BUILDER_URL: {{ include "builder.apiUrl" . | quote }}
   GENERATED_DIR: /generated

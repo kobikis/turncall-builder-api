@@ -200,3 +200,12 @@ def test_a_long_agent_name_keeps_its_id_within_63_characters():
     name = kube.deployment_name(long)
     assert len(name) <= 63 and name.endswith("-ab12cd34")
     assert kube.deployment_name("/generated/turncall-agent-hotel-ab12cd34") == "hotel-ab12cd34"
+
+
+def test_a_private_runtime_image_gets_its_pull_secrets(repo, monkeypatch):
+    def pod(m):
+        return m[-1]["spec"]["template"]["spec"]
+
+    assert pod(kube.manifests(str(repo), 9001))["imagePullSecrets"] == []
+    monkeypatch.setattr(kube, "PULL_SECRETS", ["ghcr"])
+    assert pod(kube.manifests(str(repo), 9001))["imagePullSecrets"] == [{"name": "ghcr"}]

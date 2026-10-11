@@ -54,6 +54,7 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       enableServiceLinks: false
+      {{- with include "builder.imagePullSecrets" . | trim }}{{ . | nindent 6 }}{{ end }}
       initContainers:
         # Create the builder's database if it is new, then migrate. Retries
         # until Postgres answers, so it can come up in the same install.

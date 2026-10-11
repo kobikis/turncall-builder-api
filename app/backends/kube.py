@@ -34,6 +34,8 @@ ENABLED = os.environ.get("BACKEND_RUNTIME", "docker") == "kubernetes"
 RUNTIME_IMAGE = os.environ.get("AGENT_RUNTIME_IMAGE", "turncall-agent-runtime:latest")
 DATA_SIZE = os.environ.get("AGENT_DATA_SIZE", "1Gi")
 READY_TIMEOUT_S = float(os.environ.get("AGENT_READY_TIMEOUT_SECONDS", "180"))
+# Registry logins for a private runtime image: Secret names, comma-separated.
+PULL_SECRETS = [s for s in os.environ.get("AGENT_IMAGE_PULL_SECRETS", "").split(",") if s]
 
 _SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 _MANAGER = "turncall-builder"
@@ -154,6 +156,7 @@ def manifests(service_dir: str, port: int) -> list[dict[str, Any]]:
              "template": {
                  "metadata": {"labels": labels, "annotations": {"checksum": checksum}},
                  "spec": {
+                     "imagePullSecrets": [{"name": s} for s in PULL_SECRETS],
                      "securityContext": {"runAsNonRoot": True, "runAsUser": 10001,
                                          "runAsGroup": 10001, "fsGroup": 10001},
                      "containers": [{

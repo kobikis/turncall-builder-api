@@ -34,3 +34,16 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "builder.apiUrl" -}}
 {{- printf "http://%s-api:%v" (include "builder.fullname" .) .Values.api.service.port -}}
 {{- end -}}
+
+{{- define "builder.pullSecretNames" -}}
+{{- $names := list -}}
+{{- range .Values.imagePullSecrets }}{{ $names = append $names .name }}{{ end -}}
+{{- join "," $names -}}
+{{- end -}}
+
+{{- define "builder.imagePullSecrets" -}}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}

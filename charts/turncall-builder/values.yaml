@@ -12,6 +12,11 @@ global:
 # The prefix of every object's name, instead of <release>-turncall-builder.
 fullnameOverride: ""
 
+# Registry logins for private images (`kubectl create secret docker-registry`):
+# builder-api, the console, and every Agent Backend it runs.
+imagePullSecrets: []
+  # - name: ghcr
+
 api:
   image:
     repository: ghcr.io/kobikis/turncall-builder-api
@@ -64,3 +69,18 @@ secretEnv: {}
 
 # A Secret you manage with the same keys, used instead of secretEnv.
 existingSecret: ""
+
+# The console, which also proxies /api to builder-api: the only service a
+# browser needs, OAuth and Pipedream callbacks included (they arrive at
+# /api/...). A builder turn streams for minutes, so raise the controller's
+# read timeout and turn buffering off, e.g. for ingress-nginx:
+#   nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+#   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: builder.example.com
+  tls: []
+    # - secretName: builder-tls
+    #   hosts: [builder.example.com]

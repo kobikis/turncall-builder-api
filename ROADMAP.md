@@ -233,6 +233,7 @@ written by hand.
   (ADR-0025); the console reads a backend through builder-api instead of its
   host port. `global.publicBaseUrl` is TurnCall's public URL for both halves.
   For development: single-pod data stores, dev secrets, local image tags.
+  Production is two releases from each chart's `values-production.yaml`.
 
 ## Partly shipped
 

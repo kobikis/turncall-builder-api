@@ -51,4 +51,6 @@ is the path in both runtimes.
   compose it survived only until the container was removed.
 - A build reports failed when the pod is not ready within
   `AGENT_READY_TIMEOUT_SECONDS`, as a failed `compose up` did.
+- A private runtime image works: the chart's `imagePullSecrets` reach every
+  backend's pod (`AGENT_IMAGE_PULL_SECRETS`).
 - Compose remains the default and is unchanged.

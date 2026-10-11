@@ -31,6 +31,7 @@ spec:
         {{- include "builder.selectorLabels" (dict "ctx" . "component" "web") | nindent 8 }}
     spec:
       enableServiceLinks: false
+      {{- with include "builder.imagePullSecrets" . | trim }}{{ . | nindent 6 }}{{ end }}
       containers:
         - name: web
           image: {{ include "builder.image" (dict "ctx" . "image" .Values.web.image) }}

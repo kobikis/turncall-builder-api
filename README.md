@@ -175,7 +175,17 @@ tag, `kubectl -n turncall rollout restart deploy` picks it up (`pullPolicy:
 Always`, see `values.yaml`).
 
 `charts/turncall-builder` alone runs the builder against a TurnCall you already
-have: set `turncallUrl` and `secretEnv.DATABASE_URL`. builder-api holds a
+have: set `turncallUrl` and `secretEnv.DATABASE_URL`.
+
+**Production:** two releases, not the stack — TurnCall with
+`turncall/charts/turncall/values-production.yaml` (your Postgres and Redis, S3,
+an Ingress), and the builder with `charts/turncall-builder/values-production.yaml`
+in a namespace of its own: your registry's images (with `imagePullSecrets`,
+handed to every Agent Backend too), secrets in an `existingSecret`, the console
+behind an Ingress with TLS. The console is the only thing a browser reaches —
+Google login and Pipedream come back through its `/api` proxy, so their
+redirect URIs are `https://<console>/api/...`. Copy each file and replace its
+`example.com` hosts and placeholders. builder-api holds a
 namespaced Role over ConfigMaps, Secrets, Services, PVCs and Deployments — what
 it needs to run backends, in its own namespace only.
 
