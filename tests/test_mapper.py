@@ -26,6 +26,10 @@ def test_tts_model_defaulted_per_provider():
         {"name": "B", "system_prompt": "h", "tts": {"provider": "cartesia", "voice": "uuid"}}
     )["config"]["tts"]
     assert ca["model"] == "sonic-3"
+    oa = to_create_agent_request(
+        {"name": "B", "system_prompt": "h", "tts": {"provider": "openai", "voice": "alloy"}}
+    )["config"]["tts"]
+    assert oa["model"] == "tts-1"
     # explicit model wins
     ex = to_create_agent_request(
         {"name": "B", "system_prompt": "h", "tts": {"provider": "elevenlabs", "voice": "v", "model": "eleven_v3"}}
@@ -597,6 +601,7 @@ class TestAgentSettingsReachTurnCall:
             "smart_turn_stop_secs": 0.5,
             "silence_timeout_ms": 600,
             "interruption_enabled": False,
+            "greeting_interruptible": False,
             "user_idle_timeout_ms": 0,
             "idle_message": "¿Sigue ahí?",
             "max_call_duration_seconds": 300,
