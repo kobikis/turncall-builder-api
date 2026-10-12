@@ -56,6 +56,8 @@ def test_create_agent_happy_path(client, mocks):
     data = r.json()["data"]
     assert data["created"] is True
     assert data["agent_id"] == "agent-1"
+    # The backend hears every event, not just the call's start and end.
+    assert mocks.client.register_webhook.await_args.args[1] == ["*"]
     # Build is backgrounded — create returns immediately as 'generating'; the
     # console polls for the transition. Build outcome is tested against
     # _run_build directly (test_build_workers.py).
@@ -125,6 +127,38 @@ def test_update_agent_no_tool_change_skips_regen(client, mocks):
     assert r.status_code == 200
     assert r.json()["data"]["backend_regenerated"] is False
     mocks.generator.materialize_and_run.assert_not_called()
+
+
+def test_a_save_subscribes_the_backend_to_every_event(client, mocks):
+    """A backend created when it heard only call.initializing/started/ended is
+    widened on its next save, by PATCH so its signing secret is kept."""
+    from unittest.mock import ANY
+
+    from app.backends import registry
+
+    row = backend_row(status="running", config={"name": "A", "system_prompt": "hi"})
+    mocks.registry.get_backend.return_value = row
+    mocks.client.list_webhooks.return_value = [
+        {
+            "id": "w1",
+            "url": f"{registry.backend_url(row['port'])}/events",
+            "events": ["call.started", "call.ended", "call.initializing"],
+            "active": True,
+        },
+        {"id": "w2", "url": "https://elsewhere/hook", "events": ["call.ended"], "active": True},
+    ]
+    r = client.put("/agents/a1", json={"config": {"name": "A", "system_prompt": "hi2"}})
+    assert r.status_code == 200
+    mocks.client.update_webhook_events.assert_awaited_once_with("w1", ["*"], ANY)
+
+
+def test_a_save_survives_turncall_refusing_the_widening(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(
+        status="running", config={"name": "A", "system_prompt": "hi"}
+    )
+    mocks.client.list_webhooks.side_effect = RuntimeError("no PATCH here")
+    r = client.put("/agents/a1", json={"config": {"name": "A", "system_prompt": "hi2"}})
+    assert r.status_code == 200
 
 
 def test_update_agent_failed_status_forces_regen(client, mocks):

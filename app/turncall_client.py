@@ -585,6 +585,20 @@ class TurnCallClient:
             json={"url": url, "events": events},
         )
 
+    async def list_webhooks(self, api_key: str) -> list[dict[str, Any]]:
+        return await self._request("GET", "/v1/webhooks", api_key=api_key)
+
+    async def update_webhook_events(
+        self, webhook_id: str, events: list[str], api_key: str
+    ) -> dict[str, Any]:
+        """Replace a subscription's events; TurnCall keeps its signing secret."""
+        return await self._request(
+            "PATCH",
+            f"/v1/webhooks/{webhook_id}",
+            api_key=api_key,
+            json={"events": events},
+        )
+
     # --- project credentials (turncall ADR-0020) ---------------------------
 
     async def put_credential(
