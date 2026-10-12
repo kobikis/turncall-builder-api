@@ -69,6 +69,16 @@ _STT_MODELS = {
         "universal-3-6-pro",
     ],
 }
+# TTS model sets are small and fixed, so they are listed rather than fetched.
+# Deepgram has none: its voice *is* its model, so the form shows no model field.
+_TTS_MODELS = {
+    "openai": ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"],
+    "elevenlabs": [
+        "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2",
+        "eleven_flash_v2", "eleven_turbo_v2", "eleven_v3_conversational",
+    ],
+    "cartesia": ["sonic-3.6", "sonic-3", "sonic-2"],
+}
 # Deepgram Flux (turncall#204): a model on the deepgram provider that Deepgram's
 # /v1/models does not list (checked 2026-10-09), so it is added by hand.
 _DEEPGRAM_FLUX = ["flux-general-en", "flux-general-multi"]
@@ -164,6 +174,10 @@ async def llm_models(provider: str, keys: dict[str, str] | None = None) -> list[
 async def tts_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
     key = _key(provider, keys)
     return await _cached(f"tts:{provider}:{_fp(key)}", lambda c: _fetch_tts_voices(c, provider, key))
+
+
+def tts_models(provider: str) -> list[str]:
+    return _TTS_MODELS.get(provider, [])
 
 
 async def stt_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:

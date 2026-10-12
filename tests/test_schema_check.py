@@ -36,6 +36,7 @@ def test_emitted_fields_match_the_mapper():
         "smart_turn_stop_secs",
         "silence_timeout_ms",
         "interruption_enabled",
+        "greeting_interruptible",
         "user_idle_timeout_ms",
         "idle_message",
         "max_call_duration_seconds",

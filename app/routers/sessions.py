@@ -221,6 +221,12 @@ async def tts_voices(provider: str, ctx: AuthContext = Depends(require_member)) 
     return {"success": True, "data": {"voices": await provider_catalog.tts_voices(provider, await _workspace_keys(ctx))}}
 
 
+@router.get("/providers/tts/{provider}/models")
+def tts_models(provider: str) -> dict[str, Any]:
+    """Model ids for a TTS provider (fixed lists; none for Deepgram)."""
+    return {"success": True, "data": {"models": provider_catalog.tts_models(provider)}}
+
+
 @router.get("/providers/builder")
 def builder_providers() -> dict[str, Any]:
     """Builder-model picker data: which providers are keyed, and the default.

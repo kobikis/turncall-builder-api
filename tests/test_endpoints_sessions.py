@@ -61,6 +61,14 @@ def test_stt_models_endpoint(client, monkeypatch):
     assert r.json()["data"]["models"] == ["nova-2", "nova-3"]
 
 
+def test_tts_models_endpoint(client):
+    r = client.get("/providers/tts/openai/models")
+    assert r.status_code == 200
+    assert "tts-1" in r.json()["data"]["models"]
+    # Deepgram's voice is its model.
+    assert client.get("/providers/tts/deepgram/models").json()["data"]["models"] == []
+
+
 def test_llm_models_endpoint(client, monkeypatch):
     from app.routers import sessions
 

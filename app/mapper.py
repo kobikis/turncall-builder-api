@@ -29,7 +29,9 @@ _BUILTIN_DESCRIPTIONS = {
 _TTS_DEFAULT_MODEL = {
     "cartesia": "sonic-3",
     "elevenlabs": "eleven_turbo_v2_5",
-    "openai": "gpt-4o-mini-tts",
+    # Not gpt-4o-mini-tts: on 2026-10-12 most of its requests hung with no
+    # answer, while tts-1 answered every one.
+    "openai": "tts-1",
 }
 
 
@@ -41,6 +43,7 @@ _PASSTHROUGH = (
     "smart_turn_stop_secs",
     "silence_timeout_ms",
     "interruption_enabled",
+    "greeting_interruptible",
     "user_idle_timeout_ms",
     "idle_message",
     "max_call_duration_seconds",
