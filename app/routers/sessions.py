@@ -42,7 +42,6 @@ router = APIRouter()
 
 # call.rejected: an inbound call refused over the agent's live-call limit (#76)
 # never gets a call row, so the Calls tab's event feed is the only place it shows.
-SUBSCRIBED_EVENTS = ["call.started", "call.ended", "call.initializing", "call.rejected"]
 
 
 class TurnRequest(BaseModel):
@@ -544,7 +543,7 @@ async def create_agent(
         # Best-effort: a webhook failure degrades (no secret), it doesn't abort.
         try:
             sub = await client.register_webhook(
-                f"{tools_base_url}/events", SUBSCRIBED_EVENTS, key
+                f"{tools_base_url}/events", agent_update.SUBSCRIBED_EVENTS, key
             )
             secret = sub["secret"]
         except Exception as exc:  # noqa: BLE001

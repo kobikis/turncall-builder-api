@@ -145,18 +145,26 @@ async def _run_restart(
 @router.get("/agents/{agent_id}/backend/{feed}")
 async def backend_feed(
     agent_id: str, feed: Literal["events", "automations"],
+    call_id: str | None = None,
     ctx: AuthContext = Depends(require_member),
 ) -> JSONResponse:
     """The backend's own read endpoints, relayed for the console (browser_path).
-    The backend serves them unauthenticated; here they take a member's login."""
+    The backend serves them unauthenticated; here they take a member's login.
+
+    `call_id` keeps one call's events — the console's live feed is per call.
+    Filtered here, so every backend already generated serves it unchanged."""
     b = await registry.get_backend(runtime.get_pool(), agent_id, ctx.workspace_id)
     if not b:
         raise HTTPException(status_code=404, detail="agent not found")
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get(f"{registry.backend_url(b['port'])}/{feed}")
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except (httpx.HTTPError, ValueError) as exc:
+        body = r.json()
+        if call_id and feed == "events" and r.is_success:
+            events = body["data"]["events"]
+            body["data"]["events"] = [e for e in events if e.get("call_id") == call_id]
+        return JSONResponse(body, status_code=r.status_code)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"backend unreachable: {exc}") from exc
 
 

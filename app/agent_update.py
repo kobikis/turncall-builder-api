@@ -20,6 +20,11 @@ from .tasks import spawn
 
 logger = logging.getLogger("turncall_builder")
 
+# What an agent's backend is subscribed to. Every event: the project is the
+# agent's own, and the console's live feed shows what the backend stores — it
+# used to be only call.initializing / started / ended.
+SUBSCRIBED_EVENTS = ["*"]
+
 
 async def build_payload(
     pool: Any, backend: dict[str, Any], config: dict[str, Any]
@@ -49,6 +54,7 @@ async def apply_update(
     new_config = _normalize_config(config, port)
     payload = await build_payload(pool, backend, new_config)
     await client.update_agent(backend["agent_id"], payload, backend["api_key"])
+    await _subscribe_to_every_event(client, backend)
 
     # Both sides normalized with the same port, so a legacy config (nulls/missing
     # fields) vs its filled form never reads as a change. Regenerate on tool
@@ -64,6 +70,21 @@ async def apply_update(
     if regenerated:
         await _regenerate_backend(pool, backend, new_config)
     return {"backend_regenerated": regenerated}
+
+
+async def _subscribe_to_every_event(client: Any, backend: dict[str, Any]) -> None:
+    """Widen a backend subscribed before SUBSCRIBED_EVENTS was every event, on
+    its next save. PATCH keeps the signing secret, which the backend and the
+    agent's tools verify with. Best-effort: a narrow feed never fails a save."""
+    url = f"{registry.backend_url(backend['port'])}/events"
+    try:
+        for sub in await client.list_webhooks(backend["api_key"]):
+            if sub["url"] == url and sub["active"] and sub["events"] != SUBSCRIBED_EVENTS:
+                await client.update_webhook_events(
+                    sub["id"], SUBSCRIBED_EVENTS, backend["api_key"]
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not widen %s's events: %s", backend["agent_id"], exc)
 
 
 async def _regenerate_backend(pool: Any, backend: dict, config: dict) -> None:
