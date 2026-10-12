@@ -273,6 +273,21 @@ def test_backend_feed_relays_through_the_api(client, mocks, monkeypatch):
     assert seen == ["http://host.docker.internal:9001/events"]  # registry.backend_url
 
 
+def test_backend_events_can_be_one_calls(client, mocks, monkeypatch):
+    """The console's live feed is per call; a backend stores every call's."""
+    mocks.registry.get_backend.return_value = backend_row()
+    stored = [
+        {"event": "call.started", "call_id": "c1"},
+        {"event": "call.started", "call_id": "c2"},
+        {"event": "call.rejected", "call_id": None},
+        {"event": "call.ended", "call_id": "c1"},
+    ]
+    _relay_to(monkeypatch, lambda _r: httpx.Response(200, json={"data": {"events": stored}}))
+    r = client.get("/agents/a1/backend/events", params={"call_id": "c1"})
+    assert [e["event"] for e in r.json()["data"]["events"]] == ["call.started", "call.ended"]
+    assert len(client.get("/agents/a1/backend/events").json()["data"]["events"]) == 4
+
+
 def test_backend_feed_refuses_other_paths(client, mocks):
     mocks.registry.get_backend.return_value = backend_row()
     assert client.get("/agents/a1/backend/call-init").status_code == 422
