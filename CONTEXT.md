@@ -349,6 +349,24 @@ requests. The builder mirrors it and shows it on the Number's page so the
 customer's endpoint can verify signatures.
 _Avoid_: webhook secret (that's the Agent Backend's event secret), token
 
+**Widget**:
+The "talk to us" button a Workspace puts on its own website: the `turncall-js`
+drop-in, pointed at a mint URL. For an Agent built here that URL is its [[Agent
+Backend]]'s `/webrtc-session`, which asks builder-api for a TurnCall **session
+token** (one call, five minutes, this Agent, variables sealed) and refuses any
+origin not on the Agent's allowed-origins list. The backend never holds a TurnCall
+key. See ADR-0026 (decided, not yet built).
+_Avoid_: "embed key", "public key" (there is none), "web call" (a test call from the
+Console is not the Widget).
+
+**Audit entry**:
+One change a person made through the Console, as builder-api records it: the
+[[User]], the [[Workspace]], the [[Role]] they acted under, what changed, and, when
+the change reached TurnCall, the id of TurnCall's own audit entry (which records only
+the API key). Append-only, admin-readable, never holds a secret. See ADR-0028
+(decided, not yet built).
+_Avoid_: "activity", "history", "log" unqualified.
+
 ## Integrations
 
 **Connected app**:
@@ -399,6 +417,14 @@ Slack post that silently stopped arriving and read as a quiet week. Recording it
 never raises and never retries: the call has already ended (ADR-0018).
 _Avoid_: post-call hook, trigger, workflow, "action" alone (that's the operation
 it runs)
+
+**Takeaway binding**:
+An end-of-call input whose value is a field of one of the Agent's takeaways
+(`{"takeaway": "caller", "field": "email"}`) rather than something fixed up front,
+read from the `call.ended` the [[Automation]] is answering. A missing field records
+the run as `unfilled`. What a CRM log entry needs, since its values exist only once
+the call has happened. See ADR-0027 (decided, not yet built).
+_Avoid_: "dynamic input", "mapping" (reads as a field-to-field sync).
 
 **Trigger** — [[mid-call]] vs [[end-of-call]]:
 When an attached [[Connected app]] runs, chosen per app and not symmetric,

@@ -199,7 +199,7 @@ which is the leak ADR-0021 exists to close.
 
 Not built: a third app, per-tool mid-call selection, binding an end-of-call
 action's inputs to takeaway fields (which is what a *follow-up* booking would
-need), and a second integrations provider.
+need; now decided in ADR-0027), and a second integrations provider.
 
 ## V6 — Engine parity (shipped)
 
@@ -236,6 +236,31 @@ written by hand.
   `values-local.yaml` is for development (single-pod data stores, dev
   secrets, local image tags); `values-production.yaml` is the production
   starting point.
+
+## Public release (decided, not built)
+
+All three repos stay private until the public release; its timing is the
+maintainer's call. Decided 2026-10-16, after a comparison with five open-source
+and five SaaS voice-agent platforms: build first for **developers embedding voice**,
+then **regulated self-hosters**, and not for call-center no-code buyers. The
+Builder is the developer's fast path, with every screen usable by their
+non-developer colleague.
+
+The release waits on the engine's "Public release" milestone (turncall#305–#308):
+a published caller-ear latency number, the compliance kit (redaction, retention,
+audit log), buying and releasing numbers, and browser session tokens with a
+`turncall-js` client. The builder halves:
+
+- **Widget** — the Agent Backend mints session tokens through builder-api; the
+  Console shows allowed origins and the snippet (ADR-0026).
+- **Audit log of people** beside TurnCall's audit log of keys, and a Workspace
+  page for redaction and retention (ADR-0028).
+- **Buy a number** from the Add Number form.
+
+After release: cost and usage per call with an Analytics tab per agent
+(turncall#309, builder-web#91; alerts stay in Prometheus, not the Console), and
+Cal.com then HubSpot as Connected apps, HubSpot with takeaway bindings (#96,
+ADR-0027). A hosted tier is decided at release (turncall#310).
 
 ## Partly shipped
 
@@ -287,3 +312,9 @@ written by hand.
 - ADR-0020 — Inline agent from the builder
 - ADR-0021 — The user chooses when an integration runs
 - ADR-0022 — Input values come from the provider
+- ADR-0023 — Provider credentials from the Console
+- ADR-0024 — A knowledge base per document
+- ADR-0025 — Agent Backends on Kubernetes
+- ADR-0026 — The Agent Backend mints browser session tokens
+- ADR-0027 — End-of-call inputs can come from a takeaway
+- ADR-0028 — The builder audits people; TurnCall audits keys
