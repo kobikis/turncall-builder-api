@@ -30,6 +30,7 @@ from .routers import (
     auth,
     campaigns,
     calls,
+    compliance,
     evals,
     github,
     integrations,
@@ -156,6 +157,7 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 
 for _router in (
     sessions, agents, agent_activity, phones, calls, outbound, limits, campaigns, evals,
+    compliance,
     knowledge,
     takeaways,
     ambience,

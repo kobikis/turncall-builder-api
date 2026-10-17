@@ -505,7 +505,24 @@ wins a name collision. `stdio` stays refused (ADR-0017). See ADR-0023.
 _Avoid_: "shared MCP server", "global server" (it belongs to a Workspace, not the
 deployment).
 
-**Projection** (of an [[Integration]] or a [[Workspace MCP server]]):
+**Compliance settings**:
+A [[Workspace]]'s redaction (on/off, which entity types) and call retention
+(days per kind: recordings, transcripts, events), set once by an admin and
+[[Projection|projected]] into every Agent's TurnCall project and the Workspace's
+webhook project (turncall ADR-0024). Unset is the engine's own default — no
+redaction, everything kept — so nothing is written until an admin sets one.
+An Agent may **override** either: its redaction whole, its retention field by
+field (null takes the Workspace's). The override lands in the Agent's *project*
+setting, never in its [[Config]]'s `retention` block: one project per Agent makes
+the project's setting the Agent's, as with its limits, and redaction has no
+agent-level field to land in anyway. Validated here as the engine validates
+(known entity types, 1–36500 days), so a bad value fails before N writes. See
+ADR-0028.
+_Avoid_: "privacy settings", "data policy", "audit retention" (the audit log's
+own retention is separate and never touched by these).
+
+**Projection** (of an [[Integration]], a [[Workspace MCP server]] or the
+[[Compliance settings]]):
 The copy written into each agent or TurnCall project when a workspace-scoped
 record changes. The master here is authoritative and the copy disposable —
 rewritten, never read back. Because the Builder mints one TurnCall project per

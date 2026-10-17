@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
+    compliance,
     integration_store,
     mcp_registry_store,
     provider_integrations,
@@ -586,6 +587,17 @@ async def create_agent(
         )
     except Exception:  # noqa: BLE001
         logger.exception("projecting integrations into %s failed", agent_id)
+    # And its compliance settings (#103): redacted and expiring from the first
+    # call, like every other Agent's. Best-effort, recorded, retried on apply.
+    try:
+        await compliance.project_into_new_target(
+            pool,
+            client,
+            ctx.workspace_id,
+            {"agent_id": agent_id, "project_id": project_id, "api_key": key},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("projecting compliance settings into %s failed", agent_id)
     knowledge = await _forward_staged_documents(sid, agent_id, key)
     return {
         "success": True,

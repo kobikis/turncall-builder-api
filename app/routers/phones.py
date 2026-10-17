@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .. import provider_integrations, runtime, twilio_store
+from .. import compliance, provider_integrations, runtime, twilio_store
 from .._helpers import _turncall_http_error
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
@@ -152,9 +152,13 @@ async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dic
         client = runtime.get_client()
         wp, created = await phones.ensure_workspace_webhook_project(pool, client, workspace_id)
         if created:
-            # Its calls run on the Workspace's keys, like any agent's (#65).
+            # Its calls run on the Workspace's keys, like any agent's (#65), and
+            # under its compliance settings (#103).
             await provider_integrations.project_into_new_target(
                 pool, client, workspace_id, phones.as_projection_target(workspace_id, wp)
+            )
+            await compliance.project_into_new_target(
+                pool, client, workspace_id, compliance.webhook_target(workspace_id, wp)
             )
         return {
             "fields": {"routing_target_type": "webhook", "server_url": body.server_url},

@@ -29,6 +29,7 @@ os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decod
 
 from app import (
     auth_store,
+    compliance_store,
     deps,
     integration_store,
     main,
@@ -75,6 +76,7 @@ def mocks(monkeypatch):
         integration_store=create_autospec(integration_store),
         mcp_registry_store=create_autospec(mcp_registry_store),
         twilio_store=create_autospec(twilio_store),
+        compliance_store=create_autospec(compliance_store),
         client=AsyncMock(spec=TurnCallClient),
     )
     # Patch each function ON THE SOURCE MODULE so every importer sees the mock —
@@ -92,6 +94,7 @@ def mocks(monkeypatch):
         (integration_store, m.integration_store),
         (mcp_registry_store, m.mcp_registry_store),
         (twilio_store, m.twilio_store),
+        (compliance_store, m.compliance_store),
     ]:
         for attr in vars(mock_mod):
             if not attr.startswith("_"):
@@ -122,6 +125,11 @@ def mocks(monkeypatch):
     m.phones.shared_webhook_numbers.return_value = 0
     m.twilio_store.get.return_value = None
     m.twilio_store.credentials.return_value = None
+    # No compliance settings, overrides or projections unless a test says so.
+    m.compliance_store.get_workspace.return_value = None
+    m.compliance_store.get_override.return_value = None
+    m.compliance_store.list_overrides.return_value = {}
+    m.compliance_store.list_projections.return_value = {}
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

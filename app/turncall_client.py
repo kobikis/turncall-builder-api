@@ -154,6 +154,24 @@ class TurnCallClient:
             "PUT", f"/v1/projects/{project_id}/limits", api_key=api_key, json=limits
         )
 
+    async def set_project_redaction(
+        self, project_id: str, redaction: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Replace the project's redaction (turncall#313): `{enabled, entities}`,
+        null entities = the engine's default list. Admin key, its own project."""
+        return await self._request(
+            "PUT", f"/v1/projects/{project_id}/redaction", api_key=api_key, json=redaction
+        )
+
+    async def set_project_retention(
+        self, project_id: str, retention: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Replace the project's retention (turncall#316): days per kind, null =
+        kept for good. Admin key, its own project."""
+        return await self._request(
+            "PUT", f"/v1/projects/{project_id}/retention", api_key=api_key, json=retention
+        )
+
     async def bind_phone_number(
         self, payload: dict[str, Any], api_key: str
     ) -> dict[str, Any]:

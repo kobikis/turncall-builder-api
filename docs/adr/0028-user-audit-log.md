@@ -35,3 +35,28 @@ settings never touch it.
 - The compliance settings TurnCall's ADR-0024 adds (redaction, retention) get a
   Console page on the Workspace, projected into each Agent's TurnCall project
   like any other workspace-scoped record ([[Projection]]).
+
+## Compliance settings, as built (#103)
+
+`PUT /compliance` (admin) sets the Workspace's redaction and retention;
+`POST /compliance/apply` retries; `GET|PUT /agents/{id}/compliance` reads (any
+member) and overrides (admin) one Agent's. Storage is `workspace_compliance`,
+`agent_compliance` and `compliance_projections` (migration 0019).
+
+**An Agent's override is written into its own project's setting, not into the
+engine's agent `config.retention`.** Every Agent is its own TurnCall project, so
+the project setting already is the Agent's, and one mechanism then covers both
+halves: redaction has no agent-level field in the engine. It also keeps
+`retention` out of the agent config, which every Console Apply rewrites and which
+the engine guards with an admin-only refusal on change. The engine's agent
+override exists for projects holding several agents, which the Builder never
+mints.
+
+**Projection state is a fingerprint per target.** Each Agent's effective setting
+(Workspace, then its override) is hashed; a target recorded `applied` with that
+hash is skipped, so a re-run after a partial failure writes only what failed, and
+a read reports each target `applied`, `failed` (with why) or `pending` (the
+master changed since). A target never written and owed only the engine's default
+already holds it. The Workspace's webhook project (#65) is a target too, with the
+Workspace's setting and never an override, because custom call-init calls are
+stored there.
