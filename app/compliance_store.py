@@ -9,9 +9,7 @@ from typing import Any
 
 import asyncpg
 
-
-def _json(value: Any) -> Any:
-    return json.loads(value) if isinstance(value, str) else value
+from .db import jsonb
 
 
 async def get_workspace(pool: asyncpg.Pool, workspace_id: str) -> dict[str, Any] | None:
@@ -24,8 +22,8 @@ async def get_workspace(pool: asyncpg.Pool, workspace_id: str) -> dict[str, Any]
     if row is None:
         return None
     return {
-        "redaction": _json(row["redaction"]),
-        "retention": _json(row["retention"]),
+        "redaction": jsonb(row["redaction"]),
+        "retention": jsonb(row["retention"]),
         "updated_at": row["updated_at"],
     }
 
@@ -65,7 +63,7 @@ async def get_override(
     )
     if row is None:
         return None
-    return {"redaction": _json(row["redaction"]), "retention": _json(row["retention"])}
+    return {"redaction": jsonb(row["redaction"]), "retention": jsonb(row["retention"])}
 
 
 async def list_overrides(pool: asyncpg.Pool, workspace_id: str) -> dict[str, dict[str, Any]]:
@@ -75,7 +73,7 @@ async def list_overrides(pool: asyncpg.Pool, workspace_id: str) -> dict[str, dic
         workspace_id,
     )
     return {
-        r["agent_id"]: {"redaction": _json(r["redaction"]), "retention": _json(r["retention"])}
+        r["agent_id"]: {"redaction": jsonb(r["redaction"]), "retention": jsonb(r["retention"])}
         for r in rows
     }
 

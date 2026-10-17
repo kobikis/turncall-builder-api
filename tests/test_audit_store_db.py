@@ -86,6 +86,46 @@ async def _backdate(pool, entry_id: str, days: int) -> None:
     await pool.execute(f"INSERT INTO audit_entries ({', '.join(cols)}) VALUES ({placeholders})", *values)
 
 
+class _Recording:
+    """A pool stand-in that notes the first query a store function sends."""
+
+    def __init__(self) -> None:
+        self.query: tuple[str, tuple] | None = None
+
+    async def fetchval(self, query, *args):
+        self.query = self.query or (query, args)
+        return 0
+
+    async def fetch(self, query, *args):
+        self.query = self.query or (query, args)
+        return []
+
+
+class _Rollback(Exception):
+    pass
+
+
+async def _plan(pool, call) -> str:
+    """The plan of the first query `call` sends when only the agent_ids index
+    could serve it: the Workspace's own indexes are dropped for the length of
+    a transaction that is then rolled back, and sequential scans are off, so
+    the plan names the GIN index exactly when the query can use it."""
+    recording = _Recording()
+    await call(recording)
+    query, args = recording.query
+    plan = ""
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DROP INDEX ix_audit_entries_workspace_created")
+            await conn.execute("DROP INDEX ix_audit_entries_workspace_user")
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            plan = "\n".join(r[0] for r in await conn.fetch(f"EXPLAIN {query}", *args))
+            raise _Rollback
+    except _Rollback:
+        pass
+    return plan
+
+
 async def _run_assertions(dsn: str) -> None:
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=3)
     try:
@@ -119,6 +159,10 @@ async def _run_assertions(dsn: str) -> None:
         assert [e["id"] for e in about_a2] == [second["id"]]
         about_a1, total = await audit_store.list_entries(pool, ws, agent_id="a1")
         assert total == 2
+
+        # The agent filter is one the GIN index on agent_ids can serve.
+        plan = await _plan(pool, lambda db: audit_store.list_entries(db, ws, agent_id="a1"))
+        assert "ix_audit_entries_agent_ids" in plan, plan
 
         page, total = await audit_store.list_entries(pool, ws, page=2, limit=2)
         assert total == 3 and [e["resource_type"] for e in page] == ["agent"]

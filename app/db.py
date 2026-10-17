@@ -3,6 +3,7 @@ schema changes (alembic/versions/); the app never issues DDL at startup."""
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,6 +17,12 @@ async def create_pool() -> asyncpg.Pool:
     if not dsn:
         raise RuntimeError("DATABASE_URL not configured")
     return await asyncpg.create_pool(dsn)
+
+
+def jsonb(value: Any) -> Any:
+    """A jsonb column's value as Python: asyncpg hands jsonb back as text
+    unless a codec is set, which these pools do not."""
+    return json.loads(value) if isinstance(value, str) else value
 
 
 class _Pinned:

@@ -20,6 +20,7 @@ from ..audit import Audit
 from ..backends import phones
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..integration_store import IntegrationError
+from ..turncall_client import failure_reason
 from .phones import PhoneBind, _resolve_routing
 
 router = APIRouter(prefix="/integrations/twilio")
@@ -140,20 +141,9 @@ async def _resend(pool: Any, workspace_id: str, pair: tuple[str, str]) -> list[d
             await phones.record_number(pool, {**number, "workspace_id": workspace_id, "twilio_account_sid": pair[0]})
         except Exception as exc:  # noqa: BLE001 — reported per number, retry by saving again
             state = "failed"
-            error = _why(exc)
+            error = failure_reason(exc)
         results.append({"id": number["id"], "e164": number["e164"], "state": state, "error": error})
     return results
-
-
-def _why(exc: Exception) -> str:
-    if isinstance(exc, httpx.HTTPStatusError):
-        try:
-            return str(exc.response.json().get("error") or exc.response.text)[:300]
-        except ValueError:
-            return exc.response.text[:300]
-    if isinstance(exc, HTTPException):
-        return str(exc.detail)[:300]
-    return f"{type(exc).__name__}: {exc}"[:300]
 
 
 @router.delete("")

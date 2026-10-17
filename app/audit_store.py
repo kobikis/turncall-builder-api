@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from .db import jsonb
+
 # The janitor's mark. The append-only trigger lets a DELETE through only in a
 # transaction that set it, so nothing else that connects as the app can.
 RETENTION_GUC = "builder.audit_retention"
@@ -56,10 +58,6 @@ async def insert(db: Any, entry: dict[str, Any]) -> dict[str, Any]:
     return _view(row)
 
 
-def _json(value: Any) -> Any:
-    return json.loads(value) if isinstance(value, str) else value
-
-
 def _view(row: Any) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -72,11 +70,11 @@ def _view(row: Any) -> dict[str, Any]:
         "resource_name": row["resource_name"],
         "action": row["action"],
         "agent_ids": list(row["agent_ids"]),
-        "changes": _json(row["changes"]),
+        "changes": jsonb(row["changes"]),
         "request_id": str(row["request_id"]),
         # [{project_id, engine_audit_id}]: each TurnCall request the change made
         # that TurnCall audited; empty when it never reached TurnCall (#102).
-        "engine_links": _json(row["engine_links"]),
+        "engine_links": jsonb(row["engine_links"]),
         "created_at": row["created_at"].isoformat(),
     }
 
@@ -115,8 +113,10 @@ async def list_entries(
         args.append(_uuid(user_id))
         where.append(f"user_id = ${len(args)}")
     if agent_id is not None:
+        # Containment, not `= ANY(...)`: only @>, <@ and && can use the GIN
+        # index on agent_ids, and this is the lookup it exists for.
         args.append(agent_id)
-        where.append(f"${len(args)} = ANY(agent_ids)")
+        where.append(f"agent_ids @> ARRAY[${len(args)}]::text[]")
     if since is not None:
         args.append(since)
         where.append(f"created_at >= ${len(args)}")

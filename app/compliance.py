@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_
 
 from . import compliance_store
 from .backends import phones, registry
-from .provider_integrations import _why
+from .turncall_client import failure_reason
 
 logger = logging.getLogger("turncall_builder")
 
@@ -186,7 +186,7 @@ async def _write(client: Any, target: dict[str, Any], setting: dict[str, Any]) -
         await client.set_project_retention(target["project_id"], setting["retention"], target["api_key"])
     except Exception as exc:  # noqa: BLE001 — recorded, and retryable
         logger.warning("compliance projection to %s failed: %s", target["agent_id"], exc)
-        return _why(exc)
+        return failure_reason(exc)
     return None
 
 

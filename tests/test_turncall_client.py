@@ -9,6 +9,7 @@ from app.turncall_client import (
     AuditedCalls,
     TurnCallClient,
     collecting,
+    failure_reason,
 )
 
 
@@ -319,3 +320,28 @@ async def test_reading_one_requests_engine_entries():
     assert out["data"] == [{"id": "e"}]
     assert seen["url"].path == "/v1/audit-log" and seen["auth"] == "Bearer tc_k"
     assert dict(seen["url"].params) == {"request_id": "eng-1", "limit": "200", "cursor": "c2"}
+
+
+# --- failure_reason: the one error-reason formatter --------------------------------
+
+
+def _status_error(status: int, **response) -> httpx.HTTPStatusError:
+    request = httpx.Request("PUT", "http://turncall/v1/x")
+    return httpx.HTTPStatusError(
+        "refused", request=request, response=httpx.Response(status, request=request, **response)
+    )
+
+
+def test_failure_reason_reads_the_peers_own_error():
+    assert failure_reason(_status_error(422, json={"error": "bad entity"})) == "bad entity"
+    # A body that is JSON but not an object, or not JSON, is shown as sent.
+    assert failure_reason(_status_error(500, json=["x"])) == '["x"]'
+    assert failure_reason(_status_error(502, text="upstream down")) == "upstream down"
+
+
+def test_failure_reason_takes_a_detail_or_the_exception_itself():
+    from fastapi import HTTPException
+
+    assert failure_reason(HTTPException(status_code=404, detail="agent not found")) == "agent not found"
+    assert failure_reason(RuntimeError("boom")) == "RuntimeError: boom"
+    assert len(failure_reason(RuntimeError("x" * 1000))) == 300

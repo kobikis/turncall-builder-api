@@ -88,6 +88,24 @@ def note_audit_id(
         calls.add(AuditedCall(audit_id, project_id, api_key))
 
 
+def failure_reason(exc: BaseException, *, limit: int = 300) -> str:
+    """Why a call failed, short enough to store and show: the HTTP peer's own
+    `error` (TurnCall's, Twilio's through it), an HTTPException's detail, or
+    the exception itself. The one formatter for every per-target projection
+    state and every partial audit entry."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            body = exc.response.json()
+        except ValueError:
+            body = None
+        reason = body.get("error") if isinstance(body, dict) else None
+        return str(reason or exc.response.text)[:limit]
+    detail = getattr(exc, "detail", None)  # an HTTPException, without importing FastAPI
+    if detail is not None:
+        return str(detail)[:limit]
+    return f"{type(exc).__name__}: {exc}"[:limit]
+
+
 def _created_id(resp: httpx.Response) -> str | None:
     """The id of what a bootstrap call created (POST /v1/projects)."""
     try:
