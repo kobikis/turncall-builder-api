@@ -142,16 +142,45 @@ def test_a_refused_change_records_nothing(client, mocks):
     mocks.audit_store.insert.assert_not_called()
 
 
-def test_limits_record_before_and_after(client, mocks):
-    mocks.registry.get_backend.return_value = backend_row()
-    mocks.client.get_project.return_value = {"limits": {"live_calls": 2}}
-    mocks.client.set_project_limits.return_value = {"limits": {"live_calls": 5}}
+def test_limits_record_what_they_replaced_from_the_builders_copy(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(
+        limits={"live_calls": 2, "outbound_calls_per_second": None, "messages_per_minute": None}
+    )
+    mocks.client.set_project_limits.return_value = {
+        "limits": {"live_calls": 5, "outbound_calls_per_second": None, "messages_per_minute": None}
+    }
 
     assert client.put("/agents/a1/limits", json={"live_calls": 5}, headers=WS).status_code == 200
 
     entry = _only_entry(mocks)
     assert entry["action"] == "limits_set"
     assert entry["changes"] == {"/limits/live_calls": {"before": 2, "after": 5}}
+    # No extra round trip for the "before", and the copy now holds TurnCall's answer.
+    mocks.client.get_project.assert_not_called()
+    assert mocks.registry.set_limits.await_args.args[1:] == (
+        "a1", {"live_calls": 5, "outbound_calls_per_second": None, "messages_per_minute": None},
+    )
+
+
+def test_limits_with_no_copy_say_the_before_is_unknown_not_null(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()  # never read or set here
+    mocks.client.set_project_limits.return_value = {"limits": {"live_calls": 5}}
+
+    assert client.put("/agents/a1/limits", json={"live_calls": 5}, headers=WS).status_code == 200
+
+    assert _only_entry(mocks)["changes"] == {
+        "/limits/live_calls": {"after": 5, "before_unknown": True}
+    }
+    mocks.client.get_project.assert_not_called()
+
+
+def test_reading_limits_refreshes_the_copy(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row()
+    mocks.client.get_project.return_value = {"limits": {"live_calls": 2}}
+
+    assert client.get("/agents/a1/limits", headers=WS).status_code == 200
+
+    assert mocks.registry.set_limits.await_args.args[1:] == ("a1", {"live_calls": 2})
 
 
 # --- numbers ---------------------------------------------------------------------

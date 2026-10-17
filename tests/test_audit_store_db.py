@@ -196,6 +196,10 @@ async def _run_assertions(dsn: str) -> None:
             await conn.execute("DELETE FROM audit_entries WHERE id = $1", uuid.UUID(linked["id"]))
 
         await registry.record_backend(pool, "agent-x", "proj-x", "tc_x", "Bot", 9101, {}, ws)
+        # The copy a limits change is audited against (migration 0022).
+        assert (await registry.get_backend(pool, "agent-x"))["limits"] is None
+        await registry.set_limits(pool, "agent-x", {"live_calls": 3})
+        assert (await registry.get_backend(pool, "agent-x"))["limits"] == {"live_calls": 3}
         await registry.mark_deleted(pool, "agent-x")  # a torn-down Agent's entries still link
         await pool.execute(
             "INSERT INTO webhook_project (id, project_id, api_key) VALUES (1, 'proj-shared', 'tc_s')"

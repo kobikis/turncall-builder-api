@@ -25,7 +25,7 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
-    for col in ("config", "tool_statuses"):
+    for col in ("config", "tool_statuses", "limits"):
         if col in d:
             d[col] = json.loads(d[col]) if d[col] else None
     # uuid -> str so callers can compare and serialize it without knowing the
@@ -37,7 +37,7 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
 
 _COLS = (
     "agent_id, project_id, api_key, slug, port, service_dir, status, config, "
-    "webhook_secret, tool_statuses, workspace_id, builder_token, call_init_secret"
+    "webhook_secret, tool_statuses, workspace_id, builder_token, call_init_secret, limits"
 )
 
 
@@ -174,6 +174,16 @@ async def set_tool_statuses(
         "UPDATE agent_backends SET tool_statuses = $2::jsonb WHERE agent_id = $1",
         agent_id,
         json.dumps(statuses),
+    )
+
+
+async def set_limits(pool: asyncpg.Pool, agent_id: str, limits: dict[str, Any] | None) -> None:
+    """Keep the builder's copy of the Agent's project limits (migration 0022):
+    what TurnCall last reported, so a change is audited with what it replaced."""
+    await pool.execute(
+        "UPDATE agent_backends SET limits = $2::jsonb WHERE agent_id = $1",
+        agent_id,
+        None if limits is None else json.dumps(limits),
     )
 
 

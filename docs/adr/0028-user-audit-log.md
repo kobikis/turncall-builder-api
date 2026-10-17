@@ -148,6 +148,15 @@ signing key. Using it means a public webhook route and provisioning that key for
 every Pipedream project in use, the deployment's and each Workspace's own, so
 it is left for later; the difference rule is the best the redirect allows.
 
+**A "before" nobody read is unknown, not null.** An Agent's limits change
+records what it replaced from the builder's own copy (`agent_backends.limits`,
+migration 0022), refreshed from TurnCall's answer to every read and save; the
+builder holds the project's only admin key, so the copy is the project's. That
+spares every save a GET to TurnCall. An Agent whose limits were never read or
+set here has no copy, and its entry lists each field as `{"after": ...,
+"before_unknown": true}` (`audit.before_unknown`) rather than claiming it was
+null.
+
 **Append-only in the database too.** A trigger refuses UPDATE, TRUNCATE and
 any DELETE outside the retention janitor's transaction (`SET LOCAL
 builder.audit_retention = 'on'`). It stops the application and anything
