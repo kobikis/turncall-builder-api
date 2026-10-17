@@ -96,14 +96,16 @@ async def connect(
         )
     except IntegrationError as exc:
         raise _unavailable(exc) from exc
-    numbers = await _resend(pool, ctx.workspace_id, (body.account_sid, body.auth_token))
-    # The token is never read back, so saving the card always reads as a new one.
-    await audit.record(
+    # The token is never read back, so saving the card always reads as a new
+    # one. Saved: a re-send that raises from here is recorded as partial.
+    change = audit.begin(
         ctx, "twilio_account", "workspace", "updated" if before else "created",
         resource_name=body.account_sid,
         before=_audited(before),
         after={"account_sid": body.account_sid, "auth_token": body.auth_token},
     )
+    numbers = await _resend(pool, ctx.workspace_id, (body.account_sid, body.auth_token))
+    await change.record()
     return {"success": True, "data": {"connected": True, **saved, "numbers": numbers}}
 
 

@@ -12,6 +12,11 @@ projects (Create makes the project, its key and the agent and projects the
 Workspace's credentials and compliance settings into it; a compliance or
 credential change is written into every Agent's project).
 
+`outcome` is `completed`, or `partial` for a change of several steps that
+failed after some of them had landed, with `error` saying why: the entry
+records what happened, so the change is in the log even though the request
+failed.
+
 No foreign keys: an entry outlives the member who made it, the agent it is
 about and the Workspace's other rows. `agent_ids` holds every Agent an entry is
 about (a number re-pointed from one to another is about both), so "what
@@ -53,6 +58,9 @@ def upgrade() -> None:
             changes             jsonb NOT NULL DEFAULT '{}'::jsonb,
             request_id          uuid NOT NULL,
             engine_links        jsonb NOT NULL DEFAULT '[]'::jsonb,
+            outcome             text NOT NULL DEFAULT 'completed'
+                                CHECK (outcome IN ('completed', 'partial')),
+            error               text,
             created_at          timestamptz NOT NULL DEFAULT now()
         )
         """

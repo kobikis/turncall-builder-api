@@ -20,7 +20,8 @@ RETENTION_GUC = "builder.audit_retention"
 
 _COLUMNS = (
     "id, workspace_id, user_id, user_email, role, resource_type, resource_id, "
-    "resource_name, action, agent_ids, changes, request_id, engine_links, created_at"
+    "resource_name, action, agent_ids, changes, request_id, engine_links, outcome, error, "
+    "created_at"
 )
 
 
@@ -38,8 +39,9 @@ async def insert(db: Any, entry: dict[str, Any]) -> dict[str, Any]:
         f"""INSERT INTO audit_entries
                (id, workspace_id, user_id, user_email, role, resource_type,
                 resource_id, resource_name, action, agent_ids, changes, request_id,
-                engine_links)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb)
+                engine_links, outcome, error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb,
+                    $14, $15)
             RETURNING {_COLUMNS}""",
         uuid.UUID(entry["id"]),
         uuid.UUID(entry["workspace_id"]),
@@ -54,6 +56,8 @@ async def insert(db: Any, entry: dict[str, Any]) -> dict[str, Any]:
         json.dumps(entry.get("changes") or {}),
         uuid.UUID(entry["request_id"]),
         json.dumps(entry.get("engine_links") or []),
+        entry.get("outcome") or "completed",
+        entry.get("error"),
     )
     return _view(row)
 
@@ -75,6 +79,10 @@ def _view(row: Any) -> dict[str, Any]:
         # [{project_id, engine_audit_id}]: each TurnCall request the change made
         # that TurnCall audited; empty when it never reached TurnCall (#102).
         "engine_links": jsonb(row["engine_links"]),
+        # "completed", or "partial" for a change that failed after some of it
+        # had landed, with `error` saying why (app/audit.py, Change).
+        "outcome": row["outcome"],
+        "error": row["error"],
         "created_at": row["created_at"].isoformat(),
     }
 

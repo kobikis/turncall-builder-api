@@ -38,7 +38,7 @@ from ..builder import ComposeResult, BuilderError, stream
 from ..mapper import external_tool_names, to_create_agent_request
 from ..settings import load_settings
 from ..tasks import spawn
-from .agents import record_config_change
+from .agents import begin_config_change
 
 logger = logging.getLogger("turncall_builder")
 router = APIRouter()
@@ -481,8 +481,11 @@ async def apply_edit(
     b = await registry.get_backend(pool, sess["agent_id"], ctx.workspace_id)
     if not b:
         raise HTTPException(status_code=404, detail="agent backend not found")
-    result = await agent_update.apply_update(pool, runtime.get_client(), b, sess["config"])
-    await record_config_change(audit, ctx, b, sess["config"])
+    change = begin_config_change(audit, ctx, b, sess["config"])
+    result = await agent_update.apply_update(
+        pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
+    )
+    await change.record()
     return {"success": True, "data": {"agent_id": sess["agent_id"], **result}}
 
 
@@ -578,6 +581,11 @@ async def create_agent(
             detail="Agent provisioning failed in TurnCall — rolled back; please retry.",
         ) from exc
 
+    # The agent exists from here: whatever fails after this, it is in the log.
+    change = audit.begin(
+        ctx, "agent", agent_id, "created",
+        resource_name=name, agent_ids=[agent_id], before=None, after=config,
+    )
     # Local + docker; best-effort, records status for the UI and never raises.
     backend = await _generate_backend(
         pool, agent_id, project_id, key, config, port, secret, ctx.workspace_id
@@ -605,10 +613,7 @@ async def create_agent(
     except Exception:  # noqa: BLE001
         logger.exception("projecting compliance settings into %s failed", agent_id)
     knowledge = await _forward_staged_documents(sid, agent_id, key)
-    await audit.record(
-        ctx, "agent", agent_id, "created",
-        resource_name=name, agent_ids=[agent_id], before=None, after=config,
-    )
+    await change.record()
     return {
         "success": True,
         "data": {

@@ -103,29 +103,32 @@ async def update_agent(
         raise HTTPException(status_code=404, detail="agent not found")
 
     _validate_agent_config(body.config)  # guard before _normalize_config / mapper
+    change = begin_config_change(audit, ctx, b, body.config)
     try:
         result = await agent_update.apply_update(
-            pool, runtime.get_client(), b, body.config
+            pool, runtime.get_client(), b, body.config, on_landed=change.landed
         )
     except httpx.HTTPStatusError as exc:
         # TurnCall refused the config (e.g. a 422 naming the field): pass its
         # status and reason through rather than a bare 500.
         raise _turncall_http_error(exc) from exc
-    await record_config_change(audit, ctx, b, body.config)
+    await change.record()
     return {"success": True, "data": {"agent_id": agent_id, **result}}
 
 
-async def record_config_change(
+def begin_config_change(
     audit: Any, ctx: AuthContext, backend: dict[str, Any], config: dict[str, Any]
-) -> None:
-    """The audit entry for an applied config: both sides normalized the way
-    apply_update compares them, so a legacy config's filled-in defaults never
-    read as a change. Shared by the form edit and the chat edit's Apply."""
+) -> Any:
+    """The audit entry for applying a config, begun before apply_update: both
+    sides normalized the way apply_update compares them, so a legacy config's
+    filled-in defaults never read as a change. It lands when TurnCall accepts
+    the agent (a refusal records nothing; a failure after it, partial). Shared
+    by the form edit, the chat edit's Apply and attaching Connected apps."""
     port = backend["port"]
     before = _normalize_config(backend["config"], port) if backend.get("config") else None
     after = _normalize_config(config, port)
-    await audit.record(
-        ctx, "agent", backend["agent_id"], "updated",
+    return audit.begin(
+        ctx, "agent", backend["agent_id"], "updated", landed=False,
         resource_name=after.get("name"), agent_ids=[backend["agent_id"]],
         before=before, after=after,
     )
@@ -211,7 +214,14 @@ async def delete_agent(
             status_code=409,
             detail=f"{len(bound)} phone number(s) still route to this agent — unbind them first",
         )
+    config = b.get("config") or None
+    change = audit.begin(
+        ctx, "agent", agent_id, "deleted", landed=False,
+        resource_name=(config or {}).get("name"), agent_ids=[agent_id],
+        before=config, after=None,
+    )
     await generator.teardown(b["service_dir"], b["port"])
+    change.landed()  # its container is down
     # Each agent has its own dedicated project (1:1), so delete the whole
     # project (ADR-0011) — one call removes the agent + key + KB and leaves no
     # orphaned project. Best-effort: the registry teardown proceeds regardless.
@@ -220,12 +230,7 @@ async def delete_agent(
     except Exception as exc:  # noqa: BLE001
         logger.warning("turncall project delete failed for %s: %s", agent_id, exc)
     await registry.mark_deleted(pool, agent_id)
-    config = b.get("config") or None
-    await audit.record(
-        ctx, "agent", agent_id, "deleted",
-        resource_name=(config or {}).get("name"), agent_ids=[agent_id],
-        before=config, after=None,
-    )
+    await change.record()
     return {"success": True, "data": {"deleted": agent_id}}
 
 

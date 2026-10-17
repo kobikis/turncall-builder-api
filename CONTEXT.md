@@ -367,8 +367,11 @@ the change reached TurnCall, a link to each of TurnCall's own audit entries it c
 TurnCall request, since one change can reach many projects. Append-only, admin-readable (`GET /audit`), never holds a secret: a
 credential change says the credential changed, and a secret-named field reads
 `***` on both sides. Written by the change itself — in its own transaction when
-the change is builder-side only, once TurnCall accepted it otherwise — so a
-failed request leaves none. Kept as long as the operator's
+the change is builder-side only, once it is done otherwise. A change of several
+steps that fails after some of them landed (a credential saved but not yet
+written into every agent, a number unbound but not yet bound again) is still
+written, `outcome: partial`, with why and what it had reached; one that failed
+before anything landed leaves none. Kept as long as the operator's
 `AUDIT_LOG_RETENTION_DAYS` says, never a Workspace's choice, so no admin can
 shorten the trail that records them. See ADR-0028.
 _Avoid_: "activity", "history", "log" unqualified.

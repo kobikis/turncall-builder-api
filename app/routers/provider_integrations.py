@@ -156,19 +156,22 @@ async def connect(
         )
     pool, client = runtime.get_pool(), runtime.get_client()
     existed = await integration_store.get(pool, ctx.workspace_id, provider) is not None
+    # That the key changed, never the key (ADR-0028). Landed once stored: a
+    # projection that fails after it is recorded as partial.
+    change = audit.begin(
+        ctx, "integration", provider, "updated" if existed else "created", landed=False,
+        resource_name=provider, changes=secret_changed(existed, True),
+    )
     try:
         saved = await integration_store.save(
             pool, ctx.workspace_id, provider,
             document=document, last4=provider_integrations.last4(document), validation=validation,
         )
+        change.landed()
         agents = await provider_integrations.project(pool, client, ctx.workspace_id, provider)
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
-    # That the key changed, never the key (ADR-0028).
-    await audit.record(
-        ctx, "integration", provider, "updated" if existed else "created",
-        resource_name=provider, changes=secret_changed(existed, True),
-    )
+    await change.record()
     return {"success": True, "data": {**saved, "agents": agents}}
 
 
@@ -200,14 +203,20 @@ async def disconnect(
     pool = runtime.get_pool()
     if await integration_store.get(pool, ctx.workspace_id, provider) is None:
         raise HTTPException(status_code=404, detail=f"{provider} is not connected")
+    # Raising partway (not the per-agent failures it reports) leaves some
+    # agents without the key: recorded as partial once TurnCall accepted any
+    # removal.
+    change = audit.begin(
+        ctx, "integration", provider, "disconnect_started", landed=False,
+        resource_name=provider, changes={},
+    )
     data = await provider_integrations.disconnect(pool, runtime.get_client(), ctx.workspace_id, provider)
     # Partway (`complete: false`) the key is still stored: the entry says the
     # disconnect began, and the call that finishes it records the deletion.
-    complete = bool(data.get("complete"))
-    await audit.record(
-        ctx, "integration", provider, "deleted" if complete else "disconnect_started",
-        resource_name=provider, changes=secret_changed(True, False) if complete else {},
-    )
+    if data.get("complete"):
+        await change.record(action="deleted", changes=secret_changed(True, False))
+    else:
+        await change.record()
     return {"success": True, "data": data}
 
 
@@ -227,16 +236,19 @@ async def adopt(
         raise HTTPException(status_code=404, detail="agent not found")
     if provider_integrations.pinned_account(backend.get("config")) != provider:
         raise HTTPException(status_code=409, detail=f"this agent carries no {provider} key of its own")
+    # adopt() refuses when the Workspace already holds a key for it. Several
+    # steps (store, project, rewrite the agent): landed once TurnCall
+    # accepted any of them.
+    change = audit.begin(
+        ctx, "integration", provider, "adopted", landed=False,
+        resource_name=provider, agent_ids=[body.agent_id], changes=secret_changed(False, True),
+    )
     try:
         await provider_integrations.adopt(pool, runtime.get_client(), ctx.workspace_id, backend)
     except provider_integrations.AdoptRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
-    # adopt() refuses when the Workspace already holds a key for it.
-    await audit.record(
-        ctx, "integration", provider, "adopted",
-        resource_name=provider, agent_ids=[body.agent_id], changes=secret_changed(False, True),
-    )
+    await change.record()
     data = await provider_integrations.cards(pool, runtime.get_client(), ctx.workspace_id)
     return {"success": True, "data": data}

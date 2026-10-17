@@ -99,8 +99,27 @@ builder-api (members and invites, skills, the Workspace's Twilio and Pipedream
 records, registering an MCP server) writes its entry in the change's own
 transaction (`db.transaction`, which hands stores written against a pool one
 connection), so the two commit or roll back together. A change that reached
-TurnCall cannot share a transaction with it: its entry is written once TurnCall
-accepted the change, and a request that failed writes none.
+TurnCall cannot share a transaction with it: its entry is written once the
+change is done.
+
+**A change that lands halfway is recorded as it stands.** Many changes that
+reach TurnCall are several steps with no transaction around them: an MCP
+server edit saves the server, then re-pushes every opted-in agent; a number
+moved across projects is unbound in one, then bound in another; Teardown takes
+the container down, then the project, then the registry row. Writing the entry
+only on success meant a failure at step two left a saved credential, or an
+unbound number, with nothing in the log. So such a route begins its change
+(`audit.begin`) as the first step lands and records it at the end; when the
+route raises in between, the trail's own teardown writes the entry, `outcome:
+partial` and `error` (the reason, `failure_reason`), with the agents
+(`agent_ids`) and engine requests (`engine_links`) it had reached, then lets the
+exception through. It is a property of the trail, not of each route: a route
+only says where its change begins and, when that is before anything landed
+(`landed=False`), the step that lands it (`change.landed()`; `apply_update`
+calls it once TurnCall accepted the agent). A TurnCall write the engine audited
+since the change began also counts as landed. A change that failed before
+anything landed leaves no entry, as before. `outcome` is `completed` on every
+other entry.
 
 **A Connected app is recorded at the callback.** It comes to exist when
 Pipedream redirects back, not when the admin starts the flow, and that redirect

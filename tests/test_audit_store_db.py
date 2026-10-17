@@ -138,6 +138,7 @@ async def _run_assertions(dsn: str) -> None:
         assert first["changes"] == {"/system_prompt": {"before": "a", "after": "b"}}
         assert first["agent_ids"] == ["a1"]
         assert first["engine_links"] == []
+        assert (first["outcome"], first["error"]) == ("completed", None)
         second = await audit_store.insert(
             pool, _entry(ws, bob["id"], role="editor", resource_type="phone_number",
                          resource_id="pn1", agent_ids=["a1", "a2"], action="updated"),
@@ -179,9 +180,12 @@ async def _run_assertions(dsn: str) -> None:
         ]
         linked = await audit_store.insert(
             pool, _entry(ws, alice["id"], resource_type="compliance", resource_id="workspace",
-                         agent_ids=[], engine_links=links),
+                         agent_ids=[], engine_links=links, outcome="partial", error="TurnCall is down"),
         )
         assert linked["engine_links"] == links
+        assert (linked["outcome"], linked["error"]) == ("partial", "TurnCall is down")
+        with pytest.raises(asyncpg.CheckViolationError):
+            await audit_store.insert(pool, _entry(ws, alice["id"], outcome="maybe"))
         assert (await audit_store.list_entries(pool, ws, limit=1))[0][0]["engine_links"] == links
         assert (await audit_store.get_entry(pool, ws, linked["id"]))["engine_links"] == links
         assert await audit_store.get_entry(pool, other_ws, linked["id"]) is None

@@ -19,8 +19,20 @@ Three things hold the rest:
 
 Where the change is builder-side only, the entry is written in the change's
 own transaction (`db.transaction`), so the two commit or roll back together.
-Where it reached TurnCall, the entry is written once TurnCall accepted it: the
-two systems share no transaction, and a request that fails writes nothing.
+
+**A change of several steps is begun, then recorded.** Where a change reaches
+TurnCall (or GitHub, or the Agent Backend's container) it shares no
+transaction with anything, and it is often several steps: save a master, then
+write it into every opted-in agent; unbind a number, then bind it elsewhere.
+Such a route calls `audit.begin(...)` as its change starts to land and
+`await change.record()` once it is done. If the route raises in between, the
+trail itself writes the entry as the exception passes its teardown, with
+`outcome: "partial"`, the reason (`failure_reason`), what the change had
+reached so far (its `agent_ids`, its engine links), and lets the exception go
+on. So the trail records what happened, not what was meant to: a change that
+landed halfway is in the log, and one that failed before anything landed
+(`begin(..., landed=False)`, never marked landed, and no TurnCall write
+accepted since) is not.
 
 **It links to what TurnCall recorded** (#102). While the trail is open, the
 TurnCall client collects the engine audit id of every call TurnCall audited
@@ -45,11 +57,15 @@ from . import audit_store, runtime
 from .backends import registry
 from .deps import AuthContext
 from .github import SECRET_KEYS
-from .turncall_client import AuditedCalls, collecting
+from .turncall_client import AuditedCalls, collecting, failure_reason
 
 logger = logging.getLogger("turncall_builder")
 
 MASK = "***"
+# What an entry's `outcome` is: the change finished, or it failed after some of
+# it had landed (and `error` says why).
+COMPLETED = "completed"
+PARTIAL = "partial"
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # The closed vocabulary of what an entry is about. The Console renders these.
@@ -150,6 +166,16 @@ def diff(before: Any, after: Any) -> dict[str, dict[str, Any]]:
     return changes
 
 
+def before_unknown(after: Any) -> dict[str, dict[str, Any]]:
+    """Every field of `after`, for a change whose previous value could not be
+    read: `{"after": ..., "before_unknown": true}` with no `before`, so the
+    entry never claims a field was null when nobody knows what it was."""
+    return {
+        path: {"after": change["after"], "before_unknown": True}
+        for path, change in diff(None, after).items()
+    }
+
+
 def secret_changed(existed_before: bool, exists_after: bool) -> dict[str, dict[str, Any]]:
     """The whole of a credential's entry: that it was set, replaced or removed."""
     return {
@@ -160,6 +186,64 @@ def secret_changed(existed_before: bool, exists_after: bool) -> dict[str, dict[s
     }
 
 
+class Change:
+    """A change of several steps, under way (AuditTrail.begin).
+
+    The route keeps it current as steps land: `agent_ids` grows with each
+    agent reached, `landed()` says the first step took effect, and `before`,
+    `after`, `changes` and `resource_name` may be replaced. `record()` writes
+    it as completed; a route that raises first leaves it to the trail."""
+
+    def __init__(
+        self,
+        trail: AuditTrail,
+        ctx: AuthContext,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+        *,
+        landed: bool,
+        before: Any,
+        after: Any,
+        changes: dict[str, Any] | None,
+        resource_name: str | None,
+        agent_ids: Iterable[str | None],
+    ) -> None:
+        self._trail = trail
+        self.ctx = ctx
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+        self.action = action
+        self.before = before
+        self.after = after
+        self.changes = changes
+        self.resource_name = resource_name
+        self.agent_ids: list[str | None] = list(agent_ids)
+        self._landed = landed
+        self._noted_at_begin = trail.engine_calls.noted
+        self.entry: dict[str, Any] | None = None
+
+    def landed(self) -> None:
+        """Something of this change has taken effect: from here on, a failure
+        is recorded as partial rather than as nothing at all."""
+        self._landed = True
+
+    @property
+    def has_landed(self) -> bool:
+        """Marked landed, or TurnCall has accepted a write since it began (the
+        client notes every call the engine audited)."""
+        return self._landed or self._trail.engine_calls.noted > self._noted_at_begin
+
+    async def record(self, **fields: Any) -> dict[str, Any]:
+        """Write it as completed, with any field given here replacing the one
+        it began with."""
+        for name, value in fields.items():
+            if not hasattr(self, name) or name.startswith("_"):
+                raise TypeError(f"unknown change field {name!r}")
+            setattr(self, name, value)
+        return await self._trail._settle(self, COMPLETED, None)
+
+
 class AuditTrail:
     """One request's entries. Every entry it records shares its request_id."""
 
@@ -167,9 +251,67 @@ class AuditTrail:
         self.request_id = str(uuid.uuid4())
         self.entries: list[dict[str, Any]] = []
         self._unchanged = False
+        self._open: list[Change] = []
         # The audited TurnCall calls this request makes, collected by the
         # client while _trail holds the trail open.
         self.engine_calls = AuditedCalls()
+
+    def begin(
+        self,
+        ctx: AuthContext,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+        *,
+        landed: bool = True,
+        before: Any = None,
+        after: Any = None,
+        changes: dict[str, Any] | None = None,
+        resource_name: str | None = None,
+        agent_ids: Iterable[str | None] = (),
+    ) -> Change:
+        """Start a change of several steps; see the module docstring. By
+        default it has landed already (call it once the first step took
+        effect); `landed=False` begins it before, and then only `landed()` or
+        a TurnCall write accepted since makes a failure worth an entry."""
+        if resource_type not in RESOURCE_TYPES:
+            raise ValueError(f"unknown audit resource_type {resource_type!r}")
+        change = Change(
+            self, ctx, resource_type, resource_id, action, landed=landed,
+            before=before, after=after, changes=changes,
+            resource_name=resource_name, agent_ids=agent_ids,
+        )
+        self._open.append(change)
+        return change
+
+    async def _settle(
+        self, change: Change, outcome: str, error: str | None
+    ) -> dict[str, Any]:
+        self._open.remove(change)
+        change.entry = await self.record(
+            change.ctx, change.resource_type, change.resource_id, change.action,
+            before=change.before, after=change.after, changes=change.changes,
+            resource_name=change.resource_name, agent_ids=change.agent_ids,
+            outcome=outcome, error=error,
+        )
+        return change.entry
+
+    async def _close(self, exc: BaseException | None) -> None:
+        """Settle every change still under way as the route ends: completed
+        when it returned, partial when it raised and the change had landed."""
+        for change in list(self._open):
+            if exc is None:
+                await self._settle(change, COMPLETED, None)
+                continue
+            if not change.has_landed:
+                self._open.remove(change)
+                continue
+            try:
+                await self._settle(change, PARTIAL, failure_reason(exc))
+            except Exception:  # noqa: BLE001 — the route's own failure is what propagates
+                logger.exception(
+                    "could not record a partial %s %s change", change.resource_type, change.action
+                )
 
     async def record(
         self,
@@ -184,6 +326,8 @@ class AuditTrail:
         resource_name: str | None = None,
         agent_ids: Iterable[str | None] = (),
         db: Any = None,
+        outcome: str = COMPLETED,
+        error: str | None = None,
     ) -> dict[str, Any]:
         """Append an entry for one change `ctx`'s member made.
 
@@ -209,6 +353,8 @@ class AuditTrail:
             "changes": changes if changes is not None else diff(before, after),
             "request_id": self.request_id,
             "engine_links": await self._engine_links(db),
+            "outcome": outcome,
+            "error": error,
         }
         await audit_store.insert(db, entry)
         self.entries.append(entry)
@@ -240,10 +386,16 @@ class AuditTrail:
 
 async def _trail() -> AsyncIterator[AuditTrail]:
     trail = AuditTrail()
-    with collecting(trail.engine_calls):
-        yield trail
-    # Reached only when the route returned normally: an exception (a 4xx, a
-    # TurnCall failure) is thrown in at the yield and propagates past this.
+    try:
+        with collecting(trail.engine_calls):
+            yield trail
+    except Exception as exc:
+        # The route raised (a 4xx, a TurnCall failure), thrown in at the
+        # yield: a change that had landed is recorded as partial, and the
+        # exception goes on to be the response.
+        await trail._close(exc)
+        raise
+    await trail._close(None)
     if not trail.satisfied:
         logger.error("audited route returned without recording an entry")
         raise UnrecordedChange("an audited route returned without recording an entry")

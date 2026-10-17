@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import compliance, provider_integrations, runtime, twilio_store
 from .._helpers import _turncall_http_error
-from ..audit import MASK, Audit, diff
+from ..audit import MASK, Audit, Change, diff
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -415,30 +415,62 @@ def _token_change(body: PhoneBind, existing: dict[str, Any] | None) -> dict[str,
     return {"/twilio_auth_token": {"before": MASK if had else None, "after": MASK}}
 
 
-async def _record(
+def _entry(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """An entry's fields for a number going from `before` to `after`."""
+    number = after or before or {}
+    return {
+        "resource_id": number["id"],
+        "resource_name": number.get("e164"),
+        # A re-pointed number is about the agent it left and the one it reached.
+        "agent_ids": [(before or {}).get("agent_id"), (after or {}).get("agent_id")],
+        "changes": {**diff(_audited(before), _audited(after)), **(extra or {})},
+    }
+
+
+def _begin(
     audit: Audit,
     ctx: AuthContext,
     action: str,
     before: dict[str, Any] | None,
     after: dict[str, Any] | None,
     extra: dict[str, Any] | None = None,
-) -> None:
-    number = after or before or {}
-    await audit.record(
-        ctx, "phone_number", number["id"], action,
-        resource_name=number.get("e164"),
-        # A re-pointed number is about the agent it left and the one it reached.
-        agent_ids=[(before or {}).get("agent_id"), (after or {}).get("agent_id")],
-        changes={**diff(_audited(before), _audited(after)), **(extra or {})},
+    *,
+    landed: bool = False,
+) -> Change:
+    """Begin a number's change as it would read if it stopped at `after`.
+    Not landed until TurnCall accepts its first write: a refused bind or
+    unbind changed nothing."""
+    fields = _entry(before, after, extra)
+    return audit.begin(
+        ctx, "phone_number", fields.pop("resource_id"), action, landed=landed, **fields
     )
+
+
+def _unbound(number: dict[str, Any]) -> dict[str, Any]:
+    """A number as it stands once unbound in TurnCall and not yet bound again."""
+    return {
+        **number, "routing_type": "none", "agent_id": None, "project_id": None,
+        "server_url": None, "server_url_secret": None,
+    }
 
 
 @router.post("/phone-numbers")
 async def add_phone_number(
     body: PhoneBind, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
+    # TurnCall's bind is the first write; a failure after it (the mirror)
+    # still leaves the binding, and so an entry.
+    change = audit.begin(
+        ctx, "phone_number", body.e164, "created", landed=False,
+        resource_name=body.e164, agent_ids=[body.agent_id],
+        after={"e164": body.e164, "routing_type": body.routing_type, "agent_id": body.agent_id},
+    )
     number = await _bind(runtime.get_pool(), body, ctx.workspace_id)
-    await _record(audit, ctx, "created", None, number, _token_change(body, None))
+    await change.record(**_entry(None, number, _token_change(body, None)))
     return {"success": True, "data": number}
 
 
@@ -467,6 +499,12 @@ async def update_phone_number(
         routing = await _resolve_routing(pool, body, workspace_id)
         if routing["project_id"] == existing["project_id"]:
             new_twilio, new_source = await _twilio_for(pool, body, workspace_id, None, None)
+            requested = {
+                **existing, "routing_type": body.routing_type, "agent_id": routing["agent_id"],
+                "server_url": routing["server_url"], "sms_enabled": body.sms_enabled,
+                "label": body.label,
+            }
+            change = _begin(audit, ctx, "updated", existing, requested, _token_change(body, existing))
             data = await runtime.get_client().update_phone_number(
                 phone_id,
                 {
@@ -481,6 +519,7 @@ async def update_phone_number(
                 },
                 routing["api_key"],
             )
+            change.landed()
             secret = data.get("server_url_secret") or existing.get("server_url_secret")
             if body.routing_type == "agent_call_init":
                 await _sync_call_init_secret(routing["backend"], secret)
@@ -501,7 +540,7 @@ async def update_phone_number(
             }
             await phones.record_number(pool, number)
             stored = await phones.get_number(pool, phone_id, workspace_id) or number
-            await _record(audit, ctx, "updated", existing, stored, _token_change(body, existing))
+            await change.record(**_entry(existing, stored, _token_change(body, existing)))
             return {
                 "success": True,
                 "data": {
@@ -525,8 +564,12 @@ async def update_phone_number(
         carried = await phones.twilio_account(pool, phone_id)
     except IntegrationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # Recorded as it stands after each step: a bind that fails once the
+    # unbind went through leaves the number unbound, and the entry says so.
+    change = _begin(audit, ctx, "updated", existing, _unbound(existing))
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, workspace_id)
+        change.landed()
     number = await _bind(
         pool,
         body,
@@ -537,7 +580,7 @@ async def update_phone_number(
     )
     if number["id"] != phone_id:
         await phones.delete_number(pool, phone_id)
-    await _record(audit, ctx, "updated", existing, number, _token_change(body, existing))
+    await change.record(**_entry(existing, number, _token_change(body, existing)))
     return {"success": True, "data": {**number, "rebound": True}}
 
 
@@ -551,8 +594,11 @@ async def delete_phone_number(
     existing = await phones.get_number(pool, phone_id, ctx.workspace_id)
     if not existing:
         raise HTTPException(status_code=404, detail="phone number not found")
+    change = _begin(audit, ctx, "deleted", existing, None)
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, ctx.workspace_id)
+        change.landed()
     await phones.delete_number(pool, phone_id)
-    await _record(audit, ctx, "deleted", existing, None)
+    change.landed()
+    await change.record()
     return {"success": True, "data": {"unbound": phone_id}}

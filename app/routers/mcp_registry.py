@@ -7,6 +7,7 @@ form like any other. Headers are write-only: a read names them, never shows them
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import asyncpg
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from .. import agent_update, db, integration_store, mcp_registry_store, runtime
-from ..audit import Audit
+from ..audit import Audit, Change
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_member
 
@@ -54,9 +55,13 @@ def _opted_in(backend: dict[str, Any], server_id: str) -> bool:
     return server_id in ((backend.get("config") or {}).get("workspace_mcp_servers") or [])
 
 
-async def _repush(ctx: AuthContext, server_id: str, *, remove: bool = False) -> list[str]:
+async def _repush(
+    ctx: AuthContext, server_id: str, change: Change, *, remove: bool = False
+) -> list[str]:
     """Push every opted-in agent's config again so an edit (or removal) reaches it.
-    Returns the agent ids touched."""
+    Returns the agent ids touched. Each one is added to `change` as it is
+    reached, so a push that fails partway is recorded with the agents it did
+    reach."""
     pool, client = runtime.get_pool(), runtime.get_client()
     touched = []
     for backend in await registry.list_backends(pool, ctx.workspace_id):
@@ -67,9 +72,21 @@ async def _repush(ctx: AuthContext, server_id: str, *, remove: bool = False) -> 
             config["workspace_mcp_servers"] = [
                 s for s in config["workspace_mcp_servers"] if s != server_id
             ]
-        await agent_update.apply_update(pool, client, backend, config)
+        # Reached once TurnCall holds the new config, even if a later step of
+        # this agent's update fails.
+        await agent_update.apply_update(
+            pool, client, backend, config, on_landed=_reached(change, backend["agent_id"])
+        )
         touched.append(backend["agent_id"])
     return touched
+
+
+def _reached(change: Change, agent_id: str) -> Callable[[], None]:
+    def landed() -> None:
+        change.agent_ids.append(agent_id)
+        change.landed()
+
+    return landed
 
 
 def _store_error(exc: integration_store.IntegrationError) -> HTTPException:
@@ -125,15 +142,16 @@ async def edit(
         raise _store_error(exc) from exc
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
-    server["agents"] = await _repush(ctx, server_id)
     after = _audited(body.model_dump())
     if body.headers is None and before:  # None keeps the stored headers
         after["headers"] = _audited(before)["headers"]
-    await audit.record(
+    # Saved: from here a failed re-push still leaves an entry (partial).
+    change = audit.begin(
         ctx, "mcp_server", server_id, "updated",
-        resource_name=body.name, agent_ids=server["agents"],
-        before=_audited(before), after=after,
+        resource_name=body.name, before=_audited(before), after=after,
     )
+    server["agents"] = await _repush(ctx, server_id, change)
+    await change.record()
     return {"success": True, "data": server}
 
 
@@ -163,11 +181,13 @@ async def remove(
     before = await mcp_registry_store.get_server(pool, ctx.workspace_id, server_id)
     if before is None:
         raise HTTPException(status_code=404, detail="server not found")
-    touched = await _repush(ctx, server_id, remove=True)
-    await mcp_registry_store.delete_server(pool, ctx.workspace_id, server_id)
-    await audit.record(
-        ctx, "mcp_server", server_id, "deleted",
-        resource_name=before.get("name"), agent_ids=touched,
-        before=_audited(before), after=None,
+    # Landed once the first agent no longer carries it.
+    change = audit.begin(
+        ctx, "mcp_server", server_id, "deleted", landed=False,
+        resource_name=before.get("name"), before=_audited(before), after=None,
     )
+    touched = await _repush(ctx, server_id, change, remove=True)
+    await mcp_registry_store.delete_server(pool, ctx.workspace_id, server_id)
+    change.landed()
+    await change.record()
     return {"success": True, "data": {"deleted": server_id, "agents": touched}}

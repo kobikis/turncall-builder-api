@@ -311,15 +311,17 @@ async def set_attached(
     """
     backend = await _backend_or_404(agent_id, ctx.workspace_id)
     config = {**(backend.get("config") or {}), "integrations": body.apps}
-    await agent_update.apply_update(
-        runtime.get_pool(), runtime.get_client(), backend, config
-    )
-    await audit.record(
-        ctx, "agent", agent_id, "updated",
+    # Lands when TurnCall accepts the agent (see begin_config_change).
+    change = audit.begin(
+        ctx, "agent", agent_id, "updated", landed=False,
         resource_name=config.get("name"), agent_ids=[agent_id],
         before={"integrations": (backend.get("config") or {}).get("integrations") or []},
         after={"integrations": body.apps},
     )
+    await agent_update.apply_update(
+        runtime.get_pool(), runtime.get_client(), backend, config, on_landed=change.landed
+    )
+    await change.record()
     return {"success": True, "data": {"apps": body.apps}}
 
 

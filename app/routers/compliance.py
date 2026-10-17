@@ -47,11 +47,13 @@ async def set_settings(
     before = _setting(await compliance_store.get_workspace(pool, ctx.workspace_id))
     after = {"redaction": settings.redaction.model_dump(), "retention": settings.retention.model_dump()}
     await compliance_store.save_workspace(pool, ctx.workspace_id, **after)
-    data = await compliance.report(pool, runtime.get_client(), ctx.workspace_id, write=True)
-    await audit.record(
+    # Saved: a projection that raises from here is recorded as partial.
+    change = audit.begin(
         ctx, "compliance", "workspace", "updated" if before else "created",
         before=before, after=after,
     )
+    data = await compliance.report(pool, runtime.get_client(), ctx.workspace_id, write=True)
+    await change.record()
     return {"success": True, "data": data}
 
 

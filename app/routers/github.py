@@ -243,12 +243,14 @@ async def push(
         await github_store.record_push(pool, agent_id, tree_hash=None, error=str(exc))
         raise _fail(exc) from exc
 
-    await github_store.record_push(pool, agent_id, tree_hash=result.tree_hash, error=None)
-    await audit.record(
+    # On GitHub now, whatever happens to the bookkeeping below.
+    change = audit.begin(
         ctx, "linked_repo", agent_id, "pushed",
         resource_name=f"{link['owner']}/{link['repo']}", agent_ids=[agent_id],
         changes={"/commit": {"before": None, "after": result.commit_sha}},
     )
+    await github_store.record_push(pool, agent_id, tree_hash=result.tree_hash, error=None)
+    await change.record()
     return {
         "success": True,
         "data": {"commit": result.commit_sha, **(await github_store.get_link(pool, agent_id))},

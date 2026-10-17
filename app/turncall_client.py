@@ -48,10 +48,15 @@ class AuditedCalls:
     def __init__(self) -> None:
         self._calls: list[AuditedCall] = []
         self._open = True
+        # Every call ever collected, taken or not: a change under way compares
+        # it with its value when it began to learn whether TurnCall accepted
+        # any of its writes (app/audit.py, Change).
+        self.noted = 0
 
     def add(self, call: AuditedCall) -> None:
         if self._open:
             self._calls.append(call)
+            self.noted += 1
 
     def take(self) -> list[AuditedCall]:
         """Every call collected since the last take, in the order made."""
