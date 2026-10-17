@@ -22,7 +22,7 @@ from cryptography.fernet import Fernet
 
 os.environ.setdefault("PIPEDREAM_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
-from app import pipedream_store  # noqa: E402
+from app import auth_store, pipedream_store  # noqa: E402
 from tests.conftest import __file__ as _conftest_file  # noqa: E402
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(_conftest_file)))
@@ -99,6 +99,35 @@ async def _run_assertions(dsn: str) -> None:
             "rotated",
             "production",
         )
+
+        # --- a Connected-app flow under way (migration 0021) ----------------
+        admin = await auth_store.signup(pool, email="a@x.com", password="password123", workspace_name="A")
+        actor = {"id": admin["id"], "email": "a@x.com", "role": "admin"}
+        await pipedream_store.start_connect_flow(
+            pool, nonce="n0nce", workspace_id=admin["workspace_id"], app="slack_v2",
+            actor=actor, known_account_ids=["apn_had"], ttl_seconds=600,
+        )
+        # Keyed by the nonce's digest: the table alone answers no callback.
+        assert await pool.fetchval("SELECT count(*) FROM pipedream_connect_flows WHERE nonce_digest = 'n0nce'") == 0
+        flow = await pipedream_store.take_connect_flow(pool, "n0nce")
+        assert (flow["workspace_id"], flow["app"]) == (admin["workspace_id"], "slack_v2")
+        assert flow["actor"] == {"id": str(admin["id"]), "email": "a@x.com", "role": "admin"}
+        assert flow["known_account_ids"] == ["apn_had"]
+        # Taken as it is read: a replay finds nothing.
+        assert await pipedream_store.take_connect_flow(pool, "n0nce") is None
+        assert await pipedream_store.take_connect_flow(pool, "never-started") is None
+
+        # An expired flow answers nothing, and the next flow sweeps it.
+        await pipedream_store.start_connect_flow(
+            pool, nonce="stale", workspace_id=admin["workspace_id"], app="slack_v2",
+            actor=actor, known_account_ids=[], ttl_seconds=0,
+        )
+        await pipedream_store.start_connect_flow(
+            pool, nonce="stale2", workspace_id=admin["workspace_id"], app="slack_v2",
+            actor=actor, known_account_ids=[], ttl_seconds=0,
+        )
+        assert await pool.fetchval("SELECT count(*) FROM pipedream_connect_flows") == 1
+        assert await pipedream_store.take_connect_flow(pool, "stale2") is None
     finally:
         await pool.close()
 
@@ -116,6 +145,9 @@ def test_credential_is_stored_encrypted_and_replaced_in_place():
     os.environ["DATABASE_URL"] = test_dsn
     try:
         asyncio.run(_recreate_test_db(base_url))
+        command.upgrade(cfg, "head")
+        # Migration 0021 goes down and up again.
+        command.downgrade(cfg, "0020")
         command.upgrade(cfg, "head")
         asyncio.run(_run_assertions(test_dsn))
     finally:

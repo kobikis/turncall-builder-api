@@ -165,14 +165,28 @@ async def connect(
             "send the admin back to. Set it to this API's public "
             "/integrations/callback URL.",
         )
+    nonce = pipedream.new_flow_nonce()
     try:
+        # What the Workspace already has of this app, so the callback can tell
+        # which account this flow made.
+        known = await pipedream.list_accounts(cred, workspace_id=ctx.workspace_id, app=body.app)
+        # Held here, not in the state: who to audit the Connected app under
+        # when the callback lands, readable by nobody the redirect passes.
+        await pipedream_store.start_connect_flow(
+            runtime.get_pool(),
+            nonce=nonce,
+            workspace_id=ctx.workspace_id,
+            app=body.app,
+            actor={"id": str(ctx.user["id"]), "email": ctx.user.get("email") or "", "role": ctx.role},
+            known_account_ids=[a["id"] for a in known if a.get("id")],
+            ttl_seconds=pipedream.FLOW_TTL_SECONDS,
+        )
         url = await pipedream.connect_link(
             cred,
             workspace_id=ctx.workspace_id,
             app=body.app,
             callback_url=settings.pipedream_redirect_uri,
-            # Who to audit the Connected app under when the callback lands.
-            actor={"id": str(ctx.user["id"]), "email": ctx.user.get("email") or "", "role": ctx.role},
+            state=pipedream.sign_state(nonce),
         )
     except pipedream.PipedreamError as exc:
         raise _fail(exc) from exc
@@ -201,13 +215,20 @@ async def callback(
     connected is the half-made record this endpoint exists to avoid.
 
     A GET, but the one place a Connected app is known to exist, so it is where
-    the audit entry is written, as the admin who started the flow (the signed
-    state carries them). Every way back that connected nothing says so.
+    the audit entry is written, as the admin who started the flow (held
+    server-side under the state's nonce). The flow is taken as it is read:
+    a replayed callback finds nothing, records nothing and attributes nothing.
+    Every way back that connected nothing says so.
     """
     try:
-        workspace_id, app = pipedream.load_state(state)
+        nonce = pipedream.load_state(state)
     except pipedream.PipedreamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    flow = await pipedream_store.take_connect_flow(runtime.get_pool(), nonce)
+    if flow is None:
+        audit.unchanged()
+        return _back(error="This connect link has expired or was already used.")
+    workspace_id, app = flow["workspace_id"], flow["app"]
 
     if error:
         audit.unchanged()
@@ -219,27 +240,21 @@ async def callback(
     except pipedream.PipedreamError as exc:
         audit.unchanged()
         return _back(error=str(exc))
-    if not accounts:
+    account = pipedream.account_from_flow(accounts, flow["known_account_ids"])
+    if account is None:
         audit.unchanged()
         return _back(error=f"{_app_name(app)} was not connected.")
-    actor = pipedream.state_actor(state)
-    if actor is None:
-        # A link signed before links named who started them: nobody to name.
-        logger.warning("connected %s for %s from a link with no actor; not audited", app, workspace_id)
-        audit.unchanged()
-    else:
-        # The newest account of the app is the one this flow just authorized.
-        account = max(accounts, key=lambda a: a.get("created_at") or "")
-        await audit.record(
-            AuthContext(
-                user={"id": actor["id"], "email": actor["email"]},
-                workspace_id=workspace_id,
-                role=actor["role"],
-            ),
-            "connected_app", account.get("id") or app, "connected",
-            resource_name=account.get("name") or _app_name(app),
-            after={"app": app, "account_name": account.get("account_name")},
-        )
+    actor = flow["actor"]
+    await audit.record(
+        AuthContext(
+            user={"id": actor["id"], "email": actor["email"]},
+            workspace_id=workspace_id,
+            role=actor["role"],
+        ),
+        "connected_app", account.get("id") or app, "connected",
+        resource_name=account.get("name") or _app_name(app),
+        after={"app": app, "account_name": account.get("account_name")},
+    )
     return _back(connected=app)
 
 

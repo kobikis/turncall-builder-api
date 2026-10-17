@@ -114,6 +114,8 @@ def mocks(monkeypatch):
             monkeypatch.setattr(pipedream, attr, getattr(m.pipedream, attr))
     # No Pipedream credential unless a test says otherwise — integrations off.
     m.pipedream_store.get_credential.return_value = None
+    # No Connected-app flow under way unless a test starts one (#101).
+    m.pipedream_store.take_connect_flow.return_value = None
     # No Integrations or registered servers unless a test says otherwise.
     m.integration_store.list_for_workspace.return_value = []
     m.integration_store.list_projections.return_value = []

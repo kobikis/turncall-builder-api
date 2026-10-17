@@ -9,6 +9,7 @@ route records at all is held by test_audit_wiring.py.
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -206,16 +207,28 @@ def _pipedream(mocks):
     )
 
 
+def _flow(mocks, **over):
+    flow = {
+        "workspace_id": TEST_WORKSPACE_ID,
+        "app": "slack_v2",
+        "actor": {"id": MEMBER, "email": "boss@x.com", "role": "admin"},
+        "known_account_ids": [],
+        "started_at": None,
+    }
+    flow.update(over)
+    mocks.pipedream_store.take_connect_flow.return_value = flow
+    return pipedream.sign_state("n0nce")
+
+
 def test_a_connected_app_is_recorded_as_the_admin_who_started_it(client, mocks):
     _pipedream(mocks)
     mocks.pipedream.list_accounts.return_value = [
-        {"id": "apn_old", "app": "slack_v2", "name": "Slack", "account_name": "old", "created_at": "2026-01-01"},
+        {"id": "apn_old", "app": "slack_v2", "name": "Slack", "account_name": "old", "created_at": "2026-11-01"},
         {"id": "apn_new", "app": "slack_v2", "name": "Slack", "account_name": "acme", "created_at": "2026-10-01"},
     ]
-    state = pipedream.sign_state(
-        workspace_id=TEST_WORKSPACE_ID, app="slack_v2",
-        actor={"id": MEMBER, "email": "boss@x.com", "role": "admin"},
-    )
+    # apn_old was already there when the flow started: not this flow's,
+    # although its date sorts after.
+    state = _flow(mocks, known_account_ids=["apn_old"])
 
     r = client.get("/integrations/callback", params={"state": state}, follow_redirects=False)
 
@@ -226,18 +239,45 @@ def test_a_connected_app_is_recorded_as_the_admin_who_started_it(client, mocks):
     assert (entry["resource_type"], entry["resource_id"], entry["action"]) == ("connected_app", "apn_new", "connected")
 
 
-def test_connect_signs_who_started_it_into_the_state(client, mocks):
+def test_a_replayed_callback_records_nothing_the_second_time(client, mocks):
     _pipedream(mocks)
+    mocks.pipedream.list_accounts.return_value = [
+        {"id": "apn_new", "app": "slack_v2", "name": "Slack", "account_name": "acme", "created_at": "2026-10-01"},
+    ]
+    state = _flow(mocks)
+    flows = [mocks.pipedream_store.take_connect_flow.return_value, None]  # taken once
+    mocks.pipedream_store.take_connect_flow.side_effect = lambda *a: flows.pop(0)
+
+    first = client.get("/integrations/callback", params={"state": state}, follow_redirects=False)
+    again = client.get("/integrations/callback", params={"state": state}, follow_redirects=False)
+
+    assert first.status_code == again.status_code == 303
+    assert "connected" in first.headers["location"] and "error" in again.headers["location"]
+    assert len(audit_entries(mocks)) == 1
+
+
+def test_connect_holds_who_started_it_server_side_not_in_the_state(client, mocks):
+    _pipedream(mocks)
+    mocks.pipedream.list_accounts.return_value = [
+        {"id": "apn_had", "app": "slack_v2", "name": "Slack", "account_name": "had", "created_at": "2026-01-01"},
+    ]
     mocks.pipedream.connect_link.return_value = "https://pipedream.com/c?token=t"
+
     assert client.post("/integrations/connect", json={"app": "slack_v2"}, headers=WS).status_code == 200
-    actor = mocks.pipedream.connect_link.await_args.kwargs["actor"]
-    assert actor == {"id": "u-test", "email": "admin@test", "role": "admin"}
+
+    held = mocks.pipedream_store.start_connect_flow.await_args.kwargs
+    assert held["actor"] == {"id": "u-test", "email": "admin@test", "role": "admin"}
+    assert (held["workspace_id"], held["app"], held["known_account_ids"]) == (TEST_WORKSPACE_ID, "slack_v2", ["apn_had"])
+    state = mocks.pipedream.connect_link.await_args.kwargs["state"]
+    assert pipedream.load_state(state) == held["nonce"]
+    payload = state.split(".")[0]
+    assert "admin@test" not in base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode()
     mocks.audit_store.insert.assert_not_called()  # nothing exists until the callback
 
 
 def test_an_abandoned_connect_records_nothing(client, mocks):
     _pipedream(mocks)
-    state = pipedream.sign_state(workspace_id=TEST_WORKSPACE_ID, app="slack_v2", actor={"id": MEMBER, "role": "admin"})
+    state = _flow(mocks)
     r = client.get("/integrations/callback", params={"state": state, "error": "1"}, follow_redirects=False)
     assert r.status_code == 303
     mocks.audit_store.insert.assert_not_called()

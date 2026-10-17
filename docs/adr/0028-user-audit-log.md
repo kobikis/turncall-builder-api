@@ -123,8 +123,30 @@ other entry.
 
 **A Connected app is recorded at the callback.** It comes to exist when
 Pipedream redirects back, not when the admin starts the flow, and that redirect
-is no member's request: the signed connect state carries who started it and
-their role, and the entry is written in their name.
+is no member's request. Who started it is held server-side, in
+`pipedream_connect_flows` (migration 0021): the Workspace, the app, the admin's
+id, email and role, and the ids of the app's accounts the Workspace already
+had. The connect state carries only an opaque random nonce (signed, so a forged
+one is refused before the database is asked), and the row is keyed by the
+nonce's digest. The state is signed, not encrypted, and it travels through
+Pipedream, proxy logs and the browser history, so it carries nothing about the
+admin. The callback deletes the flow as it reads it (`DELETE ... RETURNING`):
+a replayed or reloaded callback finds nothing, records nothing and attributes
+nothing, and an expired flow answers nothing either.
+
+**Which account the flow made is told by difference, because Pipedream's
+redirect does not say.** The success redirect carries only our own state, so the
+callback lists the Workspace's accounts of the app and takes the one that was
+not there when the flow started. That is exact unless two admins of one
+Workspace connect the same app at once (both new accounts look like theirs; the
+newest is taken), or Pipedream re-authorizes an existing account in place (none
+is new; the one updated last is taken). The precise tie exists only on
+Pipedream's side channel: a connect token created with a `webhook_uri` gets a
+`CONNECTION_SUCCESS` webhook naming the `connect_token` and the `account.id`,
+signed (`x-pd-signature`, HMAC-SHA256) with the project environment's webhook
+signing key. Using it means a public webhook route and provisioning that key for
+every Pipedream project in use, the deployment's and each Workspace's own, so
+it is left for later; the difference rule is the best the redirect allows.
 
 **Append-only in the database too.** A trigger refuses UPDATE, TRUNCATE and
 any DELETE outside the retention janitor's transaction (`SET LOCAL

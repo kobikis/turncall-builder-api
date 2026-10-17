@@ -120,7 +120,16 @@ def test_pipedream_failure_is_reported_not_swallowed(client, mocks):
 
 
 def _callback(client, mocks, *, workspace_id=TEST_WORKSPACE_ID, app="slack_v2", error=None):
-    state = pipedream.sign_state(workspace_id=workspace_id, app=app)
+    """Come back from a flow that /connect started: held server-side under
+    the state's nonce, and taken by the callback."""
+    mocks.pipedream_store.take_connect_flow.return_value = {
+        "workspace_id": workspace_id,
+        "app": app,
+        "actor": {"id": "u-test", "email": "admin@test", "role": "admin"},
+        "known_account_ids": [],
+        "started_at": None,
+    }
+    state = pipedream.sign_state("n0nce")
     params = {"state": state}
     if error:
         params["error"] = error
@@ -156,6 +165,21 @@ def test_a_return_with_nothing_connected_is_a_failure_not_a_success(client, mock
     r = _callback(client, mocks)
     assert r.status_code == 303
     assert "error" in parse_qs(urlparse(r.headers["location"]).query)
+
+
+def test_a_replayed_or_expired_callback_finds_no_flow_and_records_nothing(client, mocks):
+    """The flow is taken as it is read: the second time through, there is
+    nothing to take."""
+    _configured(mocks)
+    mocks.pipedream_store.take_connect_flow.return_value = None
+    r = client.get(
+        "/integrations/callback", params={"state": pipedream.sign_state("n0nce")}, follow_redirects=False
+    )
+    assert r.status_code == 303
+    assert "already used" in parse_qs(urlparse(r.headers["location"]).query)["error"][0]
+    assert mocks.pipedream_store.take_connect_flow.await_args.args[1] == "n0nce"
+    mocks.pipedream.list_accounts.assert_not_called()
+    mocks.audit_store.insert.assert_not_called()
 
 
 def test_a_forged_state_is_refused(client, mocks):

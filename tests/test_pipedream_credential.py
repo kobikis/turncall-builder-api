@@ -65,6 +65,7 @@ class TestAccountShape:
             "account_name": "acme.slack.com",
             "healthy": True,
             "created_at": None,
+            "updated_at": None,
         }
 
     def test_an_unnamed_app_falls_back_to_the_catalog(self):
@@ -78,17 +79,62 @@ class TestConnectState:
     state — which app and which Workspace are ours, not theirs."""
 
     def test_roundtrip(self):
-        state = pipedream.sign_state(workspace_id="w1", app="slack")
-        assert pipedream.load_state(state) == ("w1", "slack")
+        nonce = pipedream.new_flow_nonce()
+        assert pipedream.load_state(pipedream.sign_state(nonce)) == nonce
+
+    def test_the_state_carries_nothing_but_the_nonce(self):
+        """Signed is not secret: whatever rides in the state is readable by
+        Pipedream, a proxy log and the browser history."""
+        import base64
+        import json
+
+        state = pipedream.sign_state("n0nce")
+        payload = state.split(".")[0]
+        decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        assert decoded == {"n": "n0nce"}
+
+    def test_nonces_are_unguessable_and_distinct(self):
+        nonces = {pipedream.new_flow_nonce() for _ in range(50)}
+        assert len(nonces) == 50 and all(len(n) >= 40 for n in nonces)
 
     def test_tampering_is_rejected(self):
-        state = pipedream.sign_state(workspace_id="w1", app="slack")
+        state = pipedream.sign_state("n0nce")
         with pytest.raises(pipedream.PipedreamError):
             pipedream.load_state(state[:-2] + ("aa" if state[-2:] != "aa" else "bb"))
 
     def test_garbage_is_rejected(self):
         with pytest.raises(pipedream.PipedreamError):
             pipedream.load_state("not-a-state")
+
+    def test_an_old_state_without_a_nonce_is_rejected(self):
+        old = pipedream._serializer().dumps({"w": "w1", "a": "slack"})
+        with pytest.raises(pipedream.PipedreamError):
+            pipedream.load_state(old)
+
+
+@pytest.mark.unit
+class TestAccountFromFlow:
+    """Pipedream's redirect names no account: the one the flow made is the
+    one the Workspace did not have when it started."""
+
+    def _a(self, id, created, updated=None):
+        return {"id": id, "created_at": created, "updated_at": updated or created}
+
+    def test_the_account_that_is_new_since_the_flow_began(self):
+        accounts = [self._a("old", "2026-10-02"), self._a("mine", "2026-10-01")]
+        # Not the newest by date: the one that was not there before.
+        assert pipedream.account_from_flow(accounts, ["old"])["id"] == "mine"
+
+    def test_two_new_accounts_take_the_newest(self):
+        accounts = [self._a("a", "2026-10-01"), self._a("b", "2026-10-02")]
+        assert pipedream.account_from_flow(accounts, [])["id"] == "b"
+
+    def test_a_reauthorized_account_is_the_one_updated_last(self):
+        accounts = [self._a("x", "2026-01-01", "2026-10-05"), self._a("y", "2026-06-01")]
+        assert pipedream.account_from_flow(accounts, ["x", "y"])["id"] == "x"
+
+    def test_no_accounts_is_none(self):
+        assert pipedream.account_from_flow([], []) is None
 
 
 @pytest.mark.unit

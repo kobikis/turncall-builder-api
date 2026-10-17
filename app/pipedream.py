@@ -17,6 +17,7 @@ and state-signing helpers are pure and tested directly (test_pipedream_credentia
 from __future__ import annotations
 
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,8 @@ _API = "https://api.pipedream.com/v1"
 # The auth handshake is a redirect out and back; ten minutes is generous for a
 # consent screen and short enough that a leaked link is worthless.
 _STATE_MAX_AGE = 600
+# How long a flow is held server-side for its callback: the state's own life.
+FLOW_TTL_SECONDS = _STATE_MAX_AGE
 _STATE_SALT = "pipedream-connect"
 
 # Pipedream exposes one MCP base URL for every app and routes entirely by header.
@@ -376,43 +379,53 @@ def _state_key() -> str:
     return key
 
 
-def sign_state(*, workspace_id: str, app: str, actor: dict[str, str] | None = None) -> str:
-    """Carry (Workspace, app) across the redirect in a form Pipedream cannot
-    forge. Nothing else Pipedream hands back to the callback is trusted.
-
-    `actor` is who started it ({id, email, role}): the callback is reached by
-    a redirect, not a member's request, and is where the Connected app comes
-    to exist — so it is where the audit entry is written, in their name."""
-    payload: dict[str, Any] = {"w": workspace_id, "a": app}
-    if actor:
-        payload["u"] = actor
-    return _serializer().dumps(payload)
+def new_flow_nonce() -> str:
+    """The opaque handle a connect flow is held under server-side
+    (pipedream_store.start_connect_flow): random, and all the state carries."""
+    return secrets.token_urlsafe(32)
 
 
-def _load(state: str) -> dict[str, Any]:
+def sign_state(nonce: str) -> str:
+    """Carry a flow's nonce across the redirect in a form Pipedream cannot
+    forge. Nothing else rides in it: which Workspace, which app and who
+    started it are held server-side under the nonce, so the state reveals
+    nothing to Pipedream, a proxy log or the browser history, and nothing
+    Pipedream hands back to the callback is trusted."""
+    return _serializer().dumps({"n": nonce})
+
+
+def load_state(state: str) -> str:
+    """The nonce a state carries; a forged, expired or foreign one raises."""
     try:
         data = _serializer().loads(state, max_age=_STATE_MAX_AGE)
-        if not isinstance(data, dict):
-            raise TypeError("state is not an object")
-        return data
-    except (BadSignature, TypeError) as exc:
+        nonce = data["n"] if isinstance(data, dict) else None
+    except (BadSignature, KeyError, TypeError) as exc:
         raise PipedreamError("This connect link has expired or is invalid.") from exc
+    if not isinstance(nonce, str) or not nonce:
+        raise PipedreamError("This connect link has expired or is invalid.")
+    return nonce
 
 
-def load_state(state: str) -> tuple[str, str]:
-    data = _load(state)
-    try:
-        return str(data["w"]), str(data["a"])
-    except KeyError as exc:
-        raise PipedreamError("This connect link has expired or is invalid.") from exc
+def account_from_flow(
+    accounts: list[dict[str, Any]], known_account_ids: list[str]
+) -> dict[str, Any] | None:
+    """Which of the app's accounts a connect flow made, as nearly as Pipedream
+    lets us tell.
 
-
-def state_actor(state: str) -> dict[str, str] | None:
-    """Who started the connect flow, or None for a link signed before it said."""
-    actor = _load(state).get("u")
-    if not isinstance(actor, dict) or not {"id", "role"} <= actor.keys():
+    Pipedream's success redirect names no account, so the account is told by
+    difference: one the Workspace did not have when the flow started. Exactly
+    one such account is the answer. Two (flows for the same app overlapping in
+    one Workspace) cannot be told apart, so the newest is taken. None means
+    Pipedream re-authorized an account already there in place, so the one
+    updated most recently is taken. The precise tie, the connect token on
+    Pipedream's signed CONNECTION_SUCCESS webhook, is not used yet (ADR-0028)."""
+    if not accounts:
         return None
-    return {"id": str(actor["id"]), "email": str(actor.get("email") or ""), "role": str(actor["role"])}
+    known = set(known_account_ids)
+    new = [a for a in accounts if a.get("id") not in known]
+    if new:
+        return max(new, key=lambda a: a.get("created_at") or "")
+    return max(accounts, key=lambda a: a.get("updated_at") or a.get("created_at") or "")
 
 
 # --- API ---------------------------------------------------------------------
@@ -488,14 +501,14 @@ async def connect_link(
     workspace_id: str,
     app: str,
     callback_url: str,
-    actor: dict[str, str] | None = None,
+    state: str,
 ) -> str:
     """The hosted page where the admin authorizes `app` for this Workspace.
 
-    The token carries our own signed state on both redirect URIs, so the callback
-    learns which Workspace and which app from us, never from the query string.
+    The token carries our own signed `state` (sign_state) on both redirect
+    URIs, so the callback learns which flow it ends from us, never from the
+    query string.
     """
-    state = sign_state(workspace_id=workspace_id, app=app, actor=actor)
     token = (await access_token(cred)).token
     body = await _request(
         "POST",
@@ -673,6 +686,7 @@ def _account(raw: dict[str, Any]) -> dict[str, Any]:
         "account_name": raw.get("name"),
         "healthy": raw.get("healthy", True),
         "created_at": raw.get("created_at"),
+        "updated_at": raw.get("updated_at"),
     }
 
 
