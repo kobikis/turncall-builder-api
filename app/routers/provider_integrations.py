@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .. import integration_store, provider_catalog, provider_integrations, runtime
 from .._helpers import _readable
+from ..audit import Audit, secret_changed
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_member
 
@@ -138,6 +139,7 @@ async def list_providers(ctx: AuthContext = Depends(require_member)) -> dict[str
 @router.put("/{provider}")
 async def connect(
     provider: str,
+    audit: Audit,
     body: dict[str, Any] = Body(...),  # noqa: B008
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
@@ -153,19 +155,30 @@ async def connect(
             f"{validation['checked']}). It was not saved.",
         )
     pool, client = runtime.get_pool(), runtime.get_client()
+    existed = await integration_store.get(pool, ctx.workspace_id, provider) is not None
+    # That the key changed, never the key (ADR-0028). Landed once stored: a
+    # projection that fails after it is recorded as partial.
+    change = audit.begin(
+        ctx, "integration", provider, "updated" if existed else "created", landed=False,
+        resource_name=provider, changes=secret_changed(existed, True),
+    )
     try:
         saved = await integration_store.save(
             pool, ctx.workspace_id, provider,
             document=document, last4=provider_integrations.last4(document), validation=validation,
         )
+        change.landed()
         agents = await provider_integrations.project(pool, client, ctx.workspace_id, provider)
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
+    await change.record()
     return {"success": True, "data": {**saved, "agents": agents}}
 
 
 @router.post("/{provider}/apply")
-async def reapply(provider: str, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def reapply(
+    provider: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """Finish a projection that failed partway; agents already done are skipped."""
     pool = runtime.get_pool()
     integration = await integration_store.get(pool, ctx.workspace_id, provider)
@@ -177,17 +190,33 @@ async def reapply(provider: str, ctx: AuthContext = Depends(require_admin)) -> d
         agents = await provider_integrations.project(pool, runtime.get_client(), ctx.workspace_id, provider)
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
+    await audit.record(ctx, "integration", provider, "reapplied", resource_name=provider, changes={})
     return {"success": True, "data": {"agents": agents}}
 
 
 @router.delete("/{provider}")
-async def disconnect(provider: str, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def disconnect(
+    provider: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """Remove from every agent first, the stored record last. `complete: false`
     leaves the card showing what remains; calling again finishes it."""
     pool = runtime.get_pool()
     if await integration_store.get(pool, ctx.workspace_id, provider) is None:
         raise HTTPException(status_code=404, detail=f"{provider} is not connected")
+    # Raising partway (not the per-agent failures it reports) leaves some
+    # agents without the key: recorded as partial once TurnCall accepted any
+    # removal.
+    change = audit.begin(
+        ctx, "integration", provider, "disconnect_started", landed=False,
+        resource_name=provider, changes={},
+    )
     data = await provider_integrations.disconnect(pool, runtime.get_client(), ctx.workspace_id, provider)
+    # Partway (`complete: false`) the key is still stored: the entry says the
+    # disconnect began, and the call that finishes it records the deletion.
+    if data.get("complete"):
+        await change.record(action="deleted", changes=secret_changed(True, False))
+    else:
+        await change.record()
     return {"success": True, "data": data}
 
 
@@ -196,7 +225,9 @@ class AdoptBody(BaseModel):
 
 
 @router.post("/{provider}/adopt")
-async def adopt(provider: str, body: AdoptBody, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def adopt(
+    provider: str, body: AdoptBody, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """Make a pinned agent's own key the Workspace's. Explicit by design: nothing
     moves a secret between scopes unless someone asks for it here."""
     pool = runtime.get_pool()
@@ -205,11 +236,19 @@ async def adopt(provider: str, body: AdoptBody, ctx: AuthContext = Depends(requi
         raise HTTPException(status_code=404, detail="agent not found")
     if provider_integrations.pinned_account(backend.get("config")) != provider:
         raise HTTPException(status_code=409, detail=f"this agent carries no {provider} key of its own")
+    # adopt() refuses when the Workspace already holds a key for it. Several
+    # steps (store, project, rewrite the agent): landed once TurnCall
+    # accepted any of them.
+    change = audit.begin(
+        ctx, "integration", provider, "adopted", landed=False,
+        resource_name=provider, agent_ids=[body.agent_id], changes=secret_changed(False, True),
+    )
     try:
         await provider_integrations.adopt(pool, runtime.get_client(), ctx.workspace_id, backend)
     except provider_integrations.AdoptRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
+    await change.record()
     data = await provider_integrations.cards(pool, runtime.get_client(), ctx.workspace_id)
     return {"success": True, "data": data}

@@ -164,8 +164,9 @@ async def assert_writable(token: str, owner: str, repo: str) -> None:
 # Redacted by *key name*, recursively, rather than by known path. A path list
 # silently stops covering a config that grows a new secret field; matching the
 # name means a future one is caught by default. Over-redacting a config file is
-# recoverable; publishing an agent's HMAC secret to GitHub is not.
-_SECRET_KEYS = {
+# recoverable; publishing an agent's HMAC secret to GitHub is not. The audit
+# log masks the same names (app/audit.py).
+SECRET_KEYS = {
     "webhook_secret",
     "api_key",
     "secret",
@@ -191,7 +192,7 @@ def redact_config(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {
-            k: (REDACTED if k.lower() in _SECRET_KEYS and v not in (None, "") else redact_config(v))
+            k: (REDACTED if k.lower() in SECRET_KEYS and v not in (None, "") else redact_config(v))
             for k, v in value.items()
         }
     if isinstance(value, list):

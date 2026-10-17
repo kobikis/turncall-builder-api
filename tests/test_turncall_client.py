@@ -3,7 +3,14 @@
 import httpx
 import pytest
 
-from app.turncall_client import TurnCallClient
+from app.turncall_client import (
+    AUDIT_ID_HEADER,
+    AuditedCall,
+    AuditedCalls,
+    TurnCallClient,
+    collecting,
+    failure_reason,
+)
 
 
 def _client_with(handler, platform_key: str = "") -> TurnCallClient:
@@ -213,3 +220,128 @@ async def test_list_agent_knowledge_bases_reads_the_agents_links():
         "GET",
         "http://tc.test/v1/agents/a1/knowledge-bases",
     )
+
+
+# --- the engine's audit id (turncall#317, #102) ----------------------------------
+
+
+def _audited_handler(seen: list):
+    """TurnCall as it answers an audited request: X-TurnCall-Audit-Id named."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        audit_id = f"eng-{len(seen)}"
+        if request.url.path == "/v1/projects" and request.method == "POST":
+            body = {"success": True, "data": {"id": "p-new"}}
+        elif request.url.path == "/v1/api-keys":
+            body = {"success": True, "data": {"raw_key": "tc_new"}}
+        else:
+            body = {"success": True, "data": {}}
+        return httpx.Response(200, json=body, headers={AUDIT_ID_HEADER: audit_id})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_every_audited_call_notes_its_engine_audit_id_and_project():
+    seen: list = []
+    client = _client_with(_audited_handler(seen), platform_key="plat")
+    calls = AuditedCalls()
+
+    with collecting(calls):
+        await client.create_project("builder-x")
+        await client.create_api_key("p-new")
+        await client.update_agent("a1", {"name": "x"}, "tc_new")
+        await client.set_project_redaction("p-new", {"enabled": True}, "tc_new")
+        await client.delete_project("p-new", "tc_new")
+
+    assert calls.take() == [
+        # The platform bootstrap: the project it creates, then the one it keys.
+        AuditedCall("eng-1", "p-new"),
+        AuditedCall("eng-2", "p-new"),
+        # A keyed call is in its key's project, which the audit trail resolves.
+        AuditedCall("eng-3", None, "tc_new"),
+        # A project route names its project.
+        AuditedCall("eng-4", "p-new", "tc_new"),
+        AuditedCall("eng-5", "p-new", "tc_new"),
+    ]
+    # The key is held only to resolve its project: it never prints.
+    assert "tc_new" not in repr(AuditedCall("eng-3", None, "tc_new"))
+
+
+@pytest.mark.asyncio
+async def test_a_response_without_the_header_notes_nothing():
+    def handler(request):
+        return httpx.Response(200, json={"success": True, "data": {"id": "w1", "secret": "s"}})
+
+    client = _client_with(handler)
+    calls = AuditedCalls()
+    with collecting(calls):
+        await client.register_webhook("http://b/events", ["*"], "k")  # TurnCall audits no webhooks
+    assert calls.take() == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_request_notes_nothing():
+    def handler(request):
+        return httpx.Response(422, json={"error": "bad"}, headers={AUDIT_ID_HEADER: "eng-1"})
+
+    client = _client_with(handler)
+    calls = AuditedCalls()
+    with collecting(calls):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.update_agent("a1", {}, "k")
+    assert calls.take() == []
+
+
+@pytest.mark.asyncio
+async def test_outside_an_audited_request_the_header_is_ignored():
+    client = _client_with(_audited_handler([]))
+    assert await client.update_agent("a1", {}, "k") == {}
+
+
+def test_once_the_request_returned_nothing_more_is_collected():
+    calls = AuditedCalls()
+    with collecting(calls):
+        pass
+    calls.add(AuditedCall("late", "p"))  # say, from a task the request started
+    assert calls.take() == []
+
+
+@pytest.mark.asyncio
+async def test_reading_one_requests_engine_entries():
+    seen = {}
+
+    def handler(request):
+        seen["url"], seen["auth"] = request.url, request.headers.get("authorization")
+        return httpx.Response(200, json={"success": True, "data": [{"id": "e"}], "next_cursor": None})
+
+    out = await _client_with(handler).list_audit_log("tc_k", request_id="eng-1", cursor="c2")
+    assert out["data"] == [{"id": "e"}]
+    assert seen["url"].path == "/v1/audit-log" and seen["auth"] == "Bearer tc_k"
+    assert dict(seen["url"].params) == {"request_id": "eng-1", "limit": "200", "cursor": "c2"}
+
+
+# --- failure_reason: the one error-reason formatter --------------------------------
+
+
+def _status_error(status: int, **response) -> httpx.HTTPStatusError:
+    request = httpx.Request("PUT", "http://turncall/v1/x")
+    return httpx.HTTPStatusError(
+        "refused", request=request, response=httpx.Response(status, request=request, **response)
+    )
+
+
+def test_failure_reason_reads_the_peers_own_error():
+    assert failure_reason(_status_error(422, json={"error": "bad entity"})) == "bad entity"
+    # A body that is JSON but not an object, or not JSON, is shown as sent.
+    assert failure_reason(_status_error(500, json=["x"])) == '["x"]'
+    assert failure_reason(_status_error(502, text="upstream down")) == "upstream down"
+
+
+def test_failure_reason_takes_a_detail_or_the_exception_itself():
+    from fastapi import HTTPException
+
+    assert failure_reason(HTTPException(status_code=404, detail="agent not found")) == "agent not found"
+    assert failure_reason(RuntimeError("boom")) == "RuntimeError: boom"
+    assert len(failure_reason(RuntimeError("x" * 1000))) == 300

@@ -98,6 +98,16 @@ async def list_skills(pool: asyncpg.Pool, workspace_id: str) -> list[dict[str, A
     return [_row(r) for r in rows]
 
 
+async def get_skill(pool: asyncpg.Pool, workspace_id: str, name: str) -> dict[str, Any] | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, name, description, body, updated_at FROM workspace_skills "
+            "WHERE workspace_id = $1 AND name = $2",
+            UUID(workspace_id), name,
+        )
+    return _row(row) if row else None
+
+
 async def save_skill(
     pool: asyncpg.Pool, workspace_id: str, *, name: str, description: str, body: str
 ) -> dict[str, Any]:

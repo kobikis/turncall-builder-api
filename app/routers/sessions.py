@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
+    compliance,
     integration_store,
     mcp_registry_store,
     provider_integrations,
@@ -30,12 +31,14 @@ from .._helpers import (
     _normalize_config,
     _validate_agent_config,
 )
+from ..audit import Audit
 from ..backends import generator, registry, scaffold, toolgen
 from ..deps import AuthContext, require_editor, require_member
 from ..builder import ComposeResult, BuilderError, stream
 from ..mapper import external_tool_names, to_create_agent_request
 from ..settings import load_settings
 from ..tasks import spawn
+from .agents import begin_config_change
 
 logger = logging.getLogger("turncall_builder")
 router = APIRouter()
@@ -463,7 +466,7 @@ async def edit_config(
 
 @router.post("/sessions/{sid}/apply")
 async def apply_edit(
-    sid: str, ctx: AuthContext = Depends(require_editor)
+    sid: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Confirm-first push: apply the session's edited config to the already-
     generated agent (update TurnCall + regenerate the backend iff tools changed).
@@ -478,19 +481,26 @@ async def apply_edit(
     b = await registry.get_backend(pool, sess["agent_id"], ctx.workspace_id)
     if not b:
         raise HTTPException(status_code=404, detail="agent backend not found")
-    result = await agent_update.apply_update(pool, runtime.get_client(), b, sess["config"])
+    change = begin_config_change(audit, ctx, b, sess["config"])
+    result = await agent_update.apply_update(
+        pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
+    )
+    await change.record()
     return {"success": True, "data": {"agent_id": sess["agent_id"], **result}}
 
 
 @router.post("/sessions/{sid}/create")
 async def create_agent(
-    sid: str, ctx: AuthContext = Depends(require_editor)
+    sid: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Create the agent's own project + agent + generated backend (event-owning)."""
     sess = await _session_or_404(sid, ctx.workspace_id)
     pool = runtime.get_pool()
 
     if sess["agent_id"]:
+        # The agent exists and was audited when it was created; this retry only
+        # re-forwards staged documents, which are not an audited resource.
+        audit.unchanged()
         b = await registry.get_backend(pool, sess["agent_id"], ctx.workspace_id)
         # Documents left staged mean a previous forward failed part-way. This is
         # the retry, and it is only possible because the bytes are still here.
@@ -571,6 +581,11 @@ async def create_agent(
             detail="Agent provisioning failed in TurnCall — rolled back; please retry.",
         ) from exc
 
+    # The agent exists from here: whatever fails after this, it is in the log.
+    change = audit.begin(
+        ctx, "agent", agent_id, "created",
+        resource_name=name, agent_ids=[agent_id], before=None, after=config,
+    )
     # Local + docker; best-effort, records status for the UI and never raises.
     backend = await _generate_backend(
         pool, agent_id, project_id, key, config, port, secret, ctx.workspace_id
@@ -586,7 +601,19 @@ async def create_agent(
         )
     except Exception:  # noqa: BLE001
         logger.exception("projecting integrations into %s failed", agent_id)
+    # And its compliance settings (#103): redacted and expiring from the first
+    # call, like every other Agent's. Best-effort, recorded, retried on apply.
+    try:
+        await compliance.project_into_new_target(
+            pool,
+            client,
+            ctx.workspace_id,
+            {"agent_id": agent_id, "project_id": project_id, "api_key": key},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("projecting compliance settings into %s failed", agent_id)
     knowledge = await _forward_staged_documents(sid, agent_id, key)
+    await change.record()
     return {
         "success": True,
         "data": {

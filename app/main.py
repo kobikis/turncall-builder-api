@@ -11,6 +11,7 @@ Endpoints live in app/routers/*; this module is just the app factory + lifespan.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import logging
@@ -20,7 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import builder, pipedream_store, runtime, schema_check
+from . import audit, builder, pipedream_store, runtime, schema_check
 from .backends import generator, registry
 from .db import create_pool
 from .routers import (
@@ -28,8 +29,10 @@ from .routers import (
     agents,
     ambience,
     auth,
+    audit as audit_router,
     campaigns,
     calls,
+    compliance,
     evals,
     github,
     integrations,
@@ -124,9 +127,17 @@ async def lifespan(app: FastAPI):
     await _store_pipedream_credential(pool, settings)
     await _reap_orphan_backends(pool)
     await schema_check.check_drift(client)
+    # The audit log's own retention (ADR-0028): unset keeps every entry.
+    janitor = (
+        asyncio.create_task(audit.retention_loop(pool, settings.audit_log_retention_days))
+        if settings.audit_log_retention_days
+        else None
+    )
     try:
         yield
     finally:
+        if janitor is not None:
+            janitor.cancel()
         await pool.close()
         await client.close()
         runtime.clear_runtime()
@@ -156,12 +167,13 @@ async def _upstream_unreachable(_request: Request, exc: httpx.TransportError) ->
 
 for _router in (
     sessions, agents, agent_activity, phones, calls, outbound, limits, campaigns, evals,
+    compliance,
     knowledge,
     takeaways,
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.
     auth, workspaces, members, github, skills, provider_integrations, mcp_registry,
-    twilio_integration, pipedream_project,
+    twilio_integration, pipedream_project, audit_router,
     integrations,
 ):
     app.include_router(_router.router)

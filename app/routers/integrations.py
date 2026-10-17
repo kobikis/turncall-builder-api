@@ -26,6 +26,7 @@ from pydantic import BaseModel, field_validator
 
 from .. import agent_update, pipedream, pipedream_store, runtime
 from .._helpers import _backend_or_404, _normalize_config
+from ..audit import Audit
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..integration_store import IntegrationError
@@ -164,12 +165,28 @@ async def connect(
             "send the admin back to. Set it to this API's public "
             "/integrations/callback URL.",
         )
+    nonce = pipedream.new_flow_nonce()
     try:
+        # What the Workspace already has of this app, so the callback can tell
+        # which account this flow made.
+        known = await pipedream.list_accounts(cred, workspace_id=ctx.workspace_id, app=body.app)
+        # Held here, not in the state: who to audit the Connected app under
+        # when the callback lands, readable by nobody the redirect passes.
+        await pipedream_store.start_connect_flow(
+            runtime.get_pool(),
+            nonce=nonce,
+            workspace_id=ctx.workspace_id,
+            app=body.app,
+            actor={"id": str(ctx.user["id"]), "email": ctx.user.get("email") or "", "role": ctx.role},
+            known_account_ids=[a["id"] for a in known if a.get("id")],
+            ttl_seconds=pipedream.FLOW_TTL_SECONDS,
+        )
         url = await pipedream.connect_link(
             cred,
             workspace_id=ctx.workspace_id,
             app=body.app,
             callback_url=settings.pipedream_redirect_uri,
+            state=pipedream.sign_state(nonce),
         )
     except pipedream.PipedreamError as exc:
         raise _fail(exc) from exc
@@ -189,35 +206,61 @@ def _back(**params: str) -> RedirectResponse:
 
 @router.get("/callback")
 async def callback(
-    state: str = Query(...), error: str | None = Query(default=None)
+    audit: Audit, state: str = Query(...), error: str | None = Query(default=None)
 ) -> RedirectResponse:
     """Where Pipedream sends the admin back, success or failure.
 
     A success redirect is not proof of anything, so we ask Pipedream whether the
     account actually exists before saying so. Reporting an abandoned flow as
     connected is the half-made record this endpoint exists to avoid.
+
+    A GET, but the one place a Connected app is known to exist, so it is where
+    the audit entry is written, as the admin who started the flow (held
+    server-side under the state's nonce). The flow is taken as it is read:
+    a replayed callback finds nothing, records nothing and attributes nothing.
+    Every way back that connected nothing says so.
     """
     try:
-        workspace_id, app = pipedream.load_state(state)
+        nonce = pipedream.load_state(state)
     except pipedream.PipedreamError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    flow = await pipedream_store.take_connect_flow(runtime.get_pool(), nonce)
+    if flow is None:
+        audit.unchanged()
+        return _back(error="This connect link has expired or was already used.")
+    workspace_id, app = flow["workspace_id"], flow["app"]
 
     if error:
+        audit.unchanged()
         return _back(error=f"{_app_name(app)} was not connected.")
 
     cred = await _credential(workspace_id)
     try:
         accounts = await pipedream.list_accounts(cred, workspace_id=workspace_id, app=app)
     except pipedream.PipedreamError as exc:
+        audit.unchanged()
         return _back(error=str(exc))
-    if not accounts:
+    account = pipedream.account_from_flow(accounts, flow["known_account_ids"])
+    if account is None:
+        audit.unchanged()
         return _back(error=f"{_app_name(app)} was not connected.")
+    actor = flow["actor"]
+    await audit.record(
+        AuthContext(
+            user={"id": actor["id"], "email": actor["email"]},
+            workspace_id=workspace_id,
+            role=actor["role"],
+        ),
+        "connected_app", account.get("id") or app, "connected",
+        resource_name=account.get("name") or _app_name(app),
+        after={"app": app, "account_name": account.get("account_name")},
+    )
     return _back(connected=app)
 
 
 @router.delete("/{account_id}", status_code=204)
 async def disconnect(
-    account_id: str, ctx: AuthContext = Depends(require_admin)
+    account_id: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
 ) -> None:
     """Revoke a Connected app at Pipedream.
 
@@ -228,11 +271,18 @@ async def disconnect(
     cred = await _credential(ctx.workspace_id)
     try:
         mine = await pipedream.list_accounts(cred, workspace_id=ctx.workspace_id)
-        if not any(a["id"] == account_id for a in mine):
+        account = next((a for a in mine if a["id"] == account_id), None)
+        if account is None:
             raise HTTPException(status_code=404, detail="No such connected app.")
         await pipedream.delete_account(cred, account_id)
     except pipedream.PipedreamError as exc:
         raise _fail(exc) from exc
+    await audit.record(
+        ctx, "connected_app", account_id, "disconnected",
+        resource_name=account.get("name") or account.get("app"),
+        before={"app": account.get("app"), "account_name": account.get("account_name")},
+        after=None,
+    )
 
 
 # --- attaching an app to an Agent (ADR-0018) ---------------------------------
@@ -266,7 +316,7 @@ async def get_attached(
 
 @router.put("/agents/{agent_id}")
 async def set_attached(
-    agent_id: str, body: AttachBody, ctx: AuthContext = Depends(require_editor)
+    agent_id: str, body: AttachBody, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Attach (or detach) Connected apps on this Agent.
 
@@ -276,9 +326,17 @@ async def set_attached(
     """
     backend = await _backend_or_404(agent_id, ctx.workspace_id)
     config = {**(backend.get("config") or {}), "integrations": body.apps}
-    await agent_update.apply_update(
-        runtime.get_pool(), runtime.get_client(), backend, config
+    # Lands when TurnCall accepts the agent (see begin_config_change).
+    change = audit.begin(
+        ctx, "agent", agent_id, "updated", landed=False,
+        resource_name=config.get("name"), agent_ids=[agent_id],
+        before={"integrations": (backend.get("config") or {}).get("integrations") or []},
+        after={"integrations": body.apps},
     )
+    await agent_update.apply_update(
+        runtime.get_pool(), runtime.get_client(), backend, config, on_landed=change.landed
+    )
+    await change.record()
     return {"success": True, "data": {"apps": body.apps}}
 
 

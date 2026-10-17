@@ -8,10 +8,15 @@ Env configures it and the row is the encrypted copy the mint path (#25) reads
 back. The plaintext secret never crosses this boundary as a stored value: callers
 hand one in to save and get one back to use, but what lands in Postgres is always
 ciphertext.
+
+It also holds each Connected-app authorization under way until Pipedream sends
+the admin back (`pipedream_connect_flows`, #101): who started it, so the
+callback can audit the app in their name without carrying them in the URL.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 import asyncpg
@@ -180,3 +185,65 @@ async def delete_credential(pool: asyncpg.Pool) -> bool:
     """Remove the deployment's copy (its env was unset). True if one existed."""
     result = await pool.execute("DELETE FROM pipedream_credentials WHERE id = $1", _ID)
     return result.endswith(" 1")
+
+
+# --- Connected-app flows under way (#101, ADR-0028) --------------------------
+
+
+def _digest(nonce: str) -> str:
+    return hashlib.sha256(nonce.encode()).hexdigest()
+
+
+async def start_connect_flow(
+    pool: asyncpg.Pool,
+    *,
+    nonce: str,
+    workspace_id: str,
+    app: str,
+    actor: dict[str, str],
+    known_account_ids: list[str],
+    ttl_seconds: int,
+) -> None:
+    """Hold one authorization under way until its callback: who started it
+    (`actor`: id, email, role) and which of the app's accounts the Workspace
+    already had. Keyed by the nonce's digest; the nonce itself is never stored.
+    Flows nobody came back from are swept here, as new ones start."""
+    await pool.execute("DELETE FROM pipedream_connect_flows WHERE expires_at < now()")
+    await pool.execute(
+        """
+        INSERT INTO pipedream_connect_flows
+            (nonce_digest, workspace_id, app, user_id, user_email, role,
+             known_account_ids, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8))
+        """,
+        _digest(nonce),
+        workspace_id,
+        app,
+        str(actor["id"]),
+        str(actor.get("email") or ""),
+        str(actor["role"]),
+        list(known_account_ids),
+        float(ttl_seconds),
+    )
+
+
+async def take_connect_flow(pool: asyncpg.Pool, nonce: str) -> dict | None:
+    """The flow this nonce started, removed as it is read: a callback is
+    answered once, and a replay (or an expired flow) finds nothing."""
+    row = await pool.fetchrow(
+        """
+        DELETE FROM pipedream_connect_flows WHERE nonce_digest = $1
+        RETURNING workspace_id, app, user_id, user_email, role, known_account_ids,
+                  created_at, expires_at > now() AS live
+        """,
+        _digest(nonce),
+    )
+    if row is None or not row["live"]:
+        return None
+    return {
+        "workspace_id": str(row["workspace_id"]),
+        "app": row["app"],
+        "actor": {"id": row["user_id"], "email": row["user_email"], "role": row["role"]},
+        "known_account_ids": list(row["known_account_ids"]),
+        "started_at": row["created_at"],
+    }

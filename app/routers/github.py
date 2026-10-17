@@ -16,7 +16,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from .. import github, github_store, runtime
-from ..backends import registry
+from .._helpers import _backend_or_404
+from ..audit import Audit
 from ..deps import AuthContext, require_editor
 from .auth import current_user
 
@@ -122,6 +123,7 @@ class LinkBody(BaseModel):
 
 @router.get("/agents/{agent_id}/github")
 async def get_link(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dict:
+    await _backend_or_404(agent_id, ctx.workspace_id)
     link = await github_store.get_link(runtime.get_pool(), agent_id)
     return {"success": True, "data": link}
 
@@ -130,13 +132,13 @@ async def get_link(agent_id: str, ctx: AuthContext = Depends(require_editor)) ->
 async def link(
     agent_id: str,
     body: LinkBody,
+    audit: Audit,
     ctx: AuthContext = Depends(require_editor),
     user: dict = Depends(current_user),
 ) -> dict[str, Any]:
     """Point this agent's backend at a repo the user already owns."""
+    await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
-    if await registry.get_backend(pool, agent_id) is None:
-        raise HTTPException(status_code=404, detail="No backend for this agent.")
 
     conn = await github_store.get_connection(pool, str(user["id"]))
     if conn is None:
@@ -149,6 +151,7 @@ async def link(
     except github.GitHubError as exc:
         raise _fail(exc) from exc
 
+    before = await github_store.get_link(pool, agent_id)
     await github_store.set_link(
         pool,
         agent_id,
@@ -158,26 +161,54 @@ async def link(
         path=body.path,
         connection_id=conn["id"],
     )
-    return {"success": True, "data": await github_store.get_link(pool, agent_id)}
+    after = await github_store.get_link(pool, agent_id)
+    await audit.record(
+        ctx, "linked_repo", agent_id, "linked",
+        resource_name=f"{body.owner}/{body.repo}", agent_ids=[agent_id],
+        before=_where(before), after=_where(after),
+    )
+    return {"success": True, "data": after}
+
+
+def _where(link: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What an audit entry compares for a Linked repo: where it points and whose
+    connection pushes, not the last push's outcome."""
+    if not link:
+        return None
+    return {k: link.get(k) for k in ("owner", "repo", "branch", "path", "connection_id")}
 
 
 @router.delete("/agents/{agent_id}/github", status_code=204)
-async def unlink(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> None:
-    """Stop pushing. The repository on GitHub is left exactly as it is."""
-    await github_store.clear_link(runtime.get_pool(), agent_id)
+async def unlink(
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
+) -> None:
+    """Stop pushing. The repository on GitHub is left exactly as it is. An
+    agent with no link is a 404: there is nothing to unlink, and nothing to
+    record."""
+    await _backend_or_404(agent_id, ctx.workspace_id)
+    pool = runtime.get_pool()
+    before = await github_store.get_link(pool, agent_id)
+    if before is None:
+        raise HTTPException(status_code=404, detail="This agent has no linked repo.")
+    await github_store.clear_link(pool, agent_id)
+    await audit.record(
+        ctx, "linked_repo", agent_id, "unlinked",
+        resource_name=f"{before['owner']}/{before['repo']}",
+        agent_ids=[agent_id], before=_where(before), after=None,
+    )
 
 
 @router.post("/agents/{agent_id}/github/push")
-async def push(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dict:
+async def push(
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
+) -> dict:
     """Push this agent's current files to its Linked repo.
 
     409 on divergence: the remote changed since we last wrote it, so nothing is
     pushed and the user reconciles it in their own repository.
     """
+    backend = await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
-    backend = await registry.get_backend(pool, agent_id)
-    if backend is None:
-        raise HTTPException(status_code=404, detail="No backend for this agent.")
 
     link = await github_store.get_link(pool, agent_id)
     if link is None:
@@ -212,7 +243,14 @@ async def push(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dic
         await github_store.record_push(pool, agent_id, tree_hash=None, error=str(exc))
         raise _fail(exc) from exc
 
+    # On GitHub now, whatever happens to the bookkeeping below.
+    change = audit.begin(
+        ctx, "linked_repo", agent_id, "pushed",
+        resource_name=f"{link['owner']}/{link['repo']}", agent_ids=[agent_id],
+        changes={"/commit": {"before": None, "after": result.commit_sha}},
+    )
     await github_store.record_push(pool, agent_id, tree_hash=result.tree_hash, error=None)
+    await change.record()
     return {
         "success": True,
         "data": {"commit": result.commit_sha, **(await github_store.get_link(pool, agent_id))},

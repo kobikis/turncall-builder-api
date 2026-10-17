@@ -9,6 +9,7 @@ exactly the same path.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from . import mcp_registry_store, pipedream_store
@@ -46,14 +47,23 @@ async def build_payload(
 
 
 async def apply_update(
-    pool: Any, client: Any, backend: dict[str, Any], config: dict[str, Any]
+    pool: Any,
+    client: Any,
+    backend: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    on_landed: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Push `config` (trimmed shape) to the live agent + regenerate iff tools
-    changed. Returns {"backend_regenerated": bool}."""
+    changed. Returns {"backend_regenerated": bool}. `on_landed` is called once
+    TurnCall has accepted the agent, the step after which a failure leaves
+    the change half made (an audit Change's `landed`)."""
     port = backend["port"]
     new_config = _normalize_config(config, port)
     payload = await build_payload(pool, backend, new_config)
     await client.update_agent(backend["agent_id"], payload, backend["api_key"])
+    if on_landed is not None:
+        on_landed()
     await _subscribe_to_every_event(client, backend)
 
     # Both sides normalized with the same port, so a legacy config (nulls/missing

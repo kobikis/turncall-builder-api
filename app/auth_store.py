@@ -149,6 +149,11 @@ async def get_user_by_email(pool: asyncpg.Pool, email: str) -> dict[str, Any] | 
     return {"id": str(row["id"]), "email": row["email"], "password_hash": row["password_hash"]}
 
 
+async def user_email(pool: asyncpg.Pool, user_id: str) -> str | None:
+    """A User's email by id — how the audit log names the member it is about."""
+    return await pool.fetchval("SELECT email FROM users WHERE id = $1", uuid.UUID(user_id))
+
+
 async def resolve_membership(
     pool: asyncpg.Pool, user_id: str, workspace_id: str
 ) -> str | None:

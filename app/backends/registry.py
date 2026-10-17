@@ -25,7 +25,7 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
-    for col in ("config", "tool_statuses"):
+    for col in ("config", "tool_statuses", "limits"):
         if col in d:
             d[col] = json.loads(d[col]) if d[col] else None
     # uuid -> str so callers can compare and serialize it without knowing the
@@ -37,7 +37,7 @@ def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
 
 _COLS = (
     "agent_id, project_id, api_key, slug, port, service_dir, status, config, "
-    "webhook_secret, tool_statuses, workspace_id, builder_token, call_init_secret"
+    "webhook_secret, tool_statuses, workspace_id, builder_token, call_init_secret, limits"
 )
 
 
@@ -177,11 +177,58 @@ async def set_tool_statuses(
     )
 
 
+async def set_limits(pool: asyncpg.Pool, agent_id: str, limits: dict[str, Any] | None) -> None:
+    """Keep the builder's copy of the Agent's project limits (migration 0022):
+    what TurnCall last reported, so a change is audited with what it replaced."""
+    await pool.execute(
+        "UPDATE agent_backends SET limits = $2::jsonb WHERE agent_id = $1",
+        agent_id,
+        None if limits is None else json.dumps(limits),
+    )
+
+
 async def mark_deleted(pool: asyncpg.Pool, agent_id: str) -> None:
     """Teardown: hide from lists; the row (and its port) stays reserved."""
     await pool.execute(
         "UPDATE agent_backends SET deleted = true, status = 'deleted' WHERE agent_id = $1",
         agent_id,
+    )
+
+
+# --- the TurnCall projects the builder holds keys for ---------------------------
+#
+# One per Agent, deleted ones included (an audit entry outlives its agent), and
+# the webhook projects (#65). An audit entry's link to the engine (ADR-0028)
+# names the project each call was made in, and reading that project's engine
+# log needs its key back.
+
+
+async def projects_for_keys(db: Any, api_keys: list[str]) -> dict[str, str]:
+    """The project each of these keys belongs to; a key held nowhere is left out."""
+    keys = sorted({k for k in api_keys if k})
+    if not keys:
+        return {}
+    rows = await db.fetch(
+        """SELECT project_id, api_key FROM agent_backends WHERE api_key = ANY($1::text[])
+           UNION ALL
+           SELECT project_id, api_key FROM webhook_project WHERE api_key = ANY($1::text[])""",
+        keys,
+    )
+    return {r["api_key"]: r["project_id"] for r in rows if r["project_id"]}
+
+
+async def key_for_project(db: Any, project_id: str, workspace_id: str) -> str | None:
+    """The key of a project this Workspace holds: one of its Agents' (deleted or
+    not), its webhook project, or the shared one numbers bound before #65 use."""
+    return await db.fetchval(
+        """SELECT api_key FROM agent_backends
+            WHERE project_id = $1 AND workspace_id = $2
+           UNION ALL
+           SELECT api_key FROM webhook_project
+            WHERE project_id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)
+           LIMIT 1""",
+        project_id,
+        workspace_id,
     )
 
 

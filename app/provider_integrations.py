@@ -22,10 +22,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
 from . import agent_update, integration_store, provider_catalog
 from .backends import phones, registry
+from .turncall_client import failure_reason
 
 logger = logging.getLogger("turncall_builder")
 
@@ -83,15 +82,6 @@ def last4(document: dict[str, Any]) -> str:
     return (secret or "")[-4:]
 
 
-def _why(exc: Exception) -> str:
-    if isinstance(exc, httpx.HTTPStatusError):
-        try:
-            return str(exc.response.json().get("error") or exc.response.text)[:300]
-        except ValueError:
-            return exc.response.text[:300]
-    return f"{type(exc).__name__}: {exc}"[:300]
-
-
 async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> list[dict[str, Any]]:
     """Write the Workspace's credential into every agent's TurnCall project.
 
@@ -139,7 +129,7 @@ async def _write(client: Any, provider: str, document: dict[str, Any], backend: 
         await client.put_credential(provider, document, backend["api_key"])
     except Exception as exc:  # noqa: BLE001 — recorded, and retryable
         logger.warning("projection of %s to %s failed: %s", provider, backend["agent_id"], exc)
-        return _why(exc)
+        return failure_reason(exc)
     return None
 
 
@@ -195,7 +185,7 @@ async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -
                 # config, which this never touches.
                 await client.delete_credential(provider, backend["api_key"])
             except Exception as exc:  # noqa: BLE001
-                state, error = "remove_failed", _why(exc)
+                state, error = "remove_failed", failure_reason(exc)
         await integration_store.record_projection(
             pool, workspace_id, provider, agent_id, state=state, version=None, error=error
         )
