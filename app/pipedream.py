@@ -376,18 +376,43 @@ def _state_key() -> str:
     return key
 
 
-def sign_state(*, workspace_id: str, app: str) -> str:
+def sign_state(*, workspace_id: str, app: str, actor: dict[str, str] | None = None) -> str:
     """Carry (Workspace, app) across the redirect in a form Pipedream cannot
-    forge. Nothing else Pipedream hands back to the callback is trusted."""
-    return _serializer().dumps({"w": workspace_id, "a": app})
+    forge. Nothing else Pipedream hands back to the callback is trusted.
+
+    `actor` is who started it ({id, email, role}): the callback is reached by
+    a redirect, not a member's request, and is where the Connected app comes
+    to exist — so it is where the audit entry is written, in their name."""
+    payload: dict[str, Any] = {"w": workspace_id, "a": app}
+    if actor:
+        payload["u"] = actor
+    return _serializer().dumps(payload)
+
+
+def _load(state: str) -> dict[str, Any]:
+    try:
+        data = _serializer().loads(state, max_age=_STATE_MAX_AGE)
+        if not isinstance(data, dict):
+            raise TypeError("state is not an object")
+        return data
+    except (BadSignature, TypeError) as exc:
+        raise PipedreamError("This connect link has expired or is invalid.") from exc
 
 
 def load_state(state: str) -> tuple[str, str]:
+    data = _load(state)
     try:
-        data = _serializer().loads(state, max_age=_STATE_MAX_AGE)
         return str(data["w"]), str(data["a"])
-    except (BadSignature, KeyError, TypeError) as exc:
+    except KeyError as exc:
         raise PipedreamError("This connect link has expired or is invalid.") from exc
+
+
+def state_actor(state: str) -> dict[str, str] | None:
+    """Who started the connect flow, or None for a link signed before it said."""
+    actor = _load(state).get("u")
+    if not isinstance(actor, dict) or not {"id", "role"} <= actor.keys():
+        return None
+    return {"id": str(actor["id"]), "email": str(actor.get("email") or ""), "role": str(actor["role"])}
 
 
 # --- API ---------------------------------------------------------------------
@@ -458,14 +483,19 @@ async def access_token(cred: Credential) -> AccessToken:
 
 
 async def connect_link(
-    cred: Credential, *, workspace_id: str, app: str, callback_url: str
+    cred: Credential,
+    *,
+    workspace_id: str,
+    app: str,
+    callback_url: str,
+    actor: dict[str, str] | None = None,
 ) -> str:
     """The hosted page where the admin authorizes `app` for this Workspace.
 
     The token carries our own signed state on both redirect URIs, so the callback
     learns which Workspace and which app from us, never from the query string.
     """
-    state = sign_state(workspace_id=workspace_id, app=app)
+    state = sign_state(workspace_id=workspace_id, app=app, actor=actor)
     token = (await access_token(cred)).token
     body = await _request(
         "POST",

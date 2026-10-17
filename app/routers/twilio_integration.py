@@ -15,7 +15,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
-from .. import runtime, twilio_api, twilio_store
+from .. import db, runtime, twilio_api, twilio_store
+from ..audit import Audit
 from ..backends import phones
 from ..deps import AuthContext, require_admin, require_editor, require_member
 from ..integration_store import IntegrationError
@@ -68,7 +69,9 @@ async def status(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
 
 
 @router.put("")
-async def connect(body: TwilioBody, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def connect(
+    body: TwilioBody, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """Validate against the account's own number list, store, then re-send the
     pair to every number bound with the Workspace's account (a rotation)."""
     checked = twilio_api.checked_url(body.account_sid)
@@ -84,6 +87,7 @@ async def connect(body: TwilioBody, ctx: AuthContext = Depends(require_admin)) -
         validation = {"status": "unverified", "checked": checked, "detail": f"unreachable: {type(exc).__name__}"}
 
     pool = runtime.get_pool()
+    before = await twilio_store.get(pool, ctx.workspace_id)
     try:
         saved = await twilio_store.save(
             pool, ctx.workspace_id,
@@ -92,6 +96,13 @@ async def connect(body: TwilioBody, ctx: AuthContext = Depends(require_admin)) -
     except IntegrationError as exc:
         raise _unavailable(exc) from exc
     numbers = await _resend(pool, ctx.workspace_id, (body.account_sid, body.auth_token))
+    # The token is never read back, so saving the card always reads as a new one.
+    await audit.record(
+        ctx, "twilio_account", "workspace", "updated" if before else "created",
+        resource_name=body.account_sid,
+        before=_audited(before),
+        after={"account_sid": body.account_sid, "auth_token": body.auth_token},
+    )
     return {"success": True, "data": {"connected": True, **saved, "numbers": numbers}}
 
 
@@ -146,7 +157,7 @@ def _why(exc: Exception) -> str:
 
 
 @router.delete("")
-async def disconnect(ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def disconnect(audit: Audit, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
     """Refused while numbers are bound with it: TurnCall would keep running
     them on a pair this page no longer shows, and a rotation could no longer
     reach them. Move those numbers to other credentials first."""
@@ -159,8 +170,23 @@ async def disconnect(ctx: AuthContext = Depends(require_admin)) -> dict[str, Any
             detail=f"{len(using)} number(s) use this Twilio account ({names}) — "
             "move them to other credentials or delete them first",
         )
-    await twilio_store.delete(pool, ctx.workspace_id)
+    async with db.transaction(pool) as conn:
+        before = await twilio_store.get(conn, ctx.workspace_id)
+        await twilio_store.delete(conn, ctx.workspace_id)
+        await audit.record(
+            ctx, "twilio_account", "workspace", "deleted",
+            resource_name=(before or {}).get("account_sid"),
+            before=_audited(before), after=None, db=conn,
+        )
     return {"success": True, "data": {"connected": False}}
+
+
+def _audited(account: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The stored account as an entry compares it: the SID, and that a token
+    is held (masked by name; its value is never read back here)."""
+    if account is None:
+        return None
+    return {"account_sid": account.get("account_sid"), "auth_token": "(stored)"}
 
 
 @router.get("/numbers")

@@ -363,8 +363,13 @@ Console is not the Widget).
 One change a person made through the Console, as builder-api records it: the
 [[User]], the [[Workspace]], the [[Role]] they acted under, what changed, and, when
 the change reached TurnCall, the id of TurnCall's own audit entry (which records only
-the API key). Append-only, admin-readable, never holds a secret. See ADR-0028
-(decided, not yet built).
+the API key). Append-only, admin-readable (`GET /audit`), never holds a secret: a
+credential change says the credential changed, and a secret-named field reads
+`***` on both sides. Written by the change itself — in its own transaction when
+the change is builder-side only, once TurnCall accepted it otherwise — so a
+failed request leaves none. Kept as long as the operator's
+`AUDIT_LOG_RETENTION_DAYS` says, never a Workspace's choice, so no admin can
+shorten the trail that records them. See ADR-0028.
 _Avoid_: "activity", "history", "log" unqualified.
 
 ## Integrations

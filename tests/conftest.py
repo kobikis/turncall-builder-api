@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec
 
@@ -28,8 +29,10 @@ os.environ.setdefault("PIPEDREAM_ENCRYPTION_KEY", Fernet.generate_key().decode()
 os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 from app import (
+    audit_store,
     auth_store,
     compliance_store,
+    db,
     deps,
     integration_store,
     main,
@@ -77,6 +80,7 @@ def mocks(monkeypatch):
         mcp_registry_store=create_autospec(mcp_registry_store),
         twilio_store=create_autospec(twilio_store),
         compliance_store=create_autospec(compliance_store),
+        audit_store=create_autospec(audit_store),
         client=AsyncMock(spec=TurnCallClient),
     )
     # Patch each function ON THE SOURCE MODULE so every importer sees the mock —
@@ -95,6 +99,7 @@ def mocks(monkeypatch):
         (mcp_registry_store, m.mcp_registry_store),
         (twilio_store, m.twilio_store),
         (compliance_store, m.compliance_store),
+        (audit_store, m.audit_store),
     ]:
         for attr in vars(mock_mod):
             if not attr.startswith("_"):
@@ -125,6 +130,22 @@ def mocks(monkeypatch):
     m.phones.shared_webhook_numbers.return_value = 0
     m.twilio_store.get.return_value = None
     m.twilio_store.credentials.return_value = None
+    # The audit log: every entry a request appends lands in m.audit_store.insert
+    # (await_args_list), and a builder-side change's transaction is the pool
+    # itself — there is no database under these tests.
+    m.audit_store.list_entries.return_value = ([], 0)
+
+    @asynccontextmanager
+    async def _transaction(pool):
+        yield pool
+
+    monkeypatch.setattr(db, "transaction", _transaction)
+    # What an entry's "before" is read from: nothing there unless a test says so
+    # (an unconfigured async mock would hand back a mock, not a row).
+    m.workspace_skills.get_skill.return_value = None
+    m.auth_store.user_email.return_value = None
+    m.mcp_registry_store.get_server.return_value = None
+    m.pipedream_store.workspace_status.return_value = None
     # No compliance settings, overrides or projections unless a test says so.
     m.compliance_store.get_workspace.return_value = None
     m.compliance_store.get_override.return_value = None
@@ -153,6 +174,11 @@ def mocks(monkeypatch):
     runtime.set_runtime(object(), m.client)
     yield m
     runtime.clear_runtime()
+
+
+def audit_entries(mocks) -> list[dict]:
+    """Every audit entry the request(s) appended, in order."""
+    return [c.args[1] for c in mocks.audit_store.insert.await_args_list]
 
 
 @pytest.fixture

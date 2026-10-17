@@ -60,3 +60,62 @@ master changed since). A target never written and owed only the engine's default
 already holds it. The Workspace's webhook project (#65) is a target too, with the
 Workspace's setting and never an override, because custom call-init calls are
 stored there.
+
+## The audit log, as built (#101)
+
+`audit_entries` (migration 0020) and `GET /audit`, admin-only, Workspace-scoped,
+newest first, filtered by `member` (a user id), `agent` and `since`/`until`, paged
+as every list here is (`page`, `limit` up to 200, `total`). An entry holds the
+User and their email as it was, the Workspace, the Role, `resource_type`,
+`resource_id`, a `resource_name` to read it by, the `action`, every Agent it is
+about (`agent_ids`: a re-pointed number is about both agents), `changes` and a
+`request_id` shared by every entry one request wrote. `turncall_project_id` and
+`engine_audit_id` exist and stay null until the link to the engine's entry
+(#102) fills them.
+
+**One mechanism.** An audited route takes an `Audit` trail and records on it
+(app/audit.py). The trail's teardown runs as the route returns, before the
+response: a route that returned normally without recording is a 500, so every
+endpoint test of an audited route that expects success also proves it recorded.
+`audit.unchanged()` is the explicit way out for a branch that changed nothing
+(a Create retry, an abandoned Connected-app flow). `tests/test_audit_wiring.py`
+walks every mutating route the app serves and fails on one that neither takes a
+trail nor is listed, with its reason, as out of scope: Sessions (drafts until
+Create/Apply), calls and test calls, knowledge, takeaways, evals, campaigns,
+ambience and the do-not-call list (as in the engine's own log), login and
+signup, the per-User GitHub connection, and the Agent Backend's own calls.
+Workspace compliance settings and an Agent's override (#103) are audited
+(`compliance`).
+
+**What changed is a diff of safe values.** Field by field, as JSON Pointers, the
+engine's shape. Every secret-named key (the names the GitHub push already
+redacts, plus anything ending `_secret`, `_token`, `_key`, `_password`,
+`_encrypted`) is compared on its raw value and shown as `***`, at any depth: an
+MCP server's headers, a number's call-init secret, an invite's token. A
+credential whose value is never read back (an Integration, the Workspace's
+Twilio or Pipedream secret) is recorded as set, replaced or removed, never more.
+
+**Same transaction where there is one.** A change that lives only in
+builder-api (members and invites, skills, the Workspace's Twilio and Pipedream
+records, registering an MCP server) writes its entry in the change's own
+transaction (`db.transaction`, which hands stores written against a pool one
+connection), so the two commit or roll back together. A change that reached
+TurnCall cannot share a transaction with it: its entry is written once TurnCall
+accepted the change, and a request that failed writes none.
+
+**A Connected app is recorded at the callback.** It comes to exist when
+Pipedream redirects back, not when the admin starts the flow, and that redirect
+is no member's request: the signed connect state carries who started it and
+their role, and the entry is written in their name.
+
+**Append-only in the database too.** A trigger refuses UPDATE, TRUNCATE and
+any DELETE outside the retention janitor's transaction (`SET LOCAL
+builder.audit_retention = 'on'`). It stops the application and anything
+connecting as it, not the table's owner. No foreign keys: an entry outlives the
+member, agent or number it is about.
+
+**Retention is the operator's.** `AUDIT_LOG_RETENTION_DAYS` (1 to 36500; unset
+keeps entries for good, anything else refuses to start), swept hourly by each
+server in batches that skip each other's rows. It is deliberately not a
+Workspace setting beside #103's call retention: the people who could shorten it
+would be the admins it records. Call retention never touches it.

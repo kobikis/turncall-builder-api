@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from .. import compliance, compliance_store, runtime
 from .._helpers import _backend_or_404, _readable
+from ..audit import Audit
 from ..deps import AuthContext, require_admin, require_member
 
 router = APIRouter()
@@ -36,24 +37,36 @@ async def get_settings(ctx: AuthContext = Depends(require_admin)) -> dict[str, A
 
 @router.put("/compliance")
 async def set_settings(
+    audit: Audit,
     body: dict[str, Any] = Body(...),  # noqa: B008
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
     """Replace the Workspace's setting and project it into every Agent."""
     settings = _validate(compliance.WorkspaceSettings, body)
     pool = runtime.get_pool()
-    await compliance_store.save_workspace(
-        pool, ctx.workspace_id,
-        redaction=settings.redaction.model_dump(), retention=settings.retention.model_dump(),
-    )
+    before = _setting(await compliance_store.get_workspace(pool, ctx.workspace_id))
+    after = {"redaction": settings.redaction.model_dump(), "retention": settings.retention.model_dump()}
+    await compliance_store.save_workspace(pool, ctx.workspace_id, **after)
     data = await compliance.report(pool, runtime.get_client(), ctx.workspace_id, write=True)
+    await audit.record(
+        ctx, "compliance", "workspace", "updated" if before else "created",
+        before=before, after=after,
+    )
     return {"success": True, "data": data}
 
 
+def _setting(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What an audit entry compares: the setting, not its timestamp."""
+    if row is None:
+        return None
+    return {"redaction": row.get("redaction"), "retention": row.get("retention")}
+
+
 @router.post("/compliance/apply")
-async def reapply(ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def reapply(audit: Audit, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
     """Retry every target not holding its setting; those that do are skipped."""
     data = await compliance.report(runtime.get_pool(), runtime.get_client(), ctx.workspace_id, write=True)
+    await audit.record(ctx, "compliance", "workspace", "reapplied", changes={})
     return {"success": True, "data": data}
 
 
@@ -71,6 +84,7 @@ async def get_agent_settings(
 @router.put("/agents/{agent_id}/compliance")
 async def set_agent_settings(
     agent_id: str,
+    audit: Audit,
     body: dict[str, Any] = Body(...),  # noqa: B008
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
@@ -79,6 +93,12 @@ async def set_agent_settings(
     override = compliance.override_document(_validate(compliance.AgentOverride, body))
     b = await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
+    before = _setting(await compliance_store.get_override(pool, ctx.workspace_id, agent_id))
     await compliance_store.save_override(pool, ctx.workspace_id, agent_id, **override)
     data = await compliance.agent_report(pool, runtime.get_client(), ctx.workspace_id, b, write=True)
+    await audit.record(
+        ctx, "compliance", agent_id, "updated" if before else "created",
+        resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id],
+        before=before, after=override,
+    )
     return {"success": True, "data": data}

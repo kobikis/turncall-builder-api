@@ -13,7 +13,8 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from .. import agent_update, integration_store, mcp_registry_store, runtime
+from .. import agent_update, db, integration_store, mcp_registry_store, runtime
+from ..audit import Audit
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_member
 
@@ -89,12 +90,19 @@ async def list_servers(ctx: AuthContext = Depends(require_member)) -> dict[str, 
 
 
 @router.post("", status_code=201)
-async def register(body: ServerBody, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def register(
+    body: ServerBody, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     try:
-        server = await mcp_registry_store.create_server(
-            runtime.get_pool(), ctx.workspace_id,
-            name=body.name, transport=body.transport, url=body.url, headers=body.headers,
-        )
+        async with db.transaction(runtime.get_pool()) as conn:
+            server = await mcp_registry_store.create_server(
+                conn, ctx.workspace_id,
+                name=body.name, transport=body.transport, url=body.url, headers=body.headers,
+            )
+            await audit.record(
+                ctx, "mcp_server", server["id"], "created",
+                resource_name=body.name, after=_audited(body.model_dump()), db=conn,
+            )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
     except asyncpg.UniqueViolationError as exc:
@@ -103,9 +111,12 @@ async def register(body: ServerBody, ctx: AuthContext = Depends(require_admin)) 
 
 
 @router.put("/{server_id}")
-async def edit(server_id: str, body: ServerBody, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def edit(
+    server_id: str, body: ServerBody, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """One edit reaches every agent opted in — rotating a token is one action."""
     try:
+        before = await mcp_registry_store.get_server(runtime.get_pool(), ctx.workspace_id, server_id)
         server = await mcp_registry_store.update_server(
             runtime.get_pool(), ctx.workspace_id, server_id,
             name=body.name, transport=body.transport, url=body.url, headers=body.headers,
@@ -115,15 +126,48 @@ async def edit(server_id: str, body: ServerBody, ctx: AuthContext = Depends(requ
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
     server["agents"] = await _repush(ctx, server_id)
+    after = _audited(body.model_dump())
+    if body.headers is None and before:  # None keeps the stored headers
+        after["headers"] = _audited(before)["headers"]
+    await audit.record(
+        ctx, "mcp_server", server_id, "updated",
+        resource_name=body.name, agent_ids=server["agents"],
+        before=_audited(before), after=after,
+    )
     return {"success": True, "data": server}
 
 
+def _audited(server: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What an entry compares for a registered server. Headers carry bearer
+    tokens and are masked by name. The stored row keeps only their names, so
+    an edit that sends headers reads as a headers change (`***` both sides)."""
+    if server is None:
+        return None
+    headers = server.get("headers")
+    if headers is None and server.get("header_names"):
+        headers = {name: "(stored)" for name in server["header_names"]}
+    return {
+        "name": server.get("name"),
+        "transport": server.get("transport"),
+        "url": server.get("url"),
+        "headers": headers or None,
+    }
+
+
 @router.delete("/{server_id}")
-async def remove(server_id: str, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
+async def remove(
+    server_id: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
     """Taken out of every opted-in agent first, then deleted."""
     pool = runtime.get_pool()
-    if await mcp_registry_store.get_server(pool, ctx.workspace_id, server_id) is None:
+    before = await mcp_registry_store.get_server(pool, ctx.workspace_id, server_id)
+    if before is None:
         raise HTTPException(status_code=404, detail="server not found")
     touched = await _repush(ctx, server_id, remove=True)
     await mcp_registry_store.delete_server(pool, ctx.workspace_id, server_id)
+    await audit.record(
+        ctx, "mcp_server", server_id, "deleted",
+        resource_name=before.get("name"), agent_ids=touched,
+        before=_audited(before), after=None,
+    )
     return {"success": True, "data": {"deleted": server_id, "agents": touched}}

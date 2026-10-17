@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from .. import github, github_store, runtime
+from ..audit import Audit
 from ..backends import registry
 from ..deps import AuthContext, require_editor
 from .auth import current_user
@@ -130,6 +131,7 @@ async def get_link(agent_id: str, ctx: AuthContext = Depends(require_editor)) ->
 async def link(
     agent_id: str,
     body: LinkBody,
+    audit: Audit,
     ctx: AuthContext = Depends(require_editor),
     user: dict = Depends(current_user),
 ) -> dict[str, Any]:
@@ -149,6 +151,7 @@ async def link(
     except github.GitHubError as exc:
         raise _fail(exc) from exc
 
+    before = await github_store.get_link(pool, agent_id)
     await github_store.set_link(
         pool,
         agent_id,
@@ -158,17 +161,42 @@ async def link(
         path=body.path,
         connection_id=conn["id"],
     )
-    return {"success": True, "data": await github_store.get_link(pool, agent_id)}
+    after = await github_store.get_link(pool, agent_id)
+    await audit.record(
+        ctx, "linked_repo", agent_id, "linked",
+        resource_name=f"{body.owner}/{body.repo}", agent_ids=[agent_id],
+        before=_where(before), after=_where(after),
+    )
+    return {"success": True, "data": after}
+
+
+def _where(link: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What an audit entry compares for a Linked repo: where it points and whose
+    connection pushes, not the last push's outcome."""
+    if not link:
+        return None
+    return {k: link.get(k) for k in ("owner", "repo", "branch", "path", "connection_id")}
 
 
 @router.delete("/agents/{agent_id}/github", status_code=204)
-async def unlink(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> None:
+async def unlink(
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
+) -> None:
     """Stop pushing. The repository on GitHub is left exactly as it is."""
-    await github_store.clear_link(runtime.get_pool(), agent_id)
+    pool = runtime.get_pool()
+    before = await github_store.get_link(pool, agent_id)
+    await github_store.clear_link(pool, agent_id)
+    await audit.record(
+        ctx, "linked_repo", agent_id, "unlinked",
+        resource_name=f"{before['owner']}/{before['repo']}" if before else None,
+        agent_ids=[agent_id], before=_where(before), after=None,
+    )
 
 
 @router.post("/agents/{agent_id}/github/push")
-async def push(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dict:
+async def push(
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
+) -> dict:
     """Push this agent's current files to its Linked repo.
 
     409 on divergence: the remote changed since we last wrote it, so nothing is
@@ -213,6 +241,11 @@ async def push(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dic
         raise _fail(exc) from exc
 
     await github_store.record_push(pool, agent_id, tree_hash=result.tree_hash, error=None)
+    await audit.record(
+        ctx, "linked_repo", agent_id, "pushed",
+        resource_name=f"{link['owner']}/{link['repo']}", agent_ids=[agent_id],
+        changes={"/commit": {"before": None, "after": result.commit_sha}},
+    )
     return {
         "success": True,
         "data": {"commit": result.commit_sha, **(await github_store.get_link(pool, agent_id))},

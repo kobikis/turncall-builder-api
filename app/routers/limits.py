@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .. import runtime
 from .._helpers import _backend_or_404, _turncall_http_error
+from ..audit import Audit
 from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
@@ -40,13 +41,26 @@ async def get_limits(agent_id: str, ctx: AuthContext = Depends(require_member)) 
 
 @router.put("/agents/{agent_id}/limits")
 async def set_limits(
-    agent_id: str, body: Limits, ctx: AuthContext = Depends(require_editor)
+    agent_id: str, body: Limits, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     b = await _backend_or_404(agent_id, ctx.workspace_id)
+    client = runtime.get_client()
+    # Only for the audit entry's "before": its absence costs the entry a
+    # before, never the change.
     try:
-        project = await runtime.get_client().set_project_limits(
+        current = await client.get_project(b["project_id"], b["api_key"])
+        before = current.get("limits") if isinstance(current, dict) else None
+    except Exception:  # noqa: BLE001
+        before = None
+    try:
+        project = await client.set_project_limits(
             b["project_id"], body.model_dump(), b["api_key"]
         )
     except httpx.HTTPStatusError as exc:
         raise _turncall_http_error(exc) from exc
+    await audit.record(
+        ctx, "agent", agent_id, "limits_set",
+        resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id],
+        before={"limits": before}, after={"limits": project.get("limits")},
+    )
     return {"success": True, "data": project["limits"]}

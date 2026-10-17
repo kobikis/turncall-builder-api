@@ -21,6 +21,7 @@ from .._helpers import (
     browser_path,
     check_variables,
 )
+from ..audit import Audit
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
 from ..tasks import spawn
@@ -93,7 +94,7 @@ async def get_agent(
 
 @router.put("/agents/{agent_id}")
 async def update_agent(
-    agent_id: str, body: AgentUpdate, ctx: AuthContext = Depends(require_editor)
+    agent_id: str, body: AgentUpdate, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Overwrite the agent config; regenerate the backend iff custom_tools changed."""
     pool = runtime.get_pool()
@@ -110,12 +111,29 @@ async def update_agent(
         # TurnCall refused the config (e.g. a 422 naming the field): pass its
         # status and reason through rather than a bare 500.
         raise _turncall_http_error(exc) from exc
+    await record_config_change(audit, ctx, b, body.config)
     return {"success": True, "data": {"agent_id": agent_id, **result}}
+
+
+async def record_config_change(
+    audit: Any, ctx: AuthContext, backend: dict[str, Any], config: dict[str, Any]
+) -> None:
+    """The audit entry for an applied config: both sides normalized the way
+    apply_update compares them, so a legacy config's filled-in defaults never
+    read as a change. Shared by the form edit and the chat edit's Apply."""
+    port = backend["port"]
+    before = _normalize_config(backend["config"], port) if backend.get("config") else None
+    after = _normalize_config(config, port)
+    await audit.record(
+        ctx, "agent", backend["agent_id"], "updated",
+        resource_name=after.get("name"), agent_ids=[backend["agent_id"]],
+        before=before, after=after,
+    )
 
 
 @router.post("/agents/{agent_id}/start")
 async def start_agent(
-    agent_id: str, ctx: AuthContext = Depends(require_editor)
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Start (or restart) the agent's backend container in the background."""
     pool = runtime.get_pool()
@@ -125,6 +143,10 @@ async def start_agent(
     await registry.set_status(pool, agent_id, "generating")
     spawn(
         _run_restart(pool, agent_id, b["service_dir"], b["port"], b.get("webhook_secret"))
+    )
+    await audit.record(
+        ctx, "agent", agent_id, "restarted",
+        resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id], changes={},
     )
     return {"success": True, "data": _backend_view(agent_id, b["port"], "generating")}
 
@@ -170,7 +192,7 @@ async def backend_feed(
 
 @router.delete("/agents/{agent_id}")
 async def delete_agent(
-    agent_id: str, ctx: AuthContext = Depends(require_editor)
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Teardown: container down, TurnCall agent archived, registry row hidden.
     The generated repo stays on disk — it's the user's code. Refuses while phone
@@ -198,6 +220,12 @@ async def delete_agent(
     except Exception as exc:  # noqa: BLE001
         logger.warning("turncall project delete failed for %s: %s", agent_id, exc)
     await registry.mark_deleted(pool, agent_id)
+    config = b.get("config") or None
+    await audit.record(
+        ctx, "agent", agent_id, "deleted",
+        resource_name=(config or {}).get("name"), agent_ids=[agent_id],
+        before=config, after=None,
+    )
     return {"success": True, "data": {"deleted": agent_id}}
 
 

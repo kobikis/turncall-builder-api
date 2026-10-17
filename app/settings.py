@@ -48,6 +48,28 @@ class Settings:
     pipedream_redirect_uri: str
     # development is free and is where this stays until launch (ADR-0018).
     pipedream_environment: str
+    # How long the audit log of people keeps an entry (ADR-0028); None = for
+    # good. The deployment's setting, not a Workspace's: an admin must not be
+    # able to shorten the trail that records what they did.
+    audit_log_retention_days: int | None = None
+
+
+def parse_audit_retention(raw: str | None) -> int | None:
+    """AUDIT_LOG_RETENTION_DAYS: 1 to 36500 days; unset or empty keeps entries
+    for good. Anything else refuses to start, rather than silently keeping too
+    much or deleting too soon."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 0
+    if not 1 <= days <= 36500:
+        raise ValueError(
+            f"AUDIT_LOG_RETENTION_DAYS must be a whole number of days from 1 to 36500, got {raw!r}"
+        )
+    return days
 
 
 @lru_cache(maxsize=1)
@@ -84,5 +106,8 @@ def load_settings() -> Settings:
             "production"
             if os.environ.get("PIPEDREAM_ENVIRONMENT", "").strip() == "production"
             else "development"
+        ),
+        audit_log_retention_days=parse_audit_retention(
+            os.environ.get("AUDIT_LOG_RETENTION_DAYS")
         ),
     )

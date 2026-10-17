@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import compliance, provider_integrations, runtime, twilio_store
 from .._helpers import _turncall_http_error
+from ..audit import MASK, Audit, diff
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -388,16 +389,62 @@ async def get_phone_number(
     return {"success": True, "data": n}
 
 
+# What an audit entry compares for a number: its binding as the console sees it.
+# `server_url_secret` is masked by name; the number's own Twilio token is never
+# in the mirror's public view, so a new one is noted separately (_token_change).
+_AUDITED_FIELDS = (
+    "id", "e164", "carrier", "sid", "routing_type", "agent_id", "project_id",
+    "server_url", "server_url_secret", "sms_enabled", "label",
+    "twilio_credentials", "twilio_account_sid",
+)
+
+
+def _audited(number: dict[str, Any] | None) -> dict[str, Any] | None:
+    if number is None:
+        return None
+    public = _public(number)
+    return {k: public.get(k) for k in _AUDITED_FIELDS}
+
+
+def _token_change(body: PhoneBind, existing: dict[str, Any] | None) -> dict[str, Any]:
+    """A Twilio auth token entered on the form is a credential change: say it
+    changed, never what it is."""
+    if body.own_twilio() is None:
+        return {}
+    had = existing is not None and _public(existing)["twilio_credentials"] == "number"
+    return {"/twilio_auth_token": {"before": MASK if had else None, "after": MASK}}
+
+
+async def _record(
+    audit: Audit,
+    ctx: AuthContext,
+    action: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    number = after or before or {}
+    await audit.record(
+        ctx, "phone_number", number["id"], action,
+        resource_name=number.get("e164"),
+        # A re-pointed number is about the agent it left and the one it reached.
+        agent_ids=[(before or {}).get("agent_id"), (after or {}).get("agent_id")],
+        changes={**diff(_audited(before), _audited(after)), **(extra or {})},
+    )
+
+
 @router.post("/phone-numbers")
 async def add_phone_number(
-    body: PhoneBind, ctx: AuthContext = Depends(require_editor)
+    body: PhoneBind, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
-    return {"success": True, "data": await _bind(runtime.get_pool(), body, ctx.workspace_id)}
+    number = await _bind(runtime.get_pool(), body, ctx.workspace_id)
+    await _record(audit, ctx, "created", None, number, _token_change(body, None))
+    return {"success": True, "data": number}
 
 
 @router.put("/phone-numbers/{phone_id}")
 async def update_phone_number(
-    phone_id: str, body: PhoneBind, ctx: AuthContext = Depends(require_editor)
+    phone_id: str, body: PhoneBind, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Edit a binding. Same-project edits go through TurnCall's PUT — the phone
     id and its call-init secret stay stable. Cross-project moves (changing which
@@ -454,6 +501,7 @@ async def update_phone_number(
             }
             await phones.record_number(pool, number)
             stored = await phones.get_number(pool, phone_id, workspace_id) or number
+            await _record(audit, ctx, "updated", existing, stored, _token_change(body, existing))
             return {
                 "success": True,
                 "data": {
@@ -489,12 +537,13 @@ async def update_phone_number(
     )
     if number["id"] != phone_id:
         await phones.delete_number(pool, phone_id)
+    await _record(audit, ctx, "updated", existing, number, _token_change(body, existing))
     return {"success": True, "data": {**number, "rebound": True}}
 
 
 @router.delete("/phone-numbers/{phone_id}")
 async def delete_phone_number(
-    phone_id: str, ctx: AuthContext = Depends(require_editor)
+    phone_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Unbind: TurnCall removes the binding AND clears the Twilio number's
     webhooks, so the number stops pointing at TurnCall entirely."""
@@ -505,4 +554,5 @@ async def delete_phone_number(
     if existing["routing_type"] != "none":
         await _unbind_in_turncall(pool, existing, ctx.workspace_id)
     await phones.delete_number(pool, phone_id)
+    await _record(audit, ctx, "deleted", existing, None)
     return {"success": True, "data": {"unbound": phone_id}}
