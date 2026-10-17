@@ -102,6 +102,8 @@ def test_every_mutating_route_is_audited_or_says_why_not():
         ("POST", "/agents/{agent_id}/github/push"),
         ("PUT", "/compliance"),
         ("PUT", "/agents/{agent_id}/compliance"),
+        ("POST", "/compliance/apply"),
+        ("POST", "/agents/{agent_id}/compliance/apply"),
     } <= found
 
     unaccounted = [

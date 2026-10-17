@@ -117,7 +117,7 @@ def test_an_agent_edit_records_what_changed_and_masks_secrets(client, mocks):
     assert entry["resource_name"] == "Front desk"
     assert entry["agent_ids"] == ["a1"]
     assert entry["changes"]["/system_prompt"] == {"before": "Be kind.", "after": "Be brief."}
-    assert entry["changes"]["/mcp_servers/0/headers"] == {"before": "***", "after": "***"}
+    assert entry["changes"]["/mcp_servers/0/headers"] == {"before": "***", "after": "***", "secret": True}
     assert "Bearer" not in json.dumps(entry)
     # TurnCall named no audit entry (the mocked client sends no header).
     assert entry["engine_links"] == []
@@ -201,7 +201,7 @@ def test_a_bind_records_the_number_and_never_its_twilio_token(client, mocks):
     assert entry["resource_name"] == "+15551234567"
     assert entry["agent_ids"] == ["a1"]
     assert entry["changes"]["/routing_type"] == {"before": None, "after": "agent"}
-    assert entry["changes"]["/twilio_auth_token"] == {"before": None, "after": "***"}
+    assert entry["changes"]["/twilio_auth_token"] == {"before": None, "after": "***", "secret": True}
     assert "tw-secret-token" not in json.dumps(entry)
 
 
@@ -226,7 +226,7 @@ def test_a_provider_key_records_that_it_changed_never_the_key(client, mocks, mon
     assert r.status_code == 200, r.text
     entry = _only_entry(mocks)
     assert (entry["resource_type"], entry["resource_id"], entry["action"]) == ("integration", "deepgram", "updated")
-    assert entry["changes"] == {"/value": {"before": "***", "after": "***"}}
+    assert entry["changes"] == {"/value": {"before": "***", "after": "***", "secret": True}}
     assert "dg-very-secret" not in json.dumps(entry)
 
 
@@ -350,7 +350,7 @@ def test_an_invite_records_without_its_token(client, mocks):
     }
     assert client.post("/members/invites", json={"email": "new@x.com", "role": "editor"}, headers=WS).status_code == 200
     entry = _only_entry(mocks)
-    assert entry["changes"]["/token"] == {"before": None, "after": "***"}
+    assert entry["changes"]["/token"] == {"before": None, "after": "***", "secret": True}
     assert "tok-secret" not in json.dumps(entry)
 
 
