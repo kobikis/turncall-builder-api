@@ -16,8 +16,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app import github, github_store, pipedream
+from app import github, github_store, main, pipedream
 from app.routers.auth import COOKIE_NAME as COOKIE
+from app.routers.auth import current_user
 from tests.conftest import TEST_WORKSPACE_ID, audit_entries, backend_row
 
 WS = {"X-Workspace-Id": TEST_WORKSPACE_ID}
@@ -345,3 +346,57 @@ def test_a_push_records_the_commit(client, mocks, monkeypatch):
     entry = _only_entry(mocks)
     assert (entry["resource_type"], entry["action"], entry["resource_name"]) == ("linked_repo", "pushed", "acme/agents")
     assert entry["changes"] == {"/commit": {"before": None, "after": "abc123"}}
+
+
+def _github_store(monkeypatch, link):
+    store = SimpleNamespace(
+        get_link=AsyncMock(return_value=link),
+        clear_link=AsyncMock(),
+        set_link=AsyncMock(),
+        get_connection=AsyncMock(return_value={"id": "c1"}),
+        get_token=AsyncMock(return_value="ghp"),
+    )
+    for name, fn in vars(store).items():
+        monkeypatch.setattr(github_store, name, fn)
+    return store
+
+
+def test_unlinking_records_the_link_it_removed(client, mocks, monkeypatch):
+    link = {"owner": "acme", "repo": "agents", "branch": "main", "path": "", "connection_id": "c1"}
+    store = _github_store(monkeypatch, link)
+    mocks.registry.get_backend.return_value = backend_row()
+
+    assert client.delete("/agents/a1/github", headers=WS).status_code == 204
+
+    store.clear_link.assert_awaited_once()
+    entry = _only_entry(mocks)
+    assert (entry["action"], entry["resource_name"]) == ("unlinked", "acme/agents")
+    assert entry["changes"]["/repo"] == {"before": "agents", "after": None}
+
+
+def test_unlinking_an_agent_with_no_link_is_404_and_records_nothing(client, mocks, monkeypatch):
+    store = _github_store(monkeypatch, None)
+    mocks.registry.get_backend.return_value = backend_row()
+
+    r = client.delete("/agents/a1/github", headers=WS)
+
+    assert r.status_code == 404, r.text
+    store.clear_link.assert_not_awaited()
+    assert audit_entries(mocks) == []
+
+
+def test_linking_an_agent_in_the_callers_workspace_still_works(client, mocks, monkeypatch):
+    """#106 scoped the lookup; an editor's own agent links as before."""
+    link = {"owner": "acme", "repo": "agents", "branch": "main", "path": "", "connection_id": "c1"}
+    store = _github_store(monkeypatch, None)
+    store.get_link.side_effect = [None, link]
+    monkeypatch.setattr(github, "assert_writable", AsyncMock())
+    main.app.dependency_overrides[current_user] = lambda: {"id": "u-test", "email": "admin@test"}
+    mocks.registry.get_backend.return_value = backend_row()
+
+    r = client.put("/agents/a1/github", json={"owner": "acme", "repo": "agents", "branch": "main"}, headers=WS)
+
+    assert r.status_code == 200, r.text
+    assert mocks.registry.get_backend.await_args.args[1:] == ("a1", TEST_WORKSPACE_ID)
+    store.set_link.assert_awaited_once()
+    assert _only_entry(mocks)["action"] == "linked"

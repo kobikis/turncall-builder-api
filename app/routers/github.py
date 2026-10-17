@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from .. import github, github_store, runtime
+from .._helpers import _backend_or_404
 from ..audit import Audit
-from ..backends import registry
 from ..deps import AuthContext, require_editor
 from .auth import current_user
 
@@ -123,6 +123,7 @@ class LinkBody(BaseModel):
 
 @router.get("/agents/{agent_id}/github")
 async def get_link(agent_id: str, ctx: AuthContext = Depends(require_editor)) -> dict:
+    await _backend_or_404(agent_id, ctx.workspace_id)
     link = await github_store.get_link(runtime.get_pool(), agent_id)
     return {"success": True, "data": link}
 
@@ -136,9 +137,8 @@ async def link(
     user: dict = Depends(current_user),
 ) -> dict[str, Any]:
     """Point this agent's backend at a repo the user already owns."""
+    await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
-    if await registry.get_backend(pool, agent_id) is None:
-        raise HTTPException(status_code=404, detail="No backend for this agent.")
 
     conn = await github_store.get_connection(pool, str(user["id"]))
     if conn is None:
@@ -182,13 +182,18 @@ def _where(link: dict[str, Any] | None) -> dict[str, Any] | None:
 async def unlink(
     agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> None:
-    """Stop pushing. The repository on GitHub is left exactly as it is."""
+    """Stop pushing. The repository on GitHub is left exactly as it is. An
+    agent with no link is a 404: there is nothing to unlink, and nothing to
+    record."""
+    await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
     before = await github_store.get_link(pool, agent_id)
+    if before is None:
+        raise HTTPException(status_code=404, detail="This agent has no linked repo.")
     await github_store.clear_link(pool, agent_id)
     await audit.record(
         ctx, "linked_repo", agent_id, "unlinked",
-        resource_name=f"{before['owner']}/{before['repo']}" if before else None,
+        resource_name=f"{before['owner']}/{before['repo']}",
         agent_ids=[agent_id], before=_where(before), after=None,
     )
 
@@ -202,10 +207,8 @@ async def push(
     409 on divergence: the remote changed since we last wrote it, so nothing is
     pushed and the user reconciles it in their own repository.
     """
+    backend = await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
-    backend = await registry.get_backend(pool, agent_id)
-    if backend is None:
-        raise HTTPException(status_code=404, detail="No backend for this agent.")
 
     link = await github_store.get_link(pool, agent_id)
     if link is None:
