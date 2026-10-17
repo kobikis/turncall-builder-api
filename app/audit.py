@@ -194,6 +194,10 @@ class Change:
     `after`, `changes` and `resource_name` may be replaced. `record()` writes
     it as completed; a route that raises first leaves it to the trail."""
 
+    _FIELDS = frozenset(
+        {"action", "resource_id", "resource_name", "before", "after", "changes", "agent_ids"}
+    )
+
     def __init__(
         self,
         trail: AuditTrail,
@@ -238,7 +242,7 @@ class Change:
         """Write it as completed, with any field given here replacing the one
         it began with."""
         for name, value in fields.items():
-            if not hasattr(self, name) or name.startswith("_"):
+            if name not in self._FIELDS:
                 raise TypeError(f"unknown change field {name!r}")
             setattr(self, name, value)
         return await self._trail._settle(self, COMPLETED, None)

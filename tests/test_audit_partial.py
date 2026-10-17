@@ -311,3 +311,13 @@ def test_a_provider_key_saved_but_not_projected_is_recorded_partial(client, mock
     assert (entry["resource_type"], entry["action"], entry["outcome"]) == ("integration", "created", "partial")
     assert entry["changes"] == {"/value": {"before": None, "after": "***"}}
     assert "dg_secret" not in str(entry)
+
+
+@pytest.mark.asyncio
+async def test_a_change_takes_only_its_own_fields(mocks):
+    trail = audit_mod.AuditTrail()
+    change = trail.begin(CTX, "agent", "a1", "updated")
+    with pytest.raises(TypeError):
+        await change.record(landed=False)
+    with pytest.raises(ValueError):
+        trail.begin(CTX, "not_a_resource", "x", "updated")
