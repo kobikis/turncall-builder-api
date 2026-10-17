@@ -24,6 +24,7 @@ refused here, before any project is written, with a message naming the field.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -57,6 +58,11 @@ MAX_RETENTION_DAYS = 36500
 KINDS = ("recordings_days", "transcripts_days", "events_days")
 
 WEBHOOK_PREFIX = "webhook-numbers:"
+
+# How many targets are written at once. Each is two TurnCall PUTs, so a
+# Workspace of a hundred Agents written one after another kept PUT /compliance
+# open for half a minute; bounded so one save cannot take every connection.
+CONCURRENCY = 8
 
 
 class Redaction(BaseModel):
@@ -236,14 +242,30 @@ async def report(pool: Any, client: Any, workspace_id: str, *, write: bool) -> d
     workspace = await compliance_store.get_workspace(pool, workspace_id)
     overrides = await compliance_store.list_overrides(pool, workspace_id)
     records = await compliance_store.list_projections(pool, workspace_id)
-    agents, webhook_numbers = [], None
-    for target in await _targets(pool, workspace_id):
-        agent_id = target["agent_id"]
-        override = None if target.get("webhook") else overrides.get(agent_id)
+    targets = await _targets(pool, workspace_id)
+    slots = asyncio.Semaphore(CONCURRENCY)
+
+    async def settle(target: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        override = None if target.get("webhook") else overrides.get(target["agent_id"])
         setting = effective(workspace, override)
-        record = records.get(agent_id)
+        record = records.get(target["agent_id"])
         if write:
-            record = await _project_one(pool, client, workspace_id, target, setting, record)
+            async with slots:
+                record = await _project_one(pool, client, workspace_id, target, setting, record)
+        return override, record
+
+    # Every target is written concurrently, a few at a time, and each one's
+    # outcome is its own: the report is in target order whatever order the
+    # writes finish in. A target that raises (not a refused write, which is
+    # recorded as failed) still lets the others finish before it propagates.
+    settled = await asyncio.gather(*(settle(t) for t in targets), return_exceptions=True)
+    for outcome in settled:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    agents, webhook_numbers = [], None
+    for target, (override, record) in zip(targets, settled, strict=True):
+        agent_id = target["agent_id"]
+        setting = effective(workspace, override)
         state, error = _state(record, setting)
         if target.get("webhook"):
             webhook_numbers = {"state": state, "error": error}
@@ -275,7 +297,7 @@ async def agent_report(
     workspace = await compliance_store.get_workspace(pool, workspace_id)
     override = await compliance_store.get_override(pool, workspace_id, agent_id)
     setting = effective(workspace, override)
-    record = (await compliance_store.list_projections(pool, workspace_id)).get(agent_id)
+    record = await compliance_store.get_projection(pool, workspace_id, agent_id)
     if write:
         record = await _project_one(pool, client, workspace_id, backend, setting, record)
     state, error = _state(record, setting)

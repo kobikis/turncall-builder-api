@@ -61,6 +61,20 @@ already holds it. The Workspace's webhook project (#65) is a target too, with th
 Workspace's setting and never an override, because custom call-init calls are
 stored there.
 
+**Targets are written concurrently, eight at a time.** Each target is two
+TurnCall PUTs; written one after another, a Workspace of a hundred Agents kept
+`PUT /compliance` open for half a minute. The report stays in target order and
+each target's state is its own whatever order the writes finish in; a target
+that raises lets the others finish before the error propagates. The per-Agent
+read fetches that Agent's projection record only.
+
+**Clearing an override is its own action, and a deleted Agent's rows go with
+it.** An override set back to null on both blocks is recorded as
+`override_cleared` (clearing one that was never set records nothing). Teardown
+deletes the Agent's `agent_compliance` and `compliance_projections` rows in the
+transaction that hides its registry row: they describe a project that no
+longer exists.
+
 ## The audit log, as built (#101)
 
 `audit_entries` (migration 0020) and `GET /audit`, admin-only, Workspace-scoped,

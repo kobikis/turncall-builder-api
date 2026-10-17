@@ -96,6 +96,20 @@ async def _run_assertions(dsn: str) -> None:
         [(agent, p)] = (await compliance_store.list_projections(pool, ws)).items()
         assert (agent, p["state"], p["fingerprint"], p["error"]) == ("a1", "failed", "f2", "x")
         assert await compliance_store.list_projections(pool, other) == {}
+        one = await compliance_store.get_projection(pool, ws, "a1")
+        assert (one["state"], one["fingerprint"], one["error"]) == ("failed", "f2", "x")
+        assert await compliance_store.get_projection(pool, ws, "a2") is None
+        assert await compliance_store.get_projection(pool, other, "a1") is None
+
+        # A deleted Agent's override and projection go; another Agent's stay.
+        await compliance_store.save_override(pool, ws, "a1", redaction=None, retention=override)
+        await compliance_store.save_override(pool, ws, "a2", redaction=None, retention=override)
+        await compliance_store.record_projection(pool, ws, "a2", state="applied", fingerprint="f3")
+        await compliance_store.forget_agent(pool, ws, "a1")
+        assert await compliance_store.get_override(pool, ws, "a1") is None
+        assert await compliance_store.get_projection(pool, ws, "a1") is None
+        assert list(await compliance_store.list_overrides(pool, ws)) == ["a2"]
+        assert list(await compliance_store.list_projections(pool, ws)) == ["a2"]
 
         # A Workspace's removal takes all of it along.
         await pool.execute("DELETE FROM workspaces WHERE id = $1", ws)

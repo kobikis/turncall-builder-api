@@ -91,16 +91,28 @@ async def set_agent_settings(
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
     """Replace the Agent's override (null blocks follow the Workspace) and
-    project what now applies into its project."""
+    project what now applies into its project. Both null clears it: the
+    Agent follows the Workspace entirely (`override_cleared`)."""
     override = compliance.override_document(_validate(compliance.AgentOverride, body))
     b = await _backend_or_404(agent_id, ctx.workspace_id)
     pool = runtime.get_pool()
     before = _setting(await compliance_store.get_override(pool, ctx.workspace_id, agent_id))
+    cleared = override["redaction"] is None and override["retention"] is None
     await compliance_store.save_override(pool, ctx.workspace_id, agent_id, **override)
+    if cleared and before is None:
+        # No override before or after: the projection below only finishes
+        # whatever was owed already, as POST /compliance/apply would.
+        audit.unchanged()
+        change = None
+    else:
+        # Saved: a projection that raises from here is recorded as partial.
+        change = audit.begin(
+            ctx, "compliance", agent_id,
+            "override_cleared" if cleared else "updated" if before else "created",
+            resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id],
+            before=before, after=None if cleared else override,
+        )
     data = await compliance.agent_report(pool, runtime.get_client(), ctx.workspace_id, b, write=True)
-    await audit.record(
-        ctx, "compliance", agent_id, "updated" if before else "created",
-        resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id],
-        before=before, after=override,
-    )
+    if change is not None:
+        await change.record()
     return {"success": True, "data": data}

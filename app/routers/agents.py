@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .. import agent_update, runtime
+from .. import agent_update, compliance_store, db, runtime
 from .._helpers import (
     _backend_view,
     _normalize_config,
@@ -229,7 +229,11 @@ async def delete_agent(
         await runtime.get_client().delete_project(b["project_id"], b["api_key"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("turncall project delete failed for %s: %s", agent_id, exc)
-    await registry.mark_deleted(pool, agent_id)
+    # The registry row is hidden and the Agent's compliance override and
+    # projection record go with it, together: they describe its project.
+    async with db.transaction(pool) as conn:
+        await registry.mark_deleted(conn, agent_id)
+        await compliance_store.forget_agent(conn, ctx.workspace_id, agent_id)
     await change.record()
     return {"success": True, "data": {"deleted": agent_id}}
 

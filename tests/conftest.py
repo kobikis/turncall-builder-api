@@ -158,6 +158,7 @@ def mocks(monkeypatch):
     m.compliance_store.get_override.return_value = None
     m.compliance_store.list_overrides.return_value = {}
     m.compliance_store.list_projections.return_value = {}
+    m.compliance_store.get_projection.return_value = None
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

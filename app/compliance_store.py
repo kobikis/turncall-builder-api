@@ -136,6 +136,35 @@ async def record_projection(
     )
 
 
+async def get_projection(
+    pool: asyncpg.Pool, workspace_id: str, agent_id: str
+) -> dict[str, Any] | None:
+    """One target's {state, fingerprint, error, updated_at}, or None while
+    nothing was ever written to it."""
+    row = await pool.fetchrow(
+        "SELECT state, fingerprint, error, updated_at FROM compliance_projections "
+        "WHERE workspace_id = $1 AND agent_id = $2",
+        workspace_id,
+        agent_id,
+    )
+    return dict(row) if row else None
+
+
+async def forget_agent(pool: asyncpg.Pool, workspace_id: str, agent_id: str) -> None:
+    """A deleted Agent's override and projection record go with it: they
+    describe a project that no longer exists."""
+    await pool.execute(
+        "DELETE FROM agent_compliance WHERE workspace_id = $1 AND agent_id = $2",
+        workspace_id,
+        agent_id,
+    )
+    await pool.execute(
+        "DELETE FROM compliance_projections WHERE workspace_id = $1 AND agent_id = $2",
+        workspace_id,
+        agent_id,
+    )
+
+
 async def list_projections(pool: asyncpg.Pool, workspace_id: str) -> dict[str, dict[str, Any]]:
     """agent_id -> {state, fingerprint, error, updated_at}."""
     rows = await pool.fetch(

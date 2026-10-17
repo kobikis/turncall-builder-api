@@ -340,3 +340,109 @@ def test_a_new_webhook_project_gets_the_workspace_setting(mocks):
     red, _ = _writes(mocks)
     assert red == [("wp-ws", SETTINGS["redaction"], "tc_wp")]
     assert mocks.compliance_store.record_projection.await_args.args[2] == f"webhook-numbers:{TEST_WORKSPACE_ID}"
+
+
+# --- concurrency, the per-agent read, clearing and deleting (#103 review) -----------
+
+
+def _agents(mocks, n):
+    mocks.registry.list_backends.return_value = [
+        backend_row(agent_id=f"a{i:02}", project_id=f"p{i:02}", api_key=f"tc_{i:02}", config={"name": f"A{i}"})
+        for i in range(n)
+    ]
+
+
+def test_targets_are_written_concurrently_a_few_at_a_time_and_reported_in_order(client, mocks):
+    """Writes finish in the reverse of target order; the report does not care."""
+    n = 20
+    _agents(mocks, n)
+    _saved(mocks)
+    in_flight, most = 0, 0
+
+    async def slow_redaction(project_id, setting, key):
+        nonlocal in_flight, most
+        in_flight += 1
+        most = max(most, in_flight)
+        await asyncio.sleep(0.002 * (n - int(project_id[1:])))
+        in_flight -= 1
+
+    mocks.client.set_project_redaction.side_effect = slow_redaction
+    mocks.client.set_project_retention.side_effect = (
+        lambda project_id, *a: _raise(_refused(project_id)) if project_id == "p07" else None
+    )
+
+    data = client.put("/compliance", json=SETTINGS, headers=WS).json()["data"]
+
+    assert 1 < most <= compliance.CONCURRENCY
+    assert [a["agent_id"] for a in data["agents"]] == [f"a{i:02}" for i in range(n)]
+    states = {a["agent_id"]: a["state"] for a in data["agents"]}
+    assert states.pop("a07") == "failed"
+    assert set(states.values()) == {"applied"}
+    finished = [c.args[2] for c in mocks.compliance_store.record_projection.await_args_list]
+    assert finished != sorted(finished)  # the writes did finish out of order
+
+    # Idempotent: with every target recorded, applying again writes only the
+    # one that failed.
+    mocks.compliance_store.list_projections.return_value = {
+        c.args[2]: c.kwargs for c in mocks.compliance_store.record_projection.await_args_list
+    }
+    mocks.client.set_project_redaction.reset_mock()
+    mocks.client.set_project_retention.side_effect = None
+    data = client.post("/compliance/apply", headers=WS).json()["data"]
+    assert [c.args[0] for c in mocks.client.set_project_redaction.await_args_list] == ["p07"]
+    assert data["complete"] is True
+
+
+def _raise(exc):
+    raise exc
+
+
+def test_the_agent_report_reads_only_its_own_projection(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    _saved(mocks)
+    fp = compliance.fingerprint(compliance.effective(SETTINGS, None))
+    mocks.compliance_store.get_projection.return_value = {"state": "applied", "fingerprint": fp, "error": None}
+
+    data = client.get("/agents/a1/compliance", headers=WS).json()["data"]
+
+    assert data["projection"] == {"state": "applied", "error": None}
+    assert mocks.compliance_store.get_projection.await_args.args[1:] == (TEST_WORKSPACE_ID, "a1")
+    mocks.compliance_store.list_projections.assert_not_called()
+
+
+def test_clearing_an_override_is_its_own_action(client, mocks):
+    from tests.conftest import audit_entries
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.compliance_store.get_override.return_value = {"redaction": OFF, "retention": None}
+
+    r = client.put("/agents/a1/compliance", json={"redaction": None, "retention": None}, headers=WS)
+
+    assert r.status_code == 200, r.text
+    (entry,) = audit_entries(mocks)
+    assert (entry["resource_type"], entry["resource_id"], entry["action"]) == ("compliance", "a1", "override_cleared")
+    assert entry["changes"]["/redaction/enabled"] == {"before": False, "after": None}
+
+
+def test_clearing_an_override_that_was_never_set_records_nothing(client, mocks):
+    from tests.conftest import audit_entries
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+
+    r = client.put("/agents/a1/compliance", json={"redaction": None, "retention": None}, headers=WS)
+
+    assert r.status_code == 200, r.text
+    assert audit_entries(mocks) == []
+
+
+def test_deleting_an_agent_forgets_its_override_and_projection(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    mocks.phones.list_numbers.return_value = []
+    order = []
+    mocks.registry.mark_deleted.side_effect = lambda *a: order.append("hidden")
+    mocks.compliance_store.forget_agent.side_effect = lambda *a: order.append("forgotten")
+
+    assert client.delete("/agents/a1", headers=WS).status_code == 200
+
+    assert mocks.compliance_store.forget_agent.await_args.args[1:] == (TEST_WORKSPACE_ID, "a1")
+    assert order == ["hidden", "forgotten"]
