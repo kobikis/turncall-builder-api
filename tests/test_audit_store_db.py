@@ -4,8 +4,9 @@ Exercises the SQL the endpoint tests mock: entries are read back newest first,
 Workspace-scoped, filtered by member, agent and time and paged with a total;
 the table refuses UPDATE, DELETE and TRUNCATE to everything but the retention
 janitor, which removes only what is past retention; an entry written in a
-change's transaction (db.transaction) commits and rolls back with it; and the
-migration goes down and up again.
+change's transaction (db.transaction) commits and rolls back with it; an entry's
+links to TurnCall's entries are kept and read back, and the project of a key and
+the key of a project are found (#102); and the migrations go down and up again.
 
 Needs a reachable Postgres (same contract as the other *_db tests). Skips cleanly
 when none is set.
@@ -24,6 +25,7 @@ from alembic import command
 from alembic.config import Config
 
 from app import audit_store, auth_store, db, workspace_skills
+from app.backends import registry
 from tests.conftest import __file__ as _conftest_file
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(_conftest_file)))
@@ -95,7 +97,7 @@ async def _run_assertions(dsn: str) -> None:
         first = await audit_store.insert(pool, _entry(ws, alice["id"]))
         assert first["changes"] == {"/system_prompt": {"before": "a", "after": "b"}}
         assert first["agent_ids"] == ["a1"]
-        assert first["turncall_project_id"] is None and first["engine_audit_id"] is None
+        assert first["engine_links"] == []
         second = await audit_store.insert(
             pool, _entry(ws, bob["id"], role="editor", resource_type="phone_number",
                          resource_id="pn1", agent_ids=["a1", "a2"], action="updated"),
@@ -125,6 +127,46 @@ async def _run_assertions(dsn: str) -> None:
         assert (await audit_store.list_entries(pool, ws, until=created))[1] == 0
         assert (await audit_store.list_entries(pool, ws, since=created + timedelta(hours=1)))[1] == 0
         assert (await audit_store.list_entries(pool, ws, since=created))[1] == 3
+
+        # --- links to TurnCall's entries (#102) -----------------------------------
+        links = [
+            {"project_id": "p1", "engine_audit_id": "6f1c0e8a-0000-0000-0000-000000000001"},
+            {"project_id": "p2", "engine_audit_id": "6f1c0e8a-0000-0000-0000-000000000002"},
+        ]
+        linked = await audit_store.insert(
+            pool, _entry(ws, alice["id"], resource_type="compliance", resource_id="workspace",
+                         agent_ids=[], engine_links=links),
+        )
+        assert linked["engine_links"] == links
+        assert (await audit_store.list_entries(pool, ws, limit=1))[0][0]["engine_links"] == links
+        assert (await audit_store.get_entry(pool, ws, linked["id"]))["engine_links"] == links
+        assert await audit_store.get_entry(pool, other_ws, linked["id"]) is None
+        assert await audit_store.get_entry(pool, ws, "not-a-uuid") is None
+        # Out of the way of the counts below: the janitor's own transaction.
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(f"SET LOCAL {audit_store.RETENTION_GUC} = 'on'")
+            await conn.execute("DELETE FROM audit_entries WHERE id = $1", uuid.UUID(linked["id"]))
+
+        await registry.record_backend(pool, "agent-x", "proj-x", "tc_x", "Bot", 9101, {}, ws)
+        await registry.mark_deleted(pool, "agent-x")  # a torn-down Agent's entries still link
+        await pool.execute(
+            "INSERT INTO webhook_project (id, project_id, api_key) VALUES (1, 'proj-shared', 'tc_s')"
+        )
+        await pool.execute(
+            "INSERT INTO webhook_project (project_id, api_key, workspace_id) VALUES ('proj-w', 'tc_w', $1)",
+            uuid.UUID(ws),
+        )
+        assert await registry.projects_for_keys(pool, ["tc_x", "tc_w", "tc_s", "tc_nobody", ""]) == {
+            "tc_x": "proj-x", "tc_w": "proj-w", "tc_s": "proj-shared",
+        }
+        assert await registry.projects_for_keys(pool, []) == {}
+        assert await registry.key_for_project(pool, "proj-x", ws) == "tc_x"
+        assert await registry.key_for_project(pool, "proj-w", ws) == "tc_w"
+        assert await registry.key_for_project(pool, "proj-shared", ws) == "tc_s"
+        # Another Workspace's projects are not this one's to read.
+        assert await registry.key_for_project(pool, "proj-x", other_ws) is None
+        assert await registry.key_for_project(pool, "proj-w", other_ws) is None
+        assert await registry.key_for_project(pool, "proj-nobody", ws) is None
 
         # --- append-only ---------------------------------------------------------
         for sql in (
@@ -187,8 +229,10 @@ def test_audit_entries_against_postgres():
         asyncio.run(_admin(base_url, f'DROP DATABASE IF EXISTS "{_TEST_DB}" WITH (FORCE)'))
         asyncio.run(_admin(base_url, f'CREATE DATABASE "{_TEST_DB}"'))
         command.upgrade(cfg, "head")
-        # The migration goes down cleanly (table, triggers and function) and up again.
+        # The migrations go down cleanly (table, triggers and function) and up again.
+        command.downgrade(cfg, "0020")
         command.downgrade(cfg, "0019")
+        command.upgrade(cfg, "0020")
         command.upgrade(cfg, "head")
         asyncio.run(_run_assertions(test_dsn))
     finally:

@@ -69,9 +69,8 @@ as every list here is (`page`, `limit` up to 200, `total`). An entry holds the
 User and their email as it was, the Workspace, the Role, `resource_type`,
 `resource_id`, a `resource_name` to read it by, the `action`, every Agent it is
 about (`agent_ids`: a re-pointed number is about both agents), `changes` and a
-`request_id` shared by every entry one request wrote. `turncall_project_id` and
-`engine_audit_id` exist and stay null until the link to the engine's entry
-(#102) fills them.
+`request_id` shared by every entry one request wrote, and its links to the
+engine's entries (`engine_links`, #102, below).
 
 **One mechanism.** An audited route takes an `Audit` trail and records on it
 (app/audit.py). The trail's teardown runs as the route returns, before the
@@ -119,3 +118,50 @@ keeps entries for good, anything else refuses to start), swept hourly by each
 server in batches that skip each other's rows. It is deliberately not a
 Workspace setting beside #103's call retention: the people who could shorten it
 would be the admins it records. Call retention never touches it.
+
+## The link to TurnCall's entries, as built (#102)
+
+Every response to a request TurnCall audits names one entry in
+`X-TurnCall-Audit-Id`, and that id is also the `request_id` of every entry the
+request wrote, so `GET /v1/audit-log?request_id=<id>` reads its whole cascade
+(TurnCall's audit-log guide).
+
+**An entry holds a list, `engine_links`: one `{project_id, engine_audit_id}`
+per TurnCall request the change made that TurnCall audited, in the order made.**
+Not the primary call's id alone, because one person's change is routinely many
+engine requests and often in many projects: Create makes the project, its key
+and the agent and projects the Workspace's credentials and compliance settings
+into it; a compliance or provider-key change writes into every Agent's project;
+re-pointing a number across projects unbinds in one and binds in another. No one
+of those ids reaches the others (each engine request has its own `request_id`),
+so keeping only one would leave the console unable to show most of what the
+change did. The list is the whole join, and nothing of the engine's entries is
+copied. Migration 0021 replaces 0020's single, never-written
+`turncall_project_id` and `engine_audit_id` columns with it. An empty list is a
+change that never reached TurnCall or that TurnCall does not audit (webhook
+subscriptions, knowledge bases, takeaways and the rest its guide lists).
+
+**Captured once, in the TurnCall client.** `_request` reads the header on every
+successful response and notes it on the request's collection, a context
+variable the `Audit` trail opens for the life of the route; routes parse no
+headers. Each `audit.record` takes the calls noted since the request's previous
+entry, so a route records a change after making its TurnCall calls (every
+audited route already does). A failed engine request raises before it is noted;
+a call made after the route returned (a task it started) is not collected.
+
+**The project is the one the call was made in.** A project route names it, and a
+platform bootstrap is in the project it creates or keys, as in the engine's own
+entry. Every other call carries an Agent's or a webhook project's key, and the
+trail resolves the key to its project from the builder's own records
+(`registry.projects_for_keys`) as the entry is written; the key is held in
+memory for that and never recorded. A key the builder no longer holds still
+links the engine entry, with a null project.
+
+**`GET /audit/{id}/engine` reads the cascade back,** admin-only, Workspace-scoped:
+for each link, every engine entry its request wrote, read with that project's
+key (`registry.key_for_project`: one of the Workspace's Agents', deleted ones
+included, or a webhook project it uses). The key never leaves builder-api, so
+the Console cannot read TurnCall's log itself. A link that cannot be read comes
+back with `entries: null` and why rather than failing the rest; a torn-down
+Agent's is the usual one, since deleting its project revokes its keys, and its
+engine entries are then only in TurnCall's database.

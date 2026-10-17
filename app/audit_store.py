@@ -1,7 +1,7 @@
 """`audit_entries` persistence (ADR-0028). The only module that names the table.
 
-Three operations and no more: append one entry, read a Workspace's entries,
-and the retention janitor's purge. There is no update and no delete of a
+Four operations and no more: append one entry, read a Workspace's entries
+(a page of them, or one), and the retention janitor's purge. There is no update and no delete of a
 single entry, and the database refuses both anyway (migration 0020).
 """
 
@@ -18,8 +18,7 @@ RETENTION_GUC = "builder.audit_retention"
 
 _COLUMNS = (
     "id, workspace_id, user_id, user_email, role, resource_type, resource_id, "
-    "resource_name, action, agent_ids, changes, request_id, turncall_project_id, "
-    "engine_audit_id, created_at"
+    "resource_name, action, agent_ids, changes, request_id, engine_links, created_at"
 )
 
 
@@ -36,8 +35,9 @@ async def insert(db: Any, entry: dict[str, Any]) -> dict[str, Any]:
     row = await db.fetchrow(
         f"""INSERT INTO audit_entries
                (id, workspace_id, user_id, user_email, role, resource_type,
-                resource_id, resource_name, action, agent_ids, changes, request_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+                resource_id, resource_name, action, agent_ids, changes, request_id,
+                engine_links)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb)
             RETURNING {_COLUMNS}""",
         uuid.UUID(entry["id"]),
         uuid.UUID(entry["workspace_id"]),
@@ -51,12 +51,16 @@ async def insert(db: Any, entry: dict[str, Any]) -> dict[str, Any]:
         list(entry.get("agent_ids") or []),
         json.dumps(entry.get("changes") or {}),
         uuid.UUID(entry["request_id"]),
+        json.dumps(entry.get("engine_links") or []),
     )
     return _view(row)
 
 
+def _json(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
 def _view(row: Any) -> dict[str, Any]:
-    changes = row["changes"]
     return {
         "id": str(row["id"]),
         "workspace_id": str(row["workspace_id"]),
@@ -68,12 +72,26 @@ def _view(row: Any) -> dict[str, Any]:
         "resource_name": row["resource_name"],
         "action": row["action"],
         "agent_ids": list(row["agent_ids"]),
-        "changes": json.loads(changes) if isinstance(changes, str) else changes,
+        "changes": _json(row["changes"]),
         "request_id": str(row["request_id"]),
-        "turncall_project_id": row["turncall_project_id"],
-        "engine_audit_id": row["engine_audit_id"],
+        # [{project_id, engine_audit_id}]: each TurnCall request the change made
+        # that TurnCall audited; empty when it never reached TurnCall (#102).
+        "engine_links": _json(row["engine_links"]),
         "created_at": row["created_at"].isoformat(),
     }
+
+
+async def get_entry(db: Any, workspace_id: str, entry_id: str) -> dict[str, Any] | None:
+    """One of a Workspace's entries; another Workspace's, or no such id, is None."""
+    entry = _uuid(entry_id)
+    if entry is None:
+        return None
+    row = await db.fetchrow(
+        f"SELECT {_COLUMNS} FROM audit_entries WHERE id = $1 AND workspace_id = $2",
+        entry,
+        uuid.UUID(workspace_id),
+    )
+    return _view(row) if row else None
 
 
 async def list_entries(

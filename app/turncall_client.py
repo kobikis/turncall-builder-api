@@ -7,14 +7,93 @@ unauthenticated (dev); agent + webhook calls use that agent's key.
 
 One pooled httpx client for the process (closed via close() on app shutdown);
 every method routes through _request(), so auth, error-raising, and response
-unwrapping live in exactly one place.
+unwrapping live in exactly one place — and so does noting the engine's audit
+entry id (`X-TurnCall-Audit-Id`, turncall#317) on every change TurnCall audited,
+for the builder's own audit entry to link to (ADR-0028, #102).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
+
+# On every successful response to a request TurnCall audited: its primary
+# entry's id, which is also the `request_id` of every entry that request wrote,
+# so `GET /v1/audit-log?request_id=<id>` reads the whole cascade.
+AUDIT_ID_HEADER = "X-TurnCall-Audit-Id"
+
+
+@dataclass(frozen=True)
+class AuditedCall:
+    """One request TurnCall audited, as the builder's entry links to it."""
+
+    audit_id: str
+    # The project, when the request itself names it (a project route, or the
+    # platform bootstrap that creates or keys one). Otherwise it is the project
+    # `api_key` belongs to, which the audit trail resolves; the key is held in
+    # memory for that and never recorded.
+    project_id: str | None
+    api_key: str | None = field(default=None, repr=False)
+
+
+class AuditedCalls:
+    """What one builder request's TurnCall calls wrote to the engine's log.
+    Once closed (the request has returned), late calls are not collected."""
+
+    def __init__(self) -> None:
+        self._calls: list[AuditedCall] = []
+        self._open = True
+
+    def add(self, call: AuditedCall) -> None:
+        if self._open:
+            self._calls.append(call)
+
+    def take(self) -> list[AuditedCall]:
+        """Every call collected since the last take, in the order made."""
+        calls, self._calls = self._calls, []
+        return calls
+
+    def close(self) -> None:
+        self._open = False
+
+
+_collecting: ContextVar[AuditedCalls | None] = ContextVar("turncall_audited_calls", default=None)
+
+
+@contextmanager
+def collecting(calls: AuditedCalls) -> Iterator[AuditedCalls]:
+    """Collect the audit id of every TurnCall call made in this context (and
+    the tasks it starts) into `calls`. The audit trail opens one per request."""
+    token = _collecting.set(calls)
+    try:
+        yield calls
+    finally:
+        calls.close()
+        _collecting.reset(token)
+
+
+def note_audit_id(
+    audit_id: str, *, project_id: str | None = None, api_key: str | None = None
+) -> None:
+    """Note one audited TurnCall request on whatever is collecting. _request
+    calls this for every response carrying the header; nothing else should,
+    but a test's mocked client does, to stand in for the real one."""
+    calls = _collecting.get()
+    if calls is not None:
+        calls.add(AuditedCall(audit_id, project_id, api_key))
+
+
+def _created_id(resp: httpx.Response) -> str | None:
+    """The id of what a bootstrap call created (POST /v1/projects)."""
+    try:
+        return str(resp.json()["data"]["id"])
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 class TurnCallClient:
@@ -42,10 +121,15 @@ class TurnCallClient:
         api_key: str | None = None,
         extract: Literal["data", "json", "content", "none"] = "data",
         timeout: float | None = None,
+        project_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """One request. `extract` picks what to return: the response body's
-        `data` field (default), the whole JSON, raw bytes, or nothing."""
+        `data` field (default), the whole JSON, raw bytes, or nothing.
+
+        A response naming its engine audit entry is noted for the builder's
+        own entry (note_audit_id), with `project_id` when the route names the
+        project; a failed request raises first and is noted nowhere."""
         headers = dict(kwargs.pop("headers", {}) or {})
         if api_key:
             headers.update(self._auth(api_key))
@@ -57,6 +141,13 @@ class TurnCallClient:
             **kwargs,
         )
         resp.raise_for_status()
+        audit_id = resp.headers.get(AUDIT_ID_HEADER)
+        if audit_id:
+            if project_id is None and not api_key:
+                # The platform credential's bootstrap: the project is the one
+                # it keys or creates, as in the engine's own entry.
+                project_id = (kwargs.get("params") or {}).get("project_id") or _created_id(resp)
+            note_audit_id(audit_id, project_id=project_id, api_key=api_key)
         if extract == "none":
             return None
         if extract == "content":
@@ -138,7 +229,8 @@ class TurnCallClient:
         project + its agent/key/KB and unbinds its numbers in one call.
         Self-delete: the key must belong to this project."""
         await self._request(
-            "DELETE", f"/v1/projects/{project_id}", api_key=api_key, extract="none"
+            "DELETE", f"/v1/projects/{project_id}", api_key=api_key, extract="none",
+            project_id=project_id,
         )
 
     async def get_project(self, project_id: str, api_key: str) -> dict[str, Any]:
@@ -151,7 +243,8 @@ class TurnCallClient:
         """Replace the project's limits (turncall#206): a null or left-out field
         goes back to the platform default. Admin key, its own project only."""
         return await self._request(
-            "PUT", f"/v1/projects/{project_id}/limits", api_key=api_key, json=limits
+            "PUT", f"/v1/projects/{project_id}/limits", api_key=api_key, json=limits,
+            project_id=project_id,
         )
 
     async def set_project_redaction(
@@ -160,7 +253,8 @@ class TurnCallClient:
         """Replace the project's redaction (turncall#313): `{enabled, entities}`,
         null entities = the engine's default list. Admin key, its own project."""
         return await self._request(
-            "PUT", f"/v1/projects/{project_id}/redaction", api_key=api_key, json=redaction
+            "PUT", f"/v1/projects/{project_id}/redaction", api_key=api_key, json=redaction,
+            project_id=project_id,
         )
 
     async def set_project_retention(
@@ -169,7 +263,21 @@ class TurnCallClient:
         """Replace the project's retention (turncall#316): days per kind, null =
         kept for good. Admin key, its own project."""
         return await self._request(
-            "PUT", f"/v1/projects/{project_id}/retention", api_key=api_key, json=retention
+            "PUT", f"/v1/projects/{project_id}/retention", api_key=api_key, json=retention,
+            project_id=project_id,
+        )
+
+    async def list_audit_log(
+        self, api_key: str, *, request_id: str, cursor: str | None = None
+    ) -> dict[str, Any]:
+        """One page (`data`, `next_cursor`) of what one request wrote to the
+        engine's audit log (turncall#317): `request_id` is the id its response
+        named in X-TurnCall-Audit-Id. Admin key, its own project's entries."""
+        params: dict[str, Any] = {"request_id": request_id, "limit": 200}
+        if cursor:
+            params["cursor"] = cursor
+        return await self._request(
+            "GET", "/v1/audit-log", api_key=api_key, extract="json", params=params
         )
 
     async def bind_phone_number(

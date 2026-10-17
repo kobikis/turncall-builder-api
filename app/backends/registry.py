@@ -185,6 +185,43 @@ async def mark_deleted(pool: asyncpg.Pool, agent_id: str) -> None:
     )
 
 
+# --- the TurnCall projects the builder holds keys for ---------------------------
+#
+# One per Agent, deleted ones included (an audit entry outlives its agent), and
+# the webhook projects (#65). An audit entry's link to the engine (ADR-0028)
+# names the project each call was made in, and reading that project's engine
+# log needs its key back.
+
+
+async def projects_for_keys(db: Any, api_keys: list[str]) -> dict[str, str]:
+    """The project each of these keys belongs to; a key held nowhere is left out."""
+    keys = sorted({k for k in api_keys if k})
+    if not keys:
+        return {}
+    rows = await db.fetch(
+        """SELECT project_id, api_key FROM agent_backends WHERE api_key = ANY($1::text[])
+           UNION ALL
+           SELECT project_id, api_key FROM webhook_project WHERE api_key = ANY($1::text[])""",
+        keys,
+    )
+    return {r["api_key"]: r["project_id"] for r in rows if r["project_id"]}
+
+
+async def key_for_project(db: Any, project_id: str, workspace_id: str) -> str | None:
+    """The key of a project this Workspace holds: one of its Agents' (deleted or
+    not), its webhook project, or the shared one numbers bound before #65 use."""
+    return await db.fetchval(
+        """SELECT api_key FROM agent_backends
+            WHERE project_id = $1 AND workspace_id = $2
+           UNION ALL
+           SELECT api_key FROM webhook_project
+            WHERE project_id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)
+           LIMIT 1""",
+        project_id,
+        workspace_id,
+    )
+
+
 def backend_url(port: int) -> str:
     """URL other containers (TurnCall, the builder) use to reach the backend."""
     if kube.ENABLED:

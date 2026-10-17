@@ -21,6 +21,13 @@ Where the change is builder-side only, the entry is written in the change's
 own transaction (`db.transaction`), so the two commit or roll back together.
 Where it reached TurnCall, the entry is written once TurnCall accepted it: the
 two systems share no transaction, and a request that fails writes nothing.
+
+**It links to what TurnCall recorded** (#102). While the trail is open, the
+TurnCall client collects the engine audit id of every call TurnCall audited
+(`X-TurnCall-Audit-Id`). Each entry takes those made since the request's
+previous entry as its `engine_links`, one `{project_id, engine_audit_id}` per
+engine request, so a change that reached many projects links to every one. A
+change TurnCall does not audit, or that never reached it, has none.
 """
 
 from __future__ import annotations
@@ -35,8 +42,10 @@ from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
 from . import audit_store, runtime
+from .backends import registry
 from .deps import AuthContext
 from .github import SECRET_KEYS
+from .turncall_client import AuditedCalls, collecting
 
 logger = logging.getLogger("turncall_builder")
 
@@ -158,6 +167,9 @@ class AuditTrail:
         self.request_id = str(uuid.uuid4())
         self.entries: list[dict[str, Any]] = []
         self._unchanged = False
+        # The audited TurnCall calls this request makes, collected by the
+        # client while _trail holds the trail open.
+        self.engine_calls = AuditedCalls()
 
     async def record(
         self,
@@ -177,9 +189,12 @@ class AuditTrail:
 
         What changed is `changes`, or else the diff of `before` and `after`.
         `db` is the change's own transaction when it has one (db.transaction);
-        otherwise the entry is written on its own, after the change."""
+        otherwise the entry is written on its own, after the change. It links
+        to every TurnCall call TurnCall audited since the previous entry, so
+        record a change once its TurnCall calls are made."""
         if resource_type not in RESOURCE_TYPES:
             raise ValueError(f"unknown audit resource_type {resource_type!r}")
+        db = db if db is not None else runtime.get_pool()
         entry = {
             "id": str(uuid.uuid4()),
             "workspace_id": str(ctx.workspace_id),
@@ -193,10 +208,25 @@ class AuditTrail:
             "agent_ids": sorted({str(a) for a in agent_ids if a}),
             "changes": changes if changes is not None else diff(before, after),
             "request_id": self.request_id,
+            "engine_links": await self._engine_links(db),
         }
-        await audit_store.insert(db if db is not None else runtime.get_pool(), entry)
+        await audit_store.insert(db, entry)
         self.entries.append(entry)
         return entry
+
+    async def _engine_links(self, db: Any) -> list[dict[str, str | None]]:
+        """The engine requests behind this entry, in the order made. A call made
+        with an Agent's or a webhook project's key is in that key's project."""
+        calls = self.engine_calls.take()
+        keys = [c.api_key for c in calls if c.project_id is None and c.api_key]
+        projects = await registry.projects_for_keys(db, keys) if keys else {}
+        return [
+            {
+                "project_id": c.project_id or projects.get(c.api_key or ""),
+                "engine_audit_id": c.audit_id,
+            }
+            for c in calls
+        ]
 
     def unchanged(self) -> None:
         """Say this request changed nothing worth an entry. Only for a branch
@@ -210,7 +240,8 @@ class AuditTrail:
 
 async def _trail() -> AsyncIterator[AuditTrail]:
     trail = AuditTrail()
-    yield trail
+    with collecting(trail.engine_calls):
+        yield trail
     # Reached only when the route returned normally: an exception (a 4xx, a
     # TurnCall failure) is thrown in at the yield and propagates past this.
     if not trail.satisfied:

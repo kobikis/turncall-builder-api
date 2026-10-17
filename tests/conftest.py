@@ -134,6 +134,11 @@ def mocks(monkeypatch):
     # (await_args_list), and a builder-side change's transaction is the pool
     # itself — there is no database under these tests.
     m.audit_store.list_entries.return_value = ([], 0)
+    m.audit_store.get_entry.return_value = None
+    # An engine link's project, from the key a TurnCall call was made with (#102):
+    # none known unless a test says so.
+    m.registry.projects_for_keys.return_value = {}
+    m.registry.key_for_project.return_value = None
 
     @asynccontextmanager
     async def _transaction(pool):

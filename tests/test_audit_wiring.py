@@ -8,7 +8,7 @@ What this guards:
 - A route that takes a trail and returns normally without recording is a 500,
   not a change saved unrecorded. Because of that, every endpoint test of an
   audited route that expects a 2xx also proves the route recorded.
-- The read is the only audit route, and it is a GET.
+- The audit routes only read: the log, and what TurnCall recorded of an entry.
 """
 
 from __future__ import annotations
@@ -118,8 +118,11 @@ def test_no_exemption_outlives_its_route():
     assert set(NOT_AUDITED) - served == set()
 
 
-def test_the_only_audit_route_is_the_read():
-    assert [(m, p) for m, p, _ in _routes() if p.startswith("/audit")] == [("GET", "/audit")]
+def test_the_audit_routes_only_read():
+    assert sorted((m, p) for m, p, _ in _routes() if p.startswith("/audit")) == [
+        ("GET", "/audit"),
+        ("GET", "/audit/{entry_id}/engine"),
+    ]
 
 
 # --- the trail's teardown ------------------------------------------------------

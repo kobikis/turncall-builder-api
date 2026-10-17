@@ -117,8 +117,8 @@ def test_an_agent_edit_records_what_changed_and_masks_secrets(client, mocks):
     assert entry["changes"]["/system_prompt"] == {"before": "Be kind.", "after": "Be brief."}
     assert entry["changes"]["/mcp_servers/0/headers"] == {"before": "***", "after": "***"}
     assert "Bearer" not in json.dumps(entry)
-    # Engine linkage is #102's to fill.
-    assert "engine_audit_id" not in entry and "turncall_project_id" not in entry
+    # TurnCall named no audit entry (the mocked client sends no header).
+    assert entry["engine_links"] == []
 
 
 def test_a_teardown_records_what_the_agent_was(client, mocks):
