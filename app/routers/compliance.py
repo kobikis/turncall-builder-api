@@ -4,7 +4,8 @@ Setting either is an admin act: the Workspace's is policy for every Agent, and a
 Agent's override can weaken it. An Agent's effective setting is readable by any
 member, since it says what happens to that Agent's calls. Every write is
 projected at once and answers with each target's state; `POST
-/compliance/apply` finishes a projection that failed partway.
+/compliance/apply` finishes a projection that failed partway, and `POST
+/agents/{id}/compliance/apply` retries one Agent's alone.
 """
 
 from __future__ import annotations
@@ -115,4 +116,24 @@ async def set_agent_settings(
     data = await compliance.agent_report(pool, runtime.get_client(), ctx.workspace_id, b, write=True)
     if change is not None:
         await change.record()
+    return {"success": True, "data": data}
+
+
+@router.post("/agents/{agent_id}/compliance/apply")
+async def reapply_agent(
+    agent_id: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
+    """Retry this Agent's projection alone: written when its project does not
+    hold what applies to it, skipped when it does. Every other target is left
+    as it stands."""
+    b = await _backend_or_404(agent_id, ctx.workspace_id)
+    # Begun before the write: an entry only if TurnCall accepted something.
+    change = audit.begin(
+        ctx, "compliance", agent_id, "reapplied", landed=False, changes={},
+        resource_name=(b.get("config") or {}).get("name"), agent_ids=[agent_id],
+    )
+    data = await compliance.agent_report(
+        runtime.get_pool(), runtime.get_client(), ctx.workspace_id, b, write=True
+    )
+    await change.record()
     return {"success": True, "data": data}

@@ -40,7 +40,10 @@ settings never touch it.
 
 `PUT /compliance` (admin) sets the Workspace's redaction and retention;
 `POST /compliance/apply` retries; `GET|PUT /agents/{id}/compliance` reads (any
-member) and overrides (admin) one Agent's. Storage is `workspace_compliance`,
+member) and overrides (admin) one Agent's, and `POST /agents/{id}/compliance/apply`
+(admin) retries that Agent's projection alone — audited as `reapplied` on the
+Agent, with it in `agent_ids`, so the Agent filter finds it. Both reports carry
+`entity_types` (`supported`, `default`), so no client keeps its own copy. Storage is `workspace_compliance`,
 `agent_compliance` and `compliance_projections` (migration 0019).
 
 **An Agent's override is written into its own project's setting, not into the
@@ -104,7 +107,10 @@ Workspace compliance settings and an Agent's override (#103) are audited
 engine's shape. Every secret-named key (the names the GitHub push already
 redacts, plus anything ending `_secret`, `_token`, `_key`, `_password`,
 `_encrypted`) is compared on its raw value and shown as `***`, at any depth: an
-MCP server's headers, a number's call-init secret, an invite's token. A
+MCP server's headers, a number's call-init secret, an invite's token. Its change
+is marked `"secret": true` (`{"before": "***", "after": "***", "secret": true}`),
+so a reader tells a masked secret from a plain field that holds the text `***`;
+entries written before the flag have only the `***`. A
 credential whose value is never read back (an Integration, the Workspace's
 Twilio or Pipedream secret) is recorded as set, replaced or removed, never more.
 

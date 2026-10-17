@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import compliance, provider_integrations, runtime, twilio_store
 from .._helpers import _turncall_http_error
-from ..audit import MASK, Audit, Change, diff
+from ..audit import Audit, Change, diff, masked
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
 from ..deps import AuthContext, require_editor, require_member
@@ -412,7 +412,7 @@ def _token_change(body: PhoneBind, existing: dict[str, Any] | None) -> dict[str,
     if body.own_twilio() is None:
         return {}
     had = existing is not None and _public(existing)["twilio_credentials"] == "number"
-    return {"/twilio_auth_token": {"before": MASK if had else None, "after": MASK}}
+    return {"/twilio_auth_token": masked(had, True)}
 
 
 def _entry(

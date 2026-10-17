@@ -15,7 +15,9 @@ Three things hold the rest:
   provably changed nothing; it is explicit so it can be grepped for.
 - **No secret is recorded.** `diff()` walks before/after as JSON Pointers and
   masks every secret-named key: a secret that changed reads `***` on both
-  sides, so the entry says the Deepgram key changed and never what it is.
+  sides and is marked `"secret": true`, so the entry says the Deepgram key
+  changed and never what it is, and a plain field that holds the text `***`
+  is never mistaken for one.
 
 Where the change is builder-side only, the entry is written in the change's
 own transaction (`db.transaction`), so the two commit or roll back together.
@@ -146,7 +148,8 @@ def diff(before: Any, after: Any) -> dict[str, dict[str, Any]]:
     None on a side means the resource did not exist on it: a creation lists
     every field it was created with, `before: null`, a deletion every field it
     had, `after: null`. A secret-named key is compared on its raw value and
-    shown as `***` (or null when unset), at any depth and whatever it holds."""
+    shown as `***` (or null when unset), at any depth and whatever it holds,
+    with `secret: true` on its change."""
     old = _flatten(before, "", {}) if before is not None else {}
     new = _flatten(after, "", {}) if after is not None else {}
     changes: dict[str, dict[str, Any]] = {}
@@ -160,7 +163,7 @@ def diff(before: Any, after: Any) -> dict[str, dict[str, Any]]:
             now = now if isinstance(now, _Secret) else _Secret(now)
             if was == now or was.shown() is now.shown() is None:
                 continue  # unchanged, or unset either way ("" and null)
-            changes[path] = {"before": was.shown(), "after": now.shown()}
+            changes[path] = masked(was.shown() is not None, now.shown() is not None)
         else:
             changes[path] = {"before": was, "after": now}
     return changes
@@ -171,19 +174,20 @@ def before_unknown(after: Any) -> dict[str, dict[str, Any]]:
     read: `{"after": ..., "before_unknown": true}` with no `before`, so the
     entry never claims a field was null when nobody knows what it was."""
     return {
-        path: {"after": change["after"], "before_unknown": True}
+        path: {k: v for k, v in change.items() if k != "before"} | {"before_unknown": True}
         for path, change in diff(None, after).items()
     }
 
 
+def masked(was_set: bool, is_set: bool) -> dict[str, Any]:
+    """One secret's change: `***` for a side where it was set, null where it
+    was not, and `secret: true` so the mask is never read as a value."""
+    return {"before": MASK if was_set else None, "after": MASK if is_set else None, "secret": True}
+
+
 def secret_changed(existed_before: bool, exists_after: bool) -> dict[str, dict[str, Any]]:
     """The whole of a credential's entry: that it was set, replaced or removed."""
-    return {
-        "/value": {
-            "before": MASK if existed_before else None,
-            "after": MASK if exists_after else None,
-        }
-    }
+    return {"/value": masked(existed_before, exists_after)}
 
 
 class Change:

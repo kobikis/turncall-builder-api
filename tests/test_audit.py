@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.audit import MASK, diff, is_secret, secret_changed
+from app.audit import MASK, before_unknown, diff, is_secret, secret_changed
 from app.settings import parse_audit_retention
 
 
@@ -37,7 +37,7 @@ def test_names_with_slash_or_tilde_are_escaped():
 def test_secret_names_are_masked(key):
     assert is_secret(key)
     changes = diff({key: "old-value"}, {key: "new-value"})
-    assert changes == {f"/{key}": {"before": MASK, "after": MASK}}
+    assert changes == {f"/{key}": {"before": MASK, "after": MASK, "secret": True}}
     assert "value" not in repr(changes)
 
 
@@ -45,13 +45,26 @@ def test_a_secret_subtree_is_masked_whole_and_unchanged_is_silent():
     before = {"mcp": [{"headers": {"Authorization": "Bearer a"}}]}
     assert diff(before, before) == {}
     after = {"mcp": [{"headers": {"Authorization": "Bearer b", "X-Other": "c"}}]}
-    assert diff(before, after) == {"/mcp/0/headers": {"before": MASK, "after": MASK}}
+    assert diff(before, after) == {"/mcp/0/headers": {"before": MASK, "after": MASK, "secret": True}}
 
 
 def test_a_secret_set_or_cleared_shows_null_on_the_empty_side():
-    assert diff({"api_key": None}, {"api_key": "k"}) == {"/api_key": {"before": None, "after": MASK}}
-    assert diff({"api_key": "k"}, {}) == {"/api_key": {"before": MASK, "after": None}}
+    assert diff({"api_key": None}, {"api_key": "k"}) == {"/api_key": {"before": None, "after": MASK, "secret": True}}
+    assert diff({"api_key": "k"}, {}) == {"/api_key": {"before": MASK, "after": None, "secret": True}}
     assert diff({"api_key": ""}, {"api_key": None}) == {}
+
+
+def test_a_plain_field_holding_the_mask_text_is_not_marked_secret():
+    """Only the explicit flag says a value was masked: `***` typed into a
+    greeting is that greeting."""
+    assert diff({"greeting": "hi"}, {"greeting": MASK}) == {"/greeting": {"before": "hi", "after": MASK}}
+
+
+def test_before_unknown_keeps_the_secret_flag():
+    assert before_unknown({"api_key": "k", "name": "n"}) == {
+        "/api_key": {"after": MASK, "secret": True, "before_unknown": True},
+        "/name": {"after": "n", "before_unknown": True},
+    }
 
 
 def test_non_secret_names_are_not_masked():
@@ -60,8 +73,8 @@ def test_non_secret_names_are_not_masked():
 
 
 def test_secret_changed():
-    assert secret_changed(False, True) == {"/value": {"before": None, "after": MASK}}
-    assert secret_changed(True, False) == {"/value": {"before": MASK, "after": None}}
+    assert secret_changed(False, True) == {"/value": {"before": None, "after": MASK, "secret": True}}
+    assert secret_changed(True, False) == {"/value": {"before": MASK, "after": None, "secret": True}}
 
 
 @pytest.mark.parametrize(("raw", "days"), [(None, None), ("", None), ("  ", None), ("1", 1), ("365", 365), ("36500", 36500)])

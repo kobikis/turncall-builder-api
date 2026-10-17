@@ -225,6 +225,12 @@ def _state(record: dict[str, Any] | None, setting: dict[str, Any]) -> tuple[str,
     return "pending", None
 
 
+def entity_types() -> dict[str, list[str]]:
+    """What a form may offer: every type the engine knows, and those it
+    redacts when a setting names none."""
+    return {"supported": sorted(SUPPORTED_ENTITIES), "default": list(DEFAULT_ENTITIES)}
+
+
 def _settings_view(workspace: dict[str, Any] | None) -> dict[str, Any]:
     base = workspace or DEFAULT
     return {
@@ -284,7 +290,7 @@ async def report(pool: Any, client: Any, workspace_id: str, *, write: bool) -> d
         "agents": agents,
         "webhook_numbers": webhook_numbers,
         "complete": all(s == "applied" for s in states),
-        "entity_types": {"supported": sorted(SUPPORTED_ENTITIES), "default": list(DEFAULT_ENTITIES)},
+        "entity_types": entity_types(),
     }
 
 
@@ -292,7 +298,8 @@ async def agent_report(
     pool: Any, client: Any, workspace_id: str, backend: dict[str, Any], *, write: bool
 ) -> dict[str, Any]:
     """One Agent's view: the Workspace's setting, its override, what applies,
-    and whether its project holds it. With `write`, project it first."""
+    and whether its project holds it. With `write`, project it first — into
+    this Agent's project only."""
     agent_id = backend["agent_id"]
     workspace = await compliance_store.get_workspace(pool, workspace_id)
     override = await compliance_store.get_override(pool, workspace_id, agent_id)
@@ -306,6 +313,7 @@ async def agent_report(
         "override": override or {"redaction": None, "retention": None},
         "effective": setting,
         "projection": {"state": state, "error": error},
+        "entity_types": entity_types(),
     }
 
 

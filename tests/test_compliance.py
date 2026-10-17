@@ -297,6 +297,79 @@ def test_a_viewer_reads_an_agents_setting_but_only_an_admin_overrides(gate_clien
     mocks.compliance_store.save_override.assert_not_called()
 
 
+def test_retrying_one_agent_projects_that_agent_alone_and_audits_it(client, mocks):
+    from tests.conftest import audit_entries
+
+    _two_agents(mocks)
+    mocks.registry.get_backend.return_value = backend_row(
+        agent_id="a2", project_id="p2", api_key="tc_a2", config={"name": "Second"}
+    )
+    _saved(mocks)
+    fp = compliance.fingerprint(compliance.effective(SETTINGS, None))
+    mocks.compliance_store.get_projection.return_value = {"state": "failed", "fingerprint": fp, "error": "403"}
+
+    r = client.post("/agents/a2/compliance/apply", headers=WS)
+
+    assert r.status_code == 200, r.text
+    red, ret = _writes(mocks)
+    assert red == [("p2", SETTINGS["redaction"], "tc_a2")]
+    assert ret == [("p2", SETTINGS["retention"], "tc_a2")]
+    mocks.registry.list_backends.assert_not_called()
+    mocks.compliance_store.list_projections.assert_not_called()
+    data = r.json()["data"]
+    assert data["projection"] == {"state": "applied", "error": None}
+    assert data["entity_types"] == compliance.entity_types()
+    (entry,) = audit_entries(mocks)
+    assert (entry["resource_type"], entry["resource_id"], entry["action"]) == ("compliance", "a2", "reapplied")
+    assert entry["agent_ids"] == ["a2"] and entry["resource_name"] == "Second"
+    assert entry["changes"] == {}
+
+
+def test_retrying_an_agent_that_holds_its_setting_writes_nothing_but_is_recorded(client, mocks):
+    from tests.conftest import audit_entries
+
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    _saved(mocks)
+    fp = compliance.fingerprint(compliance.effective(SETTINGS, None))
+    mocks.compliance_store.get_projection.return_value = {"state": "applied", "fingerprint": fp, "error": None}
+
+    r = client.post("/agents/a1/compliance/apply", headers=WS)
+
+    assert r.json()["data"]["projection"]["state"] == "applied"
+    assert _writes(mocks) == ([], [])
+    assert [e["action"] for e in audit_entries(mocks)] == ["reapplied"]
+
+
+def test_a_retry_that_still_fails_reports_why(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1", project_id="p1")
+    _saved(mocks)
+    mocks.client.set_project_redaction.side_effect = _refused("p1")
+
+    data = client.post("/agents/a1/compliance/apply", headers=WS).json()["data"]
+
+    assert data["projection"]["state"] == "failed"
+    assert "only set its own redaction" in data["projection"]["error"]
+
+
+@pytest.mark.parametrize("role", ["editor", "viewer"])
+def test_retrying_one_agent_is_admin_only(gate_client, mocks, role):
+    mocks.auth_store.resolve_session.return_value = {"id": "u1", "email": "u@x"}
+    mocks.auth_store.resolve_membership.return_value = role
+    mocks.registry.get_backend.return_value = backend_row()
+    gate_client.cookies.set(COOKIE, "live")
+    assert gate_client.post("/agents/a1/compliance/apply", headers=WS).status_code == 403
+    mocks.client.set_project_redaction.assert_not_called()
+
+
+def test_the_agent_report_names_the_entity_types_as_the_workspace_report_does(client, mocks):
+    mocks.registry.get_backend.return_value = backend_row(agent_id="a1")
+    agent = client.get("/agents/a1/compliance", headers=WS).json()["data"]
+    workspace = client.get("/compliance", headers=WS).json()["data"]
+    assert agent["entity_types"] == workspace["entity_types"]
+    assert agent["entity_types"]["default"] == list(compliance.DEFAULT_ENTITIES)
+    assert "PERSON" in agent["entity_types"]["supported"]
+
+
 # --- new projects -------------------------------------------------------------------
 
 

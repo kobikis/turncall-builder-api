@@ -199,7 +199,7 @@ def test_an_mcp_edit_whose_repush_fails_is_recorded_partial(client, mocks):
     assert entry["agent_ids"] == ["a1"]  # reached a1, not a2
     assert entry["engine_links"] == [{"project_id": "p1", "engine_audit_id": "eng-a1"}]
     assert entry["changes"]["/url"] == {"before": "https://old.example.com/mcp", "after": "https://new.example.com/mcp"}
-    assert entry["changes"]["/headers"] == {"before": "***", "after": "***"}
+    assert entry["changes"]["/headers"] == {"before": "***", "after": "***", "secret": True}
 
 
 def test_an_mcp_removal_that_reaches_no_agent_records_nothing(client, mocks):
@@ -309,7 +309,7 @@ def test_a_provider_key_saved_but_not_projected_is_recorded_partial(client, mock
     assert r.status_code == 503, r.text
     (entry,) = audit_entries(mocks)
     assert (entry["resource_type"], entry["action"], entry["outcome"]) == ("integration", "created", "partial")
-    assert entry["changes"] == {"/value": {"before": None, "after": "***"}}
+    assert entry["changes"] == {"/value": {"before": None, "after": "***", "secret": True}}
     assert "dg_secret" not in str(entry)
 
 

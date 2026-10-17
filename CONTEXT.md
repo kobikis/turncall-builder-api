@@ -366,7 +366,8 @@ the change reached TurnCall, a link to each of TurnCall's own audit entries it c
 (which record only the API key): the project and the engine entry id, one per
 TurnCall request, since one change can reach many projects. Append-only, admin-readable (`GET /audit`), never holds a secret: a
 credential change says the credential changed, and a secret-named field reads
-`***` on both sides. Written by the change itself — in its own transaction when
+`***` on both sides with `"secret": true` on its change (the flag, not the text,
+says it was masked). Written by the change itself — in its own transaction when
 the change is builder-side only, once it is done otherwise. A change of several
 steps that fails after some of them landed (a credential saved but not yet
 written into every agent, a number unbound but not yet bound again) is still

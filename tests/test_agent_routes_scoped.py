@@ -93,6 +93,7 @@ def test_the_walk_finds_the_agent_routes():
     paths = {(m, p) for m, p, _ in ROUTES}
     assert ("PUT", "/agents/{agent_id}/github") in paths
     assert ("POST", "/agents/{agent_id}/github/push") in paths
+    assert ("POST", "/agents/{agent_id}/compliance/apply") in paths
     assert len(paths) > 40
 
 
