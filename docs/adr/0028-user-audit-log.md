@@ -136,8 +136,7 @@ re-pointing a number across projects unbinds in one and binds in another. No one
 of those ids reaches the others (each engine request has its own `request_id`),
 so keeping only one would leave the console unable to show most of what the
 change did. The list is the whole join, and nothing of the engine's entries is
-copied. Migration 0021 replaces 0020's single, never-written
-`turncall_project_id` and `engine_audit_id` columns with it. An empty list is a
+copied. It is a column of `audit_entries` from migration 0020 on. An empty list is a
 change that never reached TurnCall or that TurnCall does not audit (webhook
 subscriptions, knowledge bases, takeaways and the rest its guide lists).
 

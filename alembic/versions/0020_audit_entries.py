@@ -2,9 +2,15 @@
 
 One row per change a person made through the Console: the User (and their
 email as it was), the Workspace, the Role they acted under, the resource, the
-action, what changed, and when. The TurnCall project and the engine's own
-audit entry id are columns from the start, nullable, for the link to
-TurnCall's log (#102).
+action, what changed, and when.
+
+`engine_links` links an entry to TurnCall's own audit log (#102): one
+`{project_id, engine_audit_id}` per TurnCall request the change made that the
+engine audited, in the order made, empty when it never reached TurnCall. A
+list, not one column pair: one person's change is often many requests across
+projects (Create makes the project, its key and the agent and projects the
+Workspace's credentials and compliance settings into it; a compliance or
+credential change is written into every Agent's project).
 
 No foreign keys: an entry outlives the member who made it, the agent it is
 about and the Workspace's other rows. `agent_ids` holds every Agent an entry is
@@ -46,8 +52,7 @@ def upgrade() -> None:
             agent_ids           text[] NOT NULL DEFAULT '{}',
             changes             jsonb NOT NULL DEFAULT '{}'::jsonb,
             request_id          uuid NOT NULL,
-            turncall_project_id text,
-            engine_audit_id     text,
+            engine_links        jsonb NOT NULL DEFAULT '[]'::jsonb,
             created_at          timestamptz NOT NULL DEFAULT now()
         )
         """
