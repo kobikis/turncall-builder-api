@@ -82,6 +82,13 @@ def last4(document: dict[str, Any]) -> str:
     return (secret or "")[-4:]
 
 
+# A target holds the Workspace's credential when its last write of the current
+# version succeeded: `applied`, or `pinned` (written all the same; only the
+# agent's own LLM key wins, for its model). One definition, for re-applying and
+# for a call that must run on the Workspace's account.
+_HOLDS = ("applied", "pinned")
+
+
 async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> list[dict[str, Any]]:
     """Write the Workspace's credential into every agent's TurnCall project.
 
@@ -94,23 +101,48 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
     integration = await integration_store.get(pool, workspace_id, provider)
     if integration is None or integration["disconnecting"]:
         return []
-    version = integration["version"]
     document = await integration_store.get_document(pool, workspace_id, provider)
-    done = {
-        p["agent_id"]
-        for p in await integration_store.list_projections(pool, workspace_id, provider)
-        if p["state"] == "applied" and p["version"] == version
-    }
-    results = []
-    for backend in await _targets(pool, workspace_id):
-        agent_id = backend["agent_id"]
-        error = None if agent_id in done else await _write(client, provider, document, backend)
-        state = _state(backend, provider, error)
-        await integration_store.record_projection(
-            pool, workspace_id, provider, agent_id, state=state, version=version, error=error
+    holding = await _holding(pool, workspace_id, integration)
+    return [
+        await _project_one(
+            pool, client, workspace_id, integration, document, target,
+            write=target["agent_id"] not in holding,
         )
-        results.append({"agent_id": agent_id, "state": state, "error": error})
-    return results
+        for target in await _targets(pool, workspace_id)
+    ]
+
+
+async def _holding(pool: Any, workspace_id: str, integration: dict[str, Any]) -> set[str]:
+    """The targets the log says hold this version of the credential."""
+    return {
+        p["agent_id"]
+        for p in await integration_store.list_projections(
+            pool, workspace_id, integration["provider"]
+        )
+        if p["state"] in _HOLDS and p["version"] == integration["version"]
+    }
+
+
+async def _project_one(
+    pool: Any,
+    client: Any,
+    workspace_id: str,
+    integration: dict[str, Any],
+    document: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    write: bool = True,
+) -> dict[str, Any]:
+    """Write the credential into one target (unless it holds it already) and
+    log the outcome: its state, and the reason when it failed."""
+    provider = integration["provider"]
+    error = await _write(client, provider, document, target) if write else None
+    state = _state(target, provider, error)
+    await integration_store.record_projection(
+        pool, workspace_id, provider, target["agent_id"],
+        state=state, version=integration["version"], error=error,
+    )
+    return {"agent_id": target["agent_id"], "state": state, "error": error}
 
 
 async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
@@ -152,43 +184,36 @@ async def project_into_new_target(
     for integration in await integration_store.list_for_workspace(pool, workspace_id):
         if integration["disconnecting"]:
             continue
-        provider = integration["provider"]
-        document = await integration_store.get_document(pool, workspace_id, provider)
-        error = await _write(client, provider, document, target)
-        await integration_store.record_projection(
-            pool, workspace_id, provider, target["agent_id"],
-            state=_state(target, provider, error), version=integration["version"], error=error,
+        document = await integration_store.get_document(
+            pool, workspace_id, integration["provider"]
         )
+        await _project_one(pool, client, workspace_id, integration, document, target)
 
 
 async def ensure_in_target(
-    pool: Any, client: Any, workspace_id: str, provider: str, target: dict[str, Any]
+    pool: Any,
+    client: Any,
+    workspace_id: str,
+    integration: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    rewrite: bool = False,
 ) -> str | None:
     """Make sure one target holds the Workspace's current credential for
-    `provider`, writing it now if its projection failed or is stale. None
+    `integration` (a connected one, as `integration_store.get` read it). None
     when it holds it; else why not.
 
     For a call that must run on the Workspace's account and never fall back
-    to the platform's key, which TurnCall would use if the copy were
-    missing: searching, buying and releasing Telnyx numbers (#108)."""
-    integration = await integration_store.get(pool, workspace_id, provider)
-    if integration is None or integration["disconnecting"]:
-        return f"this workspace has no {provider} account connected"
-    version = integration["version"]
-    if any(
-        p["agent_id"] == target["agent_id"]
-        and p["state"] in ("applied", "pinned")
-        and p["version"] == version
-        for p in await integration_store.list_projections(pool, workspace_id, provider)
-    ):
+    to the platform's key, which TurnCall would use if the copy were missing:
+    searching, buying and releasing Telnyx numbers (#108). By default the log
+    is trusted, as `project()` trusts it. `rewrite` writes it regardless: the
+    log only says the last write succeeded, not that TurnCall still holds it,
+    and buying or releasing on the wrong account cannot be undone (#109)."""
+    if not rewrite and target["agent_id"] in await _holding(pool, workspace_id, integration):
         return None
-    document = await integration_store.get_document(pool, workspace_id, provider)
-    error = await _write(client, provider, document, target)
-    await integration_store.record_projection(
-        pool, workspace_id, provider, target["agent_id"],
-        state=_state(target, provider, error), version=version, error=error,
-    )
-    return error
+    document = await integration_store.get_document(pool, workspace_id, integration["provider"])
+    outcome = await _project_one(pool, client, workspace_id, integration, document, target)
+    return outcome["error"]
 
 
 async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -> dict[str, Any]:

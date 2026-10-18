@@ -113,6 +113,7 @@ def as_projection_target(workspace_id: str, project: dict[str, str]) -> dict[str
 _COLS = (
     "id, e164, sid, routing_type, agent_id, project_id, server_url, "
     "server_url_secret, sms_enabled, label, carrier, twilio_account_sid, "
+    "purchase_status, telnyx_order_id, "
     "CASE WHEN twilio_source = 'workspace' THEN 'workspace' "
     "WHEN twilio_auth_token_encrypted IS NULL THEN 'platform' ELSE 'number' END "
     "AS twilio_credentials"
@@ -123,14 +124,17 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
     """Mirror a bind. `number["workspace_id"]` scopes it to its Workspace (#31).
 
     The Twilio pair is written when given and otherwise kept: an edit that does
-    not re-enter the token must not erase it."""
+    not re-enter the token must not erase it. A bought number's purchase state
+    (`purchase_status`, `telnyx_order_id`) is written as given: absent is null,
+    which is what a bind leaves."""
     await pool.execute(
         """INSERT INTO phone_numbers
              (id, e164, sid, routing_type, agent_id, project_id, server_url,
               server_url_secret, sms_enabled, workspace_id,
               twilio_account_sid, twilio_auth_token_encrypted, twilio_source, label,
-              carrier)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+              carrier, purchase_status, telnyx_order_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17)
            ON CONFLICT (id) DO UPDATE SET
              e164=$2, sid=$3, routing_type=$4, agent_id=$5, project_id=$6,
              server_url=$7, server_url_secret=$8, sms_enabled=$9,
@@ -138,7 +142,7 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
              twilio_account_sid=COALESCE($11, phone_numbers.twilio_account_sid),
              twilio_auth_token_encrypted=COALESCE($12, phone_numbers.twilio_auth_token_encrypted),
              twilio_source=COALESCE($13, phone_numbers.twilio_source),
-             label=$14, carrier=$15""",
+             label=$14, carrier=$15, purchase_status=$16, telnyx_order_id=$17""",
         number["id"],
         number["e164"],
         number["sid"],
@@ -154,6 +158,8 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
         number.get("twilio_source"),
         number.get("label"),
         number.get("carrier", "twilio"),
+        number.get("purchase_status"),
+        number.get("telnyx_order_id"),
     )
 
 

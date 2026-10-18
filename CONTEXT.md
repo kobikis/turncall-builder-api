@@ -240,16 +240,25 @@ _Avoid_: phone book, directory
 Getting a new number onto the Workspace's carrier account, and giving one
 back (turncall ADR-0025). Admin-only, and only on the Workspace's own
 accounts: its [[Workspace Twilio account]] (sent as the pair) or its Telnyx
-[[Integration]] (the `telnyx` credential in its webhook project, rewritten
-first if that copy is missing or stale); never the TurnCall server's own.
-Both are TurnCall calls made with the Workspace's webhook project key. A
-bought number lands in the [[Number registry]] unassigned (on Twilio with
-`twilio_source = 'workspace'`) and is bound through the ordinary edit; a
-Telnyx order that has not finished is **pending**, with no SID, and binds
-once Telnyx has put it on the account. Release is only for an unassigned
+[[Integration]] (the `telnyx` credential in its webhook project: a search
+writes it only while the projection log says it is missing; a buy or release
+writes it every time, since a stale copy would put the change on the TurnCall
+server's own account); never the TurnCall server's own.
+All three are TurnCall calls made with the Workspace's webhook project key,
+so the first search creates that project. A bought number lands in the
+[[Number registry]] unassigned (on Twilio with `twilio_source = 'workspace'`)
+and is bound through the ordinary edit; a Telnyx order that has not finished
+is **pending** (`purchase_status = 'pending'`, with its `telnyx_order_id` and
+no SID): not on the account yet, so a bind is refused with that sentence and
+a release before TurnCall is asked, until Telnyx puts it there. A bind that
+succeeds ends it. Release is only for an unassigned
 number, repeats the number as `confirm`, and is irreversible: the carrier may
 sell it to someone else. On Twilio it runs on the number's own stored
-account, else the Workspace's. **Removing** a number (`DELETE`) is not
+account, else the Workspace's. When TurnCall says the carrier did it but it
+could not record that, the registry follows the carrier anyway; when nobody
+can say (TurnCall failed partway, or did not answer), the change **may have
+happened**: nothing changes in the registry, the audit entry is partial, and
+the carrier account is the one to check. **Removing** a number (`DELETE`) is not
 releasing: it unbinds and drops the registry row, and the number stays on the
 carrier account, billed.
 _Avoid_: "delete" for release, "provision", "order" (Telnyx's word for the

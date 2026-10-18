@@ -180,6 +180,22 @@ def test_partial_failure_is_recorded_and_the_retry_finishes_it(client, engine, p
     assert [c.args[2] for c in engine.client.put_credential.await_args_list] == ["tc_a2"]
 
 
+def test_a_pinned_agent_holding_the_current_version_is_not_written_again(client, engine):
+    """`pinned` holds the credential as `applied` does (its own LLM key only
+    wins for the model), so re-applying skips it like any agent holding it."""
+    _two_agents(engine, config={"name": "P", "llm": {"provider": "openai", "api_key": "sk-own"}})
+    engine.integration_store.get.return_value = _integration("openai")
+    engine.integration_store.list_projections.return_value = [
+        {"agent_id": "a1", "state": "applied", "version": V1},
+        {"agent_id": "a2", "state": "pinned", "version": V1},
+    ]
+    r = client.post("/integrations/providers/openai/apply", headers=WS)
+    assert r.status_code == 200
+    engine.client.put_credential.assert_not_called()
+    states = {a["agent_id"]: a["state"] for a in r.json()["data"]["agents"]}
+    assert states == {"a1": "applied", "a2": "pinned"}
+
+
 def test_rerunning_a_complete_projection_writes_nothing(client, engine):
     _two_agents(engine)
     engine.integration_store.get.return_value = _integration()
