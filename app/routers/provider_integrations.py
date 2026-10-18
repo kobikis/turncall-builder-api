@@ -170,21 +170,20 @@ def _not_on_account(numbers: list[str], when: str) -> str:
 
 
 async def _check_telnyx_numbers(
-    workspace_id: str,
     api_key: str,
+    numbers: list[str],
     acknowledged: list[str],
     *,
     when: str,
-    projects: set[str] | None = None,
     new_key: bool = False,
 ) -> dict[str, Any]:
-    """Refuse a Telnyx key whose account doesn't hold the Workspace's bound
-    numbers, unless every one of them is acknowledged (#114). Returns the
-    audit entry's record of the ones acknowledged, if any."""
+    """Refuse a Telnyx key whose account doesn't hold the numbers bound in the
+    projects it will be written into (`telnyx_write_targets`), unless every one
+    of them is acknowledged (#114, #119). Returns the audit entry's record of
+    the ones acknowledged, if any."""
     try:
         missing = await provider_integrations.check_telnyx_numbers(
-            runtime.get_pool(), workspace_id, api_key, acknowledged,
-            projects=projects, new_key=new_key,
+            api_key, numbers, acknowledged, new_key=new_key
         )
     except provider_integrations.NumbersNotOnAccount as exc:
         raise Refusal(
@@ -212,8 +211,10 @@ async def connect(
     not stored; one that could not be checked is stored and says so.
 
     A Telnyx key is refused (409, `numbers_not_on_account`) while its account
-    doesn't hold every Telnyx number bound in the Workspace, unless the request
-    acknowledges each of them in `acknowledge_numbers` (#114)."""
+    doesn't hold every Telnyx number bound in the projects it will be written
+    into (each agent's, and the Workspace's webhook project; never the shared
+    one), unless the request acknowledges each of them in
+    `acknowledge_numbers` (#114, #119)."""
     acknowledged = _acknowledged(body.pop("acknowledge_numbers", None))
     await _known(provider)
     document = _document(provider, body)
@@ -226,8 +227,12 @@ async def connect(
         )
     noted: dict[str, Any] = {}
     if provider == provider_integrations.TELNYX:
+        # A save writes into every target.
+        targets = await provider_integrations.telnyx_write_targets(
+            runtime.get_pool(), ctx.workspace_id
+        )
         noted = await _check_telnyx_numbers(
-            ctx.workspace_id, document["api_key"], acknowledged,
+            document["api_key"], targets.numbers, acknowledged,
             when="this account is connected", new_key=True,
         )
     pool, client = runtime.get_pool(), runtime.get_client()
@@ -261,8 +266,8 @@ async def reapply(
     """Finish a projection that failed partway; agents already done are skipped.
 
     For Telnyx, the projects it would write into are checked as connecting
-    checks them (#114): only their bound numbers, and none when every project
-    holds the current key already."""
+    checks them (#114, #119): only their bound numbers, and none when every
+    project holds the current key already."""
     pool = runtime.get_pool()
     integration = await integration_store.get(pool, ctx.workspace_id, provider)
     if integration is None:
@@ -271,16 +276,19 @@ async def reapply(
         raise HTTPException(status_code=409, detail=f"{provider} is being disconnected — finish that first")
     noted: dict[str, Any] = {}
     if provider == provider_integrations.TELNYX:
-        projects = await provider_integrations.unwritten_projects(pool, ctx.workspace_id, integration)
-        if projects:
+        # Apply writes only into targets not holding the current key.
+        targets = await provider_integrations.telnyx_write_targets(
+            pool, ctx.workspace_id, skip_holding=integration
+        )
+        acknowledged = _acknowledged((body or {}).get("acknowledge_numbers"))
+        if targets.numbers:
             try:
                 document = await integration_store.get_document(pool, ctx.workspace_id, provider)
             except integration_store.IntegrationError as exc:
                 raise _store_error(exc) from exc
             noted = await _check_telnyx_numbers(
-                ctx.workspace_id, document["api_key"],
-                _acknowledged((body or {}).get("acknowledge_numbers")),
-                when="this account is applied to their projects", projects=projects,
+                document["api_key"], targets.numbers, acknowledged,
+                when="this account is applied to their projects",
             )
     try:
         agents = await provider_integrations.project(pool, runtime.get_client(), ctx.workspace_id, provider)

@@ -20,8 +20,7 @@ condition is tools and Automations, and a credential is neither.
 from __future__ import annotations
 
 import logging
-from typing import Any
-
+from typing import Any, NamedTuple
 
 from . import agent_update, integration_store, provider_catalog, telnyx_api
 from .backends import phones, registry
@@ -177,30 +176,41 @@ async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
 # TurnCall verifies them with the key of whatever account the number's project
 # holds now. Projecting a Telnyx account that doesn't hold a bound number makes
 # that number stop answering calls (403 on every webhook). So before a Telnyx
-# key is saved or projected, every bound number is looked up on it.
+# key is saved or projected, every number bound in a project it will be written
+# into is looked up on it (#119): only those projects' numbers change accounts.
 
-async def bound_telnyx_numbers(
-    pool: Any, workspace_id: str, projects: set[str] | None = None
-) -> list[str]:
-    """The Workspace's Telnyx numbers bound in a TurnCall project (in one of
-    `projects`, when given), as E.164. An unassigned row is in none."""
-    return sorted({
-        n["e164"]
-        for n in await phones.list_numbers(pool, workspace_id)
-        if n.get("carrier") == TELNYX and n.get("project_id")
-        and (projects is None or n["project_id"] in projects)
-    })
+class TelnyxWriteTargets(NamedTuple):
+    """Where a Telnyx save or apply would write the key, and what it would put
+    at risk there."""
+
+    projects: set[str]  # the TurnCall projects it would write the key into
+    numbers: list[str]  # the Workspace's Telnyx numbers bound in them, E.164
 
 
-async def unwritten_projects(pool: Any, workspace_id: str, integration: dict[str, Any]) -> set[str]:
-    """The projects `project()` would write the current version into: every
-    target the log doesn't say holds it."""
-    holding = await _holding(pool, workspace_id, integration)
-    return {
+async def telnyx_write_targets(
+    pool: Any, workspace_id: str, *, skip_holding: dict[str, Any] | None = None
+) -> TelnyxWriteTargets:
+    """The projects a Telnyx save or apply writes the key into, by the same
+    `_targets` the projection writes into, and the bound numbers in them (#119).
+
+    A save writes into every target. With `skip_holding` (the stored
+    Integration), targets the log says hold its current version are left out,
+    as `project()` skips them on apply. The shared webhook project is never a
+    target, so a number still bound there (on the platform's keys) is never
+    among `numbers`, nor is one bound in any other project. An unassigned row
+    is in none."""
+    holding = await _holding(pool, workspace_id, skip_holding) if skip_holding else set()
+    projects = {
         t["project_id"]
         for t in await _targets(pool, workspace_id)
         if t["agent_id"] not in holding and t.get("project_id")
     }
+    numbers = sorted({
+        n["e164"]
+        for n in await phones.list_numbers(pool, workspace_id)
+        if n.get("carrier") == TELNYX and n.get("project_id") in projects
+    }) if projects else []
+    return TelnyxWriteTargets(projects, numbers)
 
 
 _NUMBERS = "the workspace's Telnyx numbers"
@@ -220,22 +230,15 @@ async def _missing_on_account(api_key: str, numbers: list[str], *, new_key: bool
 
 
 async def check_telnyx_numbers(
-    pool: Any,
-    workspace_id: str,
-    api_key: str,
-    acknowledged: list[str],
-    *,
-    projects: set[str] | None = None,
-    new_key: bool = False,
+    api_key: str, numbers: list[str], acknowledged: list[str], *, new_key: bool = False
 ) -> list[str]:
-    """Look up the Workspace's bound Telnyx numbers (those in `projects`, when
-    given) on the account `api_key` belongs to.
+    """Look up `numbers` (a `telnyx_write_targets(...).numbers`) on the account
+    `api_key` belongs to.
 
     Returns the numbers it doesn't hold that were acknowledged, for the audit
     entry. Raises NumbersNotOnAccount when any it doesn't hold aren't all in
     `acknowledged`, and NumberLookupFailed when they couldn't be looked up.
     `new_key`: `api_key` is being connected, not yet saved."""
-    numbers = await bound_telnyx_numbers(pool, workspace_id, projects)
     if not numbers:
         return []
     missing = await _missing_on_account(api_key, numbers, new_key=new_key)

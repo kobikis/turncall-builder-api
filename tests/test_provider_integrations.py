@@ -525,6 +525,7 @@ def test_connecting_telnyx_with_no_bound_numbers_looks_nothing_up(client, telnyx
 
 
 def test_connecting_telnyx_holding_every_bound_number_goes_ahead(client, telnyx):
+    telnyx.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
     telnyx.phones.list_numbers.return_value = [_number(N1), _number(N2, project_id="wp-ws")]
     telnyx.listing.held = {N1, N2}
     r = _connect(client)
@@ -546,6 +547,33 @@ def test_connecting_telnyx_missing_bound_numbers_is_refused_with_them(client, te
     assert N1 in body["detail"] and N3 in body["detail"] and N2 not in body["detail"]
     assert "stop answering calls" in body["detail"]
     _nothing_saved(telnyx)
+
+
+SHARED = "wp-shared"  # the shared webhook project: `webhook_project` id=1, no Workspace
+
+
+def test_connecting_telnyx_flags_only_numbers_in_the_projects_it_writes_into(client, telnyx):
+    """A number still in the shared webhook project, or in a project that isn't
+    a target, keeps its account: only an Agent's project number is flagged (#119)."""
+    telnyx.phones.list_numbers.return_value = [
+        _number(N1, "p1"), _number(N2, SHARED), _number(N3, "p-not-a-target"),
+    ]
+    r = _connect(client)
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N1]
+    assert N2 not in r.json()["detail"] and N3 not in r.json()["detail"]
+    _nothing_saved(telnyx)
+    # Acknowledging the one flagged number is enough.
+    r = _connect(client, acknowledge_numbers=[N1])
+    assert r.status_code == 200, r.text
+    assert audit_entries(telnyx)[0]["changes"]["/acknowledged_numbers"]["after"] == [N1]
+
+
+def test_connecting_telnyx_with_only_shared_project_numbers_looks_nothing_up(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1, SHARED), _number(N2, SHARED)]
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == []
 
 
 def test_an_acknowledged_resend_connects_and_audits_the_numbers(client, telnyx):
@@ -713,6 +741,22 @@ def test_apply_into_the_webhook_project_checks_its_numbers(client, telnyx):
     r = client.post("/integrations/providers/telnyx/apply", headers=WS)
     assert r.status_code == 409
     assert r.json()["numbers"] == [N3]
+
+
+def test_apply_flags_only_numbers_in_the_projects_it_writes_into(client, telnyx):
+    """Writing into every target still leaves a shared-project number alone (#119)."""
+    _applying(telnyx, holding=[])
+    telnyx.phones.list_numbers.return_value = [
+        _number(N1, "p1"), _number(N2, SHARED), _number(N3, "p-not-a-target"),
+    ]
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N1]
+    telnyx.client.put_credential.assert_not_called()
+    r = client.post(
+        "/integrations/providers/telnyx/apply", json={"acknowledge_numbers": [N1]}, headers=WS
+    )
+    assert r.status_code == 200, r.text
 
 
 def test_apply_lookup_failure_is_a_502(client, telnyx):

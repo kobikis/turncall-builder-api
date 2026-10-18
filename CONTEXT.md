@@ -541,13 +541,16 @@ A **Telnyx** Integration is checked against the Workspace's numbers first
 account its project holds, so projecting an account that doesn't hold a bound
 number makes that number stop answering calls. Connecting or re-saving one
 lists the new key's account (once, a page per 250 numbers; #116) and compares
-every Telnyx number bound in a TurnCall project of the Workspace (unassigned
-rows don't count). Any it doesn't hold refuse the save with a 409, `reason:
-"numbers_not_on_account"` and the `numbers`, unless the request repeats every
-one of them in `acknowledge_numbers`; then it goes ahead and the audit entry
-records them. Re-applying checks only the projects it would write into (none
-when every one holds the current key), and adopting can't refuse: it never
-moves a Telnyx key, since an agent's own key is only its LLM's. Telnyx
+the Telnyx numbers bound in the projects the key will be written into: each
+agent's, and the Workspace's webhook project once it has one (#119). A number
+still in the shared webhook project, or in any other project, keeps its account
+and is never flagged; unassigned rows don't count. Any it doesn't hold refuse
+the save with a 409, `reason: "numbers_not_on_account"` and the `numbers`,
+unless the request repeats every one of them in `acknowledge_numbers`; then it
+goes ahead and the audit entry records them. Re-applying checks the same way,
+but only the projects it would write into (those not holding the current key),
+and adopting can't refuse: it never moves a Telnyx key, since an agent's own
+key is only its LLM's. Telnyx
 refusing the key, or not answering, is a 502 and nothing is saved. A 429 or
 5xx is retried only while the wait fits under 10 s and the check's deadline
 (`TELNYX_CONNECT_CHECK_DEADLINE_S`, 20 s by default; the release check's is
