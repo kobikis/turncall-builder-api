@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app import twilio_api
+from app import telnyx_api, twilio_api
 from app.routers.auth import COOKIE_NAME as COOKIE
 from tests.conftest import TEST_WORKSPACE_ID, audit_entries, backend_row
 
@@ -20,6 +20,7 @@ TELNYX_TARGET = f"webhook-numbers:{TEST_WORKSPACE_ID}"
 E164 = "+13125550100"
 # The real lookup, for its own tests: every other test gets the `lookup` mock.
 FIND_NUMBER = twilio_api.find_number
+FIND_TELNYX = telnyx_api.find_number
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +38,15 @@ def lookup(monkeypatch):
         "sid": "PN" + "b" * 32, "phone_number": E164, "friendly_name": None,
     })
     monkeypatch.setattr(twilio_api, "find_number", found)
+    return found
+
+
+@pytest.fixture(autouse=True)
+def telnyx_lookup(monkeypatch):
+    """The release check's Telnyx lookup: the Workspace's Telnyx account holds
+    the number unless a test says otherwise. Never the network."""
+    found = AsyncMock(return_value={"id": "2304", "phone_number": E164})
+    monkeypatch.setattr(telnyx_api, "find_number", found)
     return found
 
 
@@ -134,6 +144,7 @@ def test_search_on_telnyx_sends_no_pair(client, mocks):
 def test_search_on_an_unconnected_carrier_is_refused_before_turncall(client, mocks, carrier):
     r = client.get("/phone-numbers/available", params={"carrier": carrier})
     assert r.status_code == 400
+    assert r.json()["reason"] == "not_connected"
     assert "connect it on Integrations" in r.json()["detail"]
     _no_turncall(mocks)
 
@@ -307,23 +318,38 @@ def test_a_pending_telnyx_purchase_is_unassigned_with_no_sid(client, mocks):
 def test_buying_on_an_unconnected_carrier_is_refused_before_turncall(client, mocks, carrier):
     r = client.post("/phone-numbers/purchase", json={"carrier": carrier, "e164": E164})
     assert r.status_code == 400
+    assert r.json()["reason"] == "not_connected"
     assert isinstance(r.json()["detail"], str)
     _no_turncall(mocks)
     assert audit_entries(mocks) == []
 
 
-@pytest.mark.parametrize("body, says", [
-    ({"e164": E164}, "Choose a carrier"),
-    ({"carrier": "asterisk", "e164": E164}, "PBX's dialplan"),
-    ({"carrier": "vonage", "e164": E164}, "vonage is not a carrier"),
-    ({"carrier": "twilio"}, "E.164"),
-    ({"carrier": "twilio", "e164": "3125550100"}, "E.164"),
+@pytest.mark.parametrize("body, says, reason", [
+    ({"e164": E164}, "Choose a carrier", "carrier_invalid"),
+    ({"carrier": "asterisk", "e164": E164}, "PBX's dialplan", "asterisk"),
+    ({"carrier": "vonage", "e164": E164}, "vonage is not a carrier", "carrier_invalid"),
+    ({"carrier": "twilio"}, "E.164", None),
+    ({"carrier": "twilio", "e164": "3125550100"}, "E.164", None),
 ])
-def test_a_bad_purchase_is_refused_with_a_sentence(client, mocks, body, says):
+def test_a_bad_purchase_is_refused_with_a_sentence(client, mocks, body, says, reason):
     _twilio(mocks)
     r = client.post("/phone-numbers/purchase", json=body)
     assert r.status_code == 422
     assert says in r.json()["detail"]
+    assert r.json().get("reason") == reason
+    _no_turncall(mocks)
+
+
+@pytest.mark.parametrize("carrier, reason", [
+    ("asterisk", "asterisk"), ("vonage", "carrier_invalid"),
+])
+def test_searching_on_a_carrier_numbers_arent_bought_on_is_a_422(
+    client, mocks, carrier, reason
+):
+    _twilio(mocks)
+    r = client.get("/phone-numbers/available", params={"carrier": carrier})
+    assert (r.status_code, r.json()["reason"]) == (422, reason)
+    assert isinstance(r.json()["detail"], str)
     _no_turncall(mocks)
 
 
@@ -627,13 +653,13 @@ def test_a_number_with_no_pair_is_released_on_the_workspace_account_once_found_t
     assert released["changes"]["/twilio_credentials"] == {"before": "workspace", "after": None}
 
 
-def test_a_number_with_no_pair_the_workspace_account_lacks_is_a_409(client, mocks, lookup):
+def test_a_number_with_no_pair_the_workspace_account_lacks_is_a_422(client, mocks, lookup):
     _twilio(mocks)
     lookup.return_value = None
     mocks.phones.get_number.return_value = _bought(twilio_credentials="platform")
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
-    assert r.status_code == 409
-    assert r.json()["detail"] == NOT_ON_WORKSPACE
+    assert r.status_code == 422
+    assert r.json() == {"detail": NOT_ON_WORKSPACE, "reason": "not_on_account"}
     _no_turncall(mocks)
     mocks.phones.record_number.assert_not_called()
     mocks.phones.delete_number.assert_not_called()
@@ -645,8 +671,8 @@ def test_release_with_no_twilio_account_is_refused_not_sent_to_the_platform(
 ):
     mocks.phones.get_number.return_value = _bought(twilio_credentials="platform")
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
-    assert r.status_code == 409
-    assert r.json()["detail"] == NO_TWILIO
+    assert r.status_code == 400
+    assert r.json() == {"detail": NO_TWILIO, "reason": "not_connected"}
     lookup.assert_not_called()
     _no_turncall(mocks)
     mocks.phones.delete_number.assert_not_called()
@@ -663,13 +689,17 @@ def test_release_on_telnyx_uses_the_workspace_integration(client, mocks):
     }
 
 
-def test_release_of_a_telnyx_number_without_the_integration_is_refused(client, mocks):
+def test_release_of_a_telnyx_number_without_the_integration_is_refused(
+    client, mocks, telnyx_lookup
+):
+    """Bound with no Integration, it is on TurnCall's platform account:
+    connecting one wouldn't make it releasable, so that isn't the advice (#113)."""
     mocks.phones.get_number.return_value = _bought(carrier="telnyx", twilio_credentials="platform")
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
-    assert r.status_code == 409
-    assert r.json()["detail"] == (
-        "This workspace has no Telnyx account connected — connect it on Integrations"
-    )
+    assert r.status_code == 422
+    assert r.json() == {"detail": ON_PLATFORM_TELNYX, "reason": "not_on_account"}
+    assert "Integrations" not in r.json()["detail"]
+    telnyx_lookup.assert_not_called()
     _no_turncall(mocks)
 
 
@@ -679,7 +709,10 @@ def test_release_of_a_routed_number_is_a_409_before_turncall(client, mocks):
     )
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
     assert r.status_code == 409
-    assert r.json()["detail"] == f"{E164} is still routed. Set it to unassigned before releasing it."
+    assert r.json() == {
+        "detail": f"{E164} is still routed. Set it to unassigned before releasing it.",
+        "reason": "routed",
+    }
     _no_turncall(mocks)
     mocks.phones.delete_number.assert_not_called()
 
@@ -689,19 +722,21 @@ def test_release_without_the_number_confirmed_is_a_422_sentence(client, mocks, b
     mocks.phones.get_number.return_value = _bought()
     r = client.post("/phone-numbers/local-1/release", json=body)
     assert r.status_code == 422
-    assert r.json()["detail"] == (
-        f"Releasing is irreversible: confirm by typing the number being released ({E164})."
-    )
+    assert r.json() == {
+        "detail": f"Releasing is irreversible: confirm by typing the number being released "
+        f"({E164}).",
+    }
     _no_turncall(mocks)
 
 
 def test_release_of_an_asterisk_number_is_refused(client, mocks):
     mocks.phones.get_number.return_value = _bought(carrier="asterisk")
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
-    assert r.status_code == 409
-    assert r.json()["detail"] == (
-        f"{E164} is on asterisk; only Twilio and Telnyx numbers can be released."
-    )
+    assert r.status_code == 422
+    assert r.json() == {
+        "detail": f"{E164} is on asterisk; only Twilio and Telnyx numbers can be released.",
+        "reason": "asterisk",
+    }
     _no_turncall(mocks)
 
 
@@ -717,7 +752,7 @@ def test_turncalls_bound_refusal_keeps_the_registry_row(client, mocks):
     mocks.client.release_phone_number.side_effect = _refusal(409, error, "release")
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
     assert r.status_code == 409
-    assert r.json()["detail"] == f"TurnCall refused to release {E164}: {error}"
+    assert r.json() == {"detail": f"TurnCall refused to release {E164}: {error}"}
     mocks.phones.delete_number.assert_not_called()
     assert audit_entries(mocks) == []
 
@@ -801,10 +836,11 @@ def test_release_of_a_pending_number_is_refused_before_turncall(client, mocks):
     mocks.phones.get_number.return_value = _pending()
     r = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
     assert r.status_code == 409
-    assert r.json()["detail"] == (
-        f"Telnyx hasn't finished the order for {E164} (order order-1) yet; "
-        "it can be released once the order lands."
-    )
+    assert r.json() == {
+        "detail": f"Telnyx hasn't finished the order for {E164} (order order-1) yet; "
+        "it can be released once the order lands.",
+        "reason": "pending",
+    }
     _no_turncall(mocks)
     mocks.phones.delete_number.assert_not_called()
 
@@ -816,6 +852,10 @@ NOT_ON_WORKSPACE = (
     "TurnCall's platform account, and only the TurnCall operator can release it there."
 )
 NO_TWILIO = "This workspace has no Twilio account connected — connect it on Integrations"
+ON_PLATFORM_TELNYX = (
+    f"{E164} is on TurnCall's platform Telnyx account, not the workspace's, so only the "
+    "TurnCall operator can release it."
+)
 
 
 def _check(client) -> httpx.Response:
@@ -832,7 +872,7 @@ def test_the_check_finds_a_number_with_no_pair_on_the_workspace_account_and_says
     r = _check(client)
     assert r.status_code == 200
     assert r.json()["data"] == {
-        "releasable": True, "detail": None, "twilio_credentials": "workspace",
+        "releasable": True, "reason": None, "detail": None, "twilio_credentials": "workspace",
     }
     corrected = mocks.phones.record_number.await_args.args[1]
     assert (corrected["twilio_source"], corrected["twilio_account_sid"]) == ("workspace", PAIR[0])
@@ -862,7 +902,8 @@ def test_the_check_of_a_number_with_no_pair_the_workspace_lacks_names_the_operat
     r = _check(client)
     assert r.status_code == 200
     assert r.json()["data"] == {
-        "releasable": False, "detail": NOT_ON_WORKSPACE, "twilio_credentials": "platform",
+        "releasable": False, "reason": "not_on_account", "detail": NOT_ON_WORKSPACE,
+        "twilio_credentials": "platform",
     }
     mocks.phones.record_number.assert_not_called()
     assert audit_entries(mocks) == []
@@ -872,7 +913,8 @@ def test_the_check_with_no_twilio_account_points_to_integrations(client, mocks, 
     mocks.phones.get_number.return_value = _bought(twilio_credentials="platform")
     r = _check(client)
     assert r.json()["data"] == {
-        "releasable": False, "detail": NO_TWILIO, "twilio_credentials": "platform",
+        "releasable": False, "reason": "not_connected", "detail": NO_TWILIO,
+        "twilio_credentials": "platform",
     }
     lookup.assert_not_called()
 
@@ -885,7 +927,7 @@ def test_the_check_looks_a_number_up_on_its_stored_pair_and_changes_nothing(
     mocks.phones.twilio_account.return_value = PAIR
     r = _check(client)
     assert r.json()["data"] == {
-        "releasable": True, "detail": None, "twilio_credentials": "workspace",
+        "releasable": True, "reason": None, "detail": None, "twilio_credentials": "workspace",
     }
     assert lookup.await_args.args == (PAIR[0], PAIR[1], E164)
     mocks.phones.record_number.assert_not_called()
@@ -904,6 +946,7 @@ def test_the_check_of_a_number_its_stored_account_lacks_says_so(
     lookup.return_value = None
     data = _check(client).json()["data"]
     assert data["releasable"] is False
+    assert data["reason"] == "not_on_account"
     assert data["detail"] == (
         f"{E164} isn't on {whose} ({PAIR[0]}), so there is nothing to release there: "
         "it may already have been released or moved on Twilio."
@@ -911,45 +954,118 @@ def test_the_check_of_a_number_its_stored_account_lacks_says_so(
     assert data["twilio_credentials"] == credentials
 
 
-@pytest.mark.parametrize("row, says", [
+@pytest.mark.parametrize("row, connected, found, status, reason, says", [
     (
-        {"routing_type": "agent", "agent_id": "a1", "project_id": "p1"},
-        f"{E164} is still routed. Set it to unassigned before releasing it.",
+        {"routing_type": "agent", "agent_id": "a1", "project_id": "p1"}, True, True,
+        409, "routed", f"{E164} is still routed. Set it to unassigned before releasing it.",
     ),
     (
         {"carrier": "telnyx", "twilio_credentials": "platform", "sid": "",
-         "purchase_status": "pending", "telnyx_order_id": "order-1"},
+         "purchase_status": "pending", "telnyx_order_id": "order-1"}, True, True,
+        409, "pending",
         f"Telnyx hasn't finished the order for {E164} (order order-1) yet; "
         "it can be released once the order lands.",
     ),
     (
-        {"carrier": "asterisk", "twilio_credentials": "platform"},
-        f"{E164} is on asterisk; only Twilio and Telnyx numbers can be released.",
+        {"carrier": "asterisk", "twilio_credentials": "platform"}, True, True,
+        422, "asterisk", f"{E164} is on asterisk; only Twilio and Telnyx numbers can be released.",
+    ),
+    (
+        {"twilio_credentials": "platform"}, False, True,
+        400, "not_connected", NO_TWILIO,
+    ),
+    (
+        {"carrier": "telnyx", "twilio_credentials": "platform"}, False, True,
+        422, "not_on_account", ON_PLATFORM_TELNYX,
+    ),
+    (
+        {"carrier": "telnyx", "twilio_credentials": "platform"}, True, False,
+        422, "not_on_account", ON_PLATFORM_TELNYX,
+    ),
+    (
+        {"twilio_credentials": "number"}, True, False,
+        422, "not_on_account",
+        f"{E164} isn't on the Twilio account {E164} was added with ({PAIR[0]}), so there is "
+        "nothing to release there: it may already have been released or moved on Twilio.",
+    ),
+    (
+        {"twilio_credentials": "platform"}, True, False,
+        422, "not_on_account", NOT_ON_WORKSPACE,
     ),
 ])
-def test_the_check_refuses_what_release_refuses_with_the_same_sentence(
-    client, mocks, lookup, row, says
+def test_each_refusal_has_one_status_and_reason_on_the_check_and_the_release(
+    client, mocks, lookup, telnyx_lookup, row, connected, found, status, reason, says
 ):
-    _twilio(mocks)
-    _telnyx(mocks)
+    """The check answers 200 with the reason; the release refuses with the
+    same sentence and reason, at that reason's one status (#112)."""
+    if connected:
+        _twilio(mocks)
+        _telnyx(mocks)
+    if not found:
+        lookup.return_value = None
+        telnyx_lookup.return_value = None
+    if row.get("twilio_credentials") == "number":
+        mocks.phones.twilio_account.return_value = PAIR
     mocks.phones.get_number.return_value = _bought(**row)
-    data = _check(client).json()["data"]
-    assert (data["releasable"], data["detail"]) == (False, says)
-    lookup.assert_not_called()
+    r = _check(client)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert (data["releasable"], data["reason"], data["detail"]) == (False, reason, says)
     released = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
-    assert released.status_code == 409
-    assert released.json()["detail"] == says
+    assert released.status_code == status
+    assert released.json() == {"detail": says, "reason": reason}
+    _no_turncall(mocks)
+    mocks.phones.delete_number.assert_not_called()
+
+
+def test_release_checks_the_confirmation_before_the_number(client, mocks, lookup):
+    """A refused number with no confirmation is the confirmation's 422."""
+    mocks.phones.get_number.return_value = _bought(
+        routing_type="agent", agent_id="a1", project_id="p1"
+    )
+    r = client.post("/phone-numbers/local-1/release", json={})
+    assert r.status_code == 422
+    assert "reason" not in r.json()
+    lookup.assert_not_called()
+
+
+def test_the_check_finds_a_telnyx_number_on_the_workspace_account(
+    client, mocks, lookup, telnyx_lookup
+):
+    _telnyx(mocks)
+    mocks.phones.get_number.return_value = _bought(carrier="telnyx", twilio_credentials="platform")
+    assert _check(client).json()["data"] == {
+        "releasable": True, "reason": None, "detail": None, "twilio_credentials": "platform",
+    }
+    assert telnyx_lookup.await_args.args == ("KEY_telnyx", E164)
+    lookup.assert_not_called()
+    mocks.phones.record_number.assert_not_called()
+    assert audit_entries(mocks) == []
     _no_turncall(mocks)
 
 
-def test_the_check_of_a_telnyx_number_needs_only_the_integration(client, mocks, lookup):
-    mocks.phones.get_number.return_value = _bought(carrier="telnyx", twilio_credentials="platform")
-    assert _check(client).json()["data"]["releasable"] is False
+@pytest.mark.parametrize("failure, says", [
+    (
+        telnyx_api.TelnyxRejected("Telnyx answered 401"),
+        f"Telnyx refused the workspace's Telnyx account when looking up {E164}: "
+        "check the Telnyx card on Integrations.",
+    ),
+    (
+        httpx.ConnectError("down"),
+        f"Telnyx didn't answer when looking up {E164} on the workspace's Telnyx "
+        "account — retry in a moment.",
+    ),
+])
+def test_telnyx_failing_the_lookup_is_a_502_sentence(
+    client, mocks, telnyx_lookup, failure, says
+):
     _telnyx(mocks)
-    assert _check(client).json()["data"] == {
-        "releasable": True, "detail": None, "twilio_credentials": "platform",
-    }
-    lookup.assert_not_called()
+    telnyx_lookup.side_effect = failure
+    mocks.phones.get_number.return_value = _bought(carrier="telnyx", twilio_credentials="platform")
+    r = _check(client)
+    assert (r.status_code, r.json()) == (502, {"detail": says})
+    released = client.post("/phone-numbers/local-1/release", json={"confirm": E164})
+    assert (released.status_code, released.json()) == (502, {"detail": says})
     _no_turncall(mocks)
 
 
@@ -1041,6 +1157,57 @@ def test_the_lookup_names_rejected_credentials(monkeypatch):
     )
     with pytest.raises(twilio_api.TwilioRejected):
         asyncio.run(FIND_NUMBER("AC1", "bad", E164))
+
+
+def _telnyx_pages(monkeypatch, pages, status=200):
+    """Serve `pages` (each a list of numbers) as Telnyx's pages, by page[number]."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        index = int(request.url.params["page[number]"]) - 1
+        return httpx.Response(status, json={
+            "data": [{"id": f"id-{n[-4:]}", "phone_number": n} for n in pages[index]],
+            "meta": {"total_pages": len(pages), "page_number": index + 1},
+        })
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        telnyx_api.httpx, "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
+    return seen
+
+
+def test_telnyxs_partial_match_on_a_longer_number_is_not_the_number(monkeypatch):
+    """Telnyx's filter takes digits only and matches partially: an account
+    holding +13125550100 answers a filter for 1312555010."""
+    seen = _telnyx_pages(monkeypatch, [["+13125550100", "+13125550101"]])
+    assert asyncio.run(FIND_TELNYX("KEY", "+1312555010")) is None
+    assert seen[0].url.params["filter[phone_number]"] == "1312555010"
+    assert seen[0].url.host == "api.telnyx.com"
+    assert seen[0].headers["authorization"] == "Bearer KEY"
+    assert len(seen) == 1
+
+
+def test_the_exact_telnyx_number_is_found_on_a_later_page(monkeypatch):
+    seen = _telnyx_pages(monkeypatch, [["+131255501009"], ["+13125550100"]])
+    found = asyncio.run(FIND_TELNYX("KEY", E164))
+    assert found == {"id": "id-0100", "phone_number": E164}
+    assert [r.url.params["page[number]"] for r in seen] == ["1", "2"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_the_telnyx_lookup_names_a_refused_key(monkeypatch, status):
+    _telnyx_pages(monkeypatch, [[]], status=status)
+    with pytest.raises(telnyx_api.TelnyxRejected):
+        asyncio.run(FIND_TELNYX("bad", E164))
+
+
+def test_a_telnyx_failure_is_an_http_error(monkeypatch):
+    _telnyx_pages(monkeypatch, [[]], status=500)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(FIND_TELNYX("KEY", E164))
 
 
 # --- roles --------------------------------------------------------------------

@@ -13,9 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import (
-    compliance, db, integration_store, provider_integrations, runtime, twilio_api, twilio_store,
+    compliance, db, integration_store, provider_integrations, runtime, telnyx_api, twilio_api,
+    twilio_store,
 )
-from .._helpers import _turncall_http_error
+from .._helpers import Refusal, _turncall_http_error
 from ..audit import Audit, AuditTrail, Change, diff, masked
 from ..integration_store import BOX, IntegrationError
 from ..provider_integrations import TELNYX
@@ -27,6 +28,25 @@ router = APIRouter()
 TWILIO = "twilio"
 Carrier = Literal["twilio", "telnyx", "asterisk"]
 _CARRIER_NAMES = {TWILIO: "Twilio", TELNYX: "Telnyx"}
+
+# Why a number route refuses, and its one status on every route: search,
+# purchase, the release check and release (#112). Answered as `reason` beside
+# the `detail` sentence, so a client needn't parse the sentence.
+_REFUSALS = {
+    "not_connected": 400,  # no account connected for the carrier: connect it
+    "asterisk": 422,  # an Asterisk number or carrier: never bought or released here
+    "carrier_invalid": 422,  # no carrier, or one that isn't twilio or telnyx
+    # The account the check looked on doesn't hold it: its stored Twilio
+    # account, else the Workspace's Twilio or Telnyx account (so it may be on
+    # TurnCall's platform account, which only the TurnCall operator releases).
+    "not_on_account": 422,
+    "routed": 409,  # still routed: set it to unassigned first
+    "pending": 409,  # a Telnyx order that hasn't finished
+}
+
+
+def _refuse(reason: str, detail: str) -> Refusal:
+    return Refusal(_REFUSALS[reason], detail, reason)
 
 
 class PhoneBind(BaseModel):
@@ -291,11 +311,11 @@ def _pair(twilio: tuple[str, str] | None) -> dict[str, str]:
     return {"twilio_account_sid": twilio[0], "twilio_auth_token": twilio[1]} if twilio else {}
 
 
-def _not_connected(carrier: str) -> HTTPException:
+def _not_connected(carrier: str) -> Refusal:
     name = _CARRIER_NAMES[carrier]
-    return HTTPException(
-        status_code=400,
-        detail=f"This workspace has no {name} account connected — connect it on Integrations",
+    return _refuse(
+        "not_connected",
+        f"This workspace has no {name} account connected — connect it on Integrations",
     )
 
 
@@ -446,14 +466,14 @@ def _purchase_carrier(carrier: str | None) -> str:
     if carrier in PURCHASE_CARRIERS:
         return carrier  # type: ignore[return-value]
     if carrier == "asterisk":
-        raise HTTPException(
-            status_code=422,
-            detail="Asterisk numbers belong to the PBX's dialplan; "
+        raise _refuse(
+            "asterisk",
+            "Asterisk numbers belong to the PBX's dialplan; "
             "numbers are bought and released on Twilio or Telnyx only.",
         )
-    raise HTTPException(
-        status_code=422,
-        detail="Choose a carrier to buy on: twilio or telnyx."
+    raise _refuse(
+        "carrier_invalid",
+        "Choose a carrier to buy on: twilio or telnyx."
         if not carrier
         else f"{carrier} is not a carrier numbers can be bought on; choose twilio or telnyx.",
     )
@@ -622,6 +642,8 @@ def _bought_number(
 @dataclass
 class _ReleaseCheck:
     releasable: bool
+    # Why not, when it isn't: a `_REFUSALS` code and the sentence.
+    reason: str | None
     detail: str | None
     twilio_credentials: str
     # What a release sends: the Twilio pair it runs on (None on Telnyx), and the
@@ -663,6 +685,32 @@ async def _find_on_twilio(
         ) from exc
 
 
+def _on_platform_telnyx(e164: str) -> str:
+    return (
+        f"{e164} is on TurnCall's platform Telnyx account, not the workspace's, so only "
+        "the TurnCall operator can release it."
+    )
+
+
+async def _find_on_telnyx(api_key: str, e164: str) -> dict[str, Any] | None:
+    """The number on the Workspace's Telnyx account, or None. Telnyx refusing
+    the key, or not answering, is a 502: nothing can be said about the number."""
+    try:
+        return await telnyx_api.find_number(api_key, e164)
+    except telnyx_api.TelnyxRejected as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Telnyx refused the workspace's Telnyx account when looking up {e164}: "
+            "check the Telnyx card on Integrations.",
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Telnyx didn't answer when looking up {e164} on the workspace's Telnyx "
+            "account — retry in a moment.",
+        ) from exc
+
+
 async def _release_check(
     pool: Any, existing: dict[str, Any], audit: AuditTrail, ctx: AuthContext
 ) -> _ReleaseCheck:
@@ -673,30 +721,45 @@ async def _release_check(
     A Twilio number is looked up on its stored account, else the Workspace's.
     Found on the Workspace's with no stored pair, its row is corrected to the
     Workspace's account (and Twilio's SID), and the audit log says so. It is
-    unassigned, so TurnCall holds nothing to update."""
+    unassigned, so TurnCall holds nothing to update. A Telnyx number is looked
+    up on the Workspace's Telnyx Integration; without one, or not found there,
+    it is on TurnCall's platform account, which only the operator releases."""
     e164 = existing["e164"]
     credentials = _public(existing)["twilio_credentials"]
 
-    def refused(detail: str) -> _ReleaseCheck:
-        return _ReleaseCheck(False, detail, credentials, None, existing)
+    def refused(reason: str, detail: str) -> _ReleaseCheck:
+        return _ReleaseCheck(False, reason, detail, credentials, None, existing)
 
     if existing["routing_type"] != "none":
-        return refused(f"{e164} is still routed. Set it to unassigned before releasing it.")
+        return refused(
+            "routed", f"{e164} is still routed. Set it to unassigned before releasing it."
+        )
     if existing.get("purchase_status") == "pending":
         return refused(
+            "pending",
             f"Telnyx hasn't finished the order for {e164}{_order(existing)} yet; "
             "it can be released once the order lands."
         )
     carrier = existing.get("carrier") or TWILIO
     if carrier not in PURCHASE_CARRIERS:
         return refused(
+            "asterisk",
             f"{e164} is on {carrier}; only Twilio and Telnyx numbers can be released."
         )
     if carrier == TELNYX:
-        # Which Telnyx account the number is on is #110's question.
+        # Without a Telnyx Integration TurnCall bound it on its platform
+        # account; connecting one won't make it releasable (#113). With one,
+        # it is looked up there. Storing which account it is on is #110.
         if await _telnyx_integration(pool, ctx.workspace_id) is None:
-            return refused(str(_not_connected(TELNYX).detail))
-        return _ReleaseCheck(True, None, credentials, None, existing)
+            return refused("not_on_account", _on_platform_telnyx(e164))
+        try:
+            document = await integration_store.get_document(pool, ctx.workspace_id, TELNYX)
+        except IntegrationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        api_key = (document or {}).get("api_key")
+        if not api_key or await _find_on_telnyx(api_key, e164) is None:
+            return refused("not_on_account", _on_platform_telnyx(e164))
+        return _ReleaseCheck(True, None, None, credentials, None, existing)
 
     try:
         stored = await phones.twilio_account(pool, existing["id"])
@@ -705,22 +768,24 @@ async def _release_check(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     pair = stored or workspace
     if pair is None:
-        return refused(str(_not_connected(TWILIO).detail))
+        return refused("not_connected", str(_not_connected(TWILIO).detail))
     found = await _find_on_twilio(pair, e164, credentials if stored else "workspace")
     if found is None:
         if stored is None:
             return refused(
+                "not_on_account",
                 f"{e164} isn't on the workspace's Twilio account ({pair[0]}). It may be "
                 "on TurnCall's platform account, and only the TurnCall operator can "
                 "release it there."
             )
         return refused(
+            "not_on_account",
             f"{e164} isn't on {_account_whose(credentials, e164)} ({pair[0]}), so there "
             "is nothing to release there: it may already have been released or moved "
             "on Twilio."
         )
     if stored is not None:
-        return _ReleaseCheck(True, None, credentials, stored, existing)
+        return _ReleaseCheck(True, None, None, credentials, stored, existing)
 
     # Found on the Workspace's account: the row says so from now on.
     corrected = {
@@ -736,7 +801,7 @@ async def _release_check(
             ctx, "phone_number", fields.pop("resource_id"), "updated", db=conn, **fields
         )
     number = _public(corrected)
-    return _ReleaseCheck(True, None, "workspace", pair, number, corrected=True)
+    return _ReleaseCheck(True, None, None, "workspace", pair, number, corrected=True)
 
 
 @router.get("/phone-numbers/available")
@@ -861,7 +926,8 @@ async def check_release(
     phone_id: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
 ) -> dict[str, Any]:
     """Whether the number can be released, before the console asks for the
-    confirmation: `releasable`, and `detail`, a sentence saying why not.
+    confirmation: `releasable`, and `detail`, a sentence saying why not, with
+    `reason`, its code (null when releasable).
     The release runs the same check. A Twilio number is looked up on its
     account; one with no stored pair found on the Workspace's account has its
     row corrected to say so (audited), and `twilio_credentials` is then
@@ -877,6 +943,7 @@ async def check_release(
         "success": True,
         "data": {
             "releasable": check.releasable,
+            "reason": check.reason,
             "detail": check.detail,
             "twilio_credentials": check.twilio_credentials,
         },
@@ -895,10 +962,11 @@ async def release_phone_number(
     unbinds a routed number), leaving the number on the carrier account, still
     billed. Release is the one that ends the number's billing.
 
-    It runs the release check first (`GET .../release-check`) and refuses, 409
-    with its sentence, a number that isn't releasable: routed, a pending Telnyx
-    purchase, Asterisk, no account connected, or a Twilio number its account
-    doesn't hold. On Twilio it runs on the number's own stored account (the
+    It runs the release check first (`GET .../release-check`) and refuses a
+    number that isn't releasable with its sentence and `reason`, at that
+    reason's one status: 409 routed or a pending Telnyx purchase, 422 Asterisk
+    or a number the account it was looked up on doesn't hold, 400 no Twilio
+    account connected. On Twilio it runs on the number's own stored account (the
     Workspace's, for a number bought or bound with it, or found there by the
     check), on Telnyx the Workspace's Telnyx Integration. Never the
     platform's."""
@@ -916,7 +984,7 @@ async def release_phone_number(
         )
     check = await _release_check(pool, existing, audit, ctx)
     if not check.releasable:
-        raise HTTPException(status_code=409, detail=check.detail)
+        raise _refuse(check.reason, check.detail)
     carrier = existing.get("carrier") or TWILIO
     twilio = check.twilio
     wp = await _carrier_project(pool, workspace_id, carrier, "released", rewrite=True)

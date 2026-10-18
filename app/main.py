@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import audit, builder, pipedream_store, runtime, schema_check
+from ._helpers import Refusal
 from .backends import generator, registry
 from .db import create_pool
 from .routers import (
@@ -150,6 +151,14 @@ app.add_middleware(
     SessionMiddleware, secret_key=load_settings().session_secret, https_only=True
 )
 
+
+
+@app.exception_handler(Refusal)
+async def _refusal(_request: Request, exc: Refusal) -> JSONResponse:
+    """A refusal with its `reason` code beside the `detail` sentence."""
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail, "reason": exc.reason}
+    )
 
 
 @app.exception_handler(httpx.TransportError)

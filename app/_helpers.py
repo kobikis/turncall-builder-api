@@ -19,6 +19,16 @@ from .pipedream import CATALOG, mid_call_apps
 logger = logging.getLogger(__name__)
 
 
+class Refusal(HTTPException):
+    """A refusal a client can tell apart without parsing its sentence. It is
+    answered as `{"detail": <sentence>, "reason": <code>}`: `detail` stays the
+    plain string the console shows, and `reason` is a stable code beside it."""
+
+    def __init__(self, status_code: int, detail: str, reason: str) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+        self.reason = reason
+
+
 class _ToolShape(BaseModel):
     """A custom tool must at least have a string name — the builder indexes
     tools by name in _normalize_config / the mapper. Extra fields pass through."""

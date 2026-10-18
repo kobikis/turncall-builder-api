@@ -267,8 +267,13 @@ E.164 (Twilio's own filter matches partially). One with no stored pair found
 on the Workspace's account has its row corrected to it (`twilio_source =
 'workspace'`, Twilio's SID; audited); one the account doesn't hold isn't
 releasable, since it may be on TurnCall's platform account, which only the
-TurnCall operator can release on. The release then runs on that account,
-never the platform's. When TurnCall says the carrier did it but it
+TurnCall operator can release on. A Telnyx number is looked up the same way
+on the Workspace's Telnyx [[Integration]]; with no Integration it was bound on
+TurnCall's platform account, so it isn't releasable either, and connecting one
+wouldn't change that. Each refusal names its `reason` (`routed`, `pending`,
+`asterisk`, `not_connected`, `not_on_account`), with one status per reason
+on every number route. The release then runs on that account, never the
+platform's. When TurnCall says the carrier did it but it
 could not record that, the registry follows the carrier anyway; when nobody
 can say (TurnCall failed partway, or did not answer), the change **may have
 happened**: nothing changes in the registry, the audit entry is partial, and
