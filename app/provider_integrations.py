@@ -22,7 +22,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from . import agent_update, integration_store, provider_catalog
+
+from . import agent_update, integration_store, provider_catalog, telnyx_api
 from .backends import phones, registry
 from .turncall_client import failure_reason
 
@@ -39,6 +40,20 @@ _NO_ACCOUNT = {"ollama", "custom_openai"}
 
 class AdoptRefused(ValueError):
     """Adoption would overwrite a Workspace key, or the provider rejects the key."""
+
+
+class NumbersNotOnAccount(Exception):
+    """Telnyx numbers bound in the Workspace that the account about to be
+    projected doesn't hold, not all of them acknowledged (#114)."""
+
+    def __init__(self, numbers: list[str]) -> None:
+        super().__init__(", ".join(numbers))
+        self.numbers = numbers
+
+
+class NumberLookupFailed(Exception):
+    """The numbers could not be looked up on the account: Telnyx refused the
+    key, or didn't answer. The message is the sentence to show."""
 
 
 def account_of(provider: str | None) -> str | None:
@@ -151,8 +166,82 @@ async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
     targets = list(await registry.list_backends(pool, workspace_id))
     webhook = await phones.workspace_webhook_project(pool, workspace_id)
     if webhook:
-        targets.append(phones.as_projection_target(workspace_id, webhook))
+        target = phones.as_projection_target(workspace_id, webhook)
+        targets.append({**target, "project_id": webhook["project_id"]})
     return targets
+
+
+# --- Telnyx numbers on the account being connected (#114) ----------------------
+#
+# A Telnyx number's webhooks are signed by the account that holds it, and
+# TurnCall verifies them with the key of whatever account the number's project
+# holds now. Projecting a Telnyx account that doesn't hold a bound number makes
+# that number stop answering calls (403 on every webhook). So before a Telnyx
+# key is saved or projected, every bound number is looked up on it.
+
+async def bound_telnyx_numbers(
+    pool: Any, workspace_id: str, projects: set[str] | None = None
+) -> list[str]:
+    """The Workspace's Telnyx numbers bound in a TurnCall project (in one of
+    `projects`, when given), as E.164. An unassigned row is in none."""
+    return sorted({
+        n["e164"]
+        for n in await phones.list_numbers(pool, workspace_id)
+        if n.get("carrier") == TELNYX and n.get("project_id")
+        and (projects is None or n["project_id"] in projects)
+    })
+
+
+async def unwritten_projects(pool: Any, workspace_id: str, integration: dict[str, Any]) -> set[str]:
+    """The projects `project()` would write the current version into: every
+    target the log doesn't say holds it."""
+    holding = await _holding(pool, workspace_id, integration)
+    return {
+        t["project_id"]
+        for t in await _targets(pool, workspace_id)
+        if t["agent_id"] not in holding and t.get("project_id")
+    }
+
+
+_NUMBERS = "the workspace's Telnyx numbers"
+
+
+async def _missing_on_account(api_key: str, numbers: list[str], *, new_key: bool) -> list[str]:
+    """The numbers the Telnyx account doesn't hold. The account is listed once
+    and compared here: a request per 250 numbers it holds, not one per number
+    asked about (#116)."""
+    try:
+        held = await telnyx_api.list_numbers(api_key)
+    except telnyx_api.LOOKUP_ERRORS as exc:
+        raise NumberLookupFailed(
+            telnyx_api.lookup_failure(exc, _NUMBERS, new_key=new_key)
+        ) from exc
+    return [e164 for e164 in numbers if e164 not in held]
+
+
+async def check_telnyx_numbers(
+    pool: Any,
+    workspace_id: str,
+    api_key: str,
+    acknowledged: list[str],
+    *,
+    projects: set[str] | None = None,
+    new_key: bool = False,
+) -> list[str]:
+    """Look up the Workspace's bound Telnyx numbers (those in `projects`, when
+    given) on the account `api_key` belongs to.
+
+    Returns the numbers it doesn't hold that were acknowledged, for the audit
+    entry. Raises NumbersNotOnAccount when any it doesn't hold aren't all in
+    `acknowledged`, and NumberLookupFailed when they couldn't be looked up.
+    `new_key`: `api_key` is being connected, not yet saved."""
+    numbers = await bound_telnyx_numbers(pool, workspace_id, projects)
+    if not numbers:
+        return []
+    missing = await _missing_on_account(api_key, numbers, new_key=new_key)
+    if not set(missing) <= set(acknowledged):
+        raise NumbersNotOnAccount(missing)
+    return missing
 
 
 async def _write(client: Any, provider: str, document: dict[str, Any], backend: dict[str, Any]) -> str | None:
@@ -261,6 +350,10 @@ async def adopt(
     Workspace already has a key for this account (replacing one is a deliberate
     Replace on the card, not a side effect of adopting) and when the provider
     rejects the key, exactly as a typed one would be.
+
+    Never a Telnyx key: an agent's own key is only its LLM's, and no LLM
+    provider bills to Telnyx, so adopting never needs the Telnyx numbers check
+    (#114).
     """
     config = backend.get("config") or {}
     provider = pinned_account(config)

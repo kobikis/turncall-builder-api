@@ -325,9 +325,9 @@ def test_buying_on_an_unconnected_carrier_is_refused_before_turncall(client, moc
 
 
 @pytest.mark.parametrize("body, says, reason", [
-    ({"e164": E164}, "Choose a carrier", "carrier_invalid"),
+    ({"e164": E164}, "Choose a carrier", None),
     ({"carrier": "asterisk", "e164": E164}, "PBX's dialplan", "asterisk"),
-    ({"carrier": "vonage", "e164": E164}, "vonage is not a carrier", "carrier_invalid"),
+    ({"carrier": "vonage", "e164": E164}, "vonage is not a carrier", None),
     ({"carrier": "twilio"}, "E.164", None),
     ({"carrier": "twilio", "e164": "3125550100"}, "E.164", None),
 ])
@@ -341,14 +341,14 @@ def test_a_bad_purchase_is_refused_with_a_sentence(client, mocks, body, says, re
 
 
 @pytest.mark.parametrize("carrier, reason", [
-    ("asterisk", "asterisk"), ("vonage", "carrier_invalid"),
+    ("asterisk", "asterisk"), ("vonage", None),
 ])
 def test_searching_on_a_carrier_numbers_arent_bought_on_is_a_422(
     client, mocks, carrier, reason
 ):
     _twilio(mocks)
     r = client.get("/phone-numbers/available", params={"carrier": carrier})
-    assert (r.status_code, r.json()["reason"]) == (422, reason)
+    assert (r.status_code, r.json().get("reason")) == (422, reason)
     assert isinstance(r.json()["detail"], str)
     _no_turncall(mocks)
 
@@ -1044,18 +1044,54 @@ def test_the_check_finds_a_telnyx_number_on_the_workspace_account(
     _no_turncall(mocks)
 
 
-@pytest.mark.parametrize("failure, says", [
+def telnyx_answered(status, body="{}"):
+    """The HTTPStatusError `raise_for_status()` raises for a Telnyx answer."""
+    request = httpx.Request("GET", "https://api.telnyx.com/v2/phone_numbers")
+    response = httpx.Response(status, text=body, request=request)
+    return httpx.HTTPStatusError(f"{status}", request=request, response=response)
+
+
+RETRY = "retry in a moment."
+NOT_A_RETRY = "this needs a fix in TurnCall's builder, not a retry."
+# One per branch of telnyx_api.lookup_failure, as the release check says it.
+TELNYX_LOOKUP_FAILURES = [
     (
         telnyx_api.TelnyxRejected("Telnyx answered 401"),
-        f"Telnyx refused the workspace's Telnyx account when looking up {E164}: "
-        "check the Telnyx card on Integrations.",
+        f"Telnyx rejected the workspace's Telnyx API key while checking {E164}: "
+        "update it on the Integrations page.",
     ),
     (
         httpx.ConnectError("down"),
-        f"Telnyx didn't answer when looking up {E164} on the workspace's Telnyx "
-        "account — retry in a moment.",
+        f"Telnyx didn't answer when looking up {E164} on the workspace's Telnyx account; {RETRY}",
     ),
-])
+    (
+        httpx.ReadTimeout("slow"),
+        f"Telnyx didn't answer when looking up {E164} on the workspace's Telnyx account; {RETRY}",
+    ),
+    (telnyx_answered(429), f"Telnyx answered 429 when looking up {E164}; {RETRY}"),
+    (telnyx_answered(503), f"Telnyx answered 503 when looking up {E164}; {RETRY}"),
+    (telnyx_answered(400), f"Telnyx answered 400 when looking up {E164}; {NOT_A_RETRY}"),
+    (
+        telnyx_api.TelnyxMalformed(200, "<html>"),
+        f"Telnyx answered 200 when looking up {E164}; {NOT_A_RETRY}",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(429, 30),
+        "Telnyx is rate-limiting the workspace's Telnyx account; try again in about 30 seconds.",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(503, 1),
+        f"Telnyx answered 503 when looking up {E164}; try again in about 1 second.",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(None, None),
+        f"Telnyx is answering too slowly when looking up {E164} on the workspace's Telnyx "
+        f"account; {RETRY}",
+    ),
+]
+
+
+@pytest.mark.parametrize("failure, says", TELNYX_LOOKUP_FAILURES)
 def test_telnyx_failing_the_lookup_is_a_502_sentence(
     client, mocks, telnyx_lookup, failure, says
 ):
@@ -1204,10 +1240,38 @@ def test_the_telnyx_lookup_names_a_refused_key(monkeypatch, status):
         asyncio.run(FIND_TELNYX("bad", E164))
 
 
-def test_a_telnyx_failure_is_an_http_error(monkeypatch):
-    _telnyx_pages(monkeypatch, [[]], status=500)
+def test_a_telnyx_failure_is_an_http_error(monkeypatch, telnyx_clock):
+    seen = _telnyx_pages(monkeypatch, [[]], status=500)
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(FIND_TELNYX("KEY", E164))
+    assert (len(seen), telnyx_clock.waits) == (3, [1.0, 2.0])  # retried twice first
+
+
+def test_a_telnyx_body_that_isnt_the_list_is_malformed(monkeypatch):
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        telnyx_api.httpx, "AsyncClient",
+        lambda **kw: real(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html>")), **kw
+        ),
+    )
+    with pytest.raises(telnyx_api.TelnyxMalformed) as raised:
+        asyncio.run(FIND_TELNYX("KEY", E164))
+    assert (raised.value.status, raised.value.body) == (200, "<html>")
+
+
+def test_an_unexpected_telnyx_answer_is_logged_truncated(caplog):
+    with caplog.at_level("WARNING", logger="turncall_builder"):
+        telnyx_api.lookup_failure(telnyx_answered(422, "x" * 1000), E164)
+    [record] = [r for r in caplog.records if "telnyx lookup" in r.getMessage()]
+    assert "status 422" in record.getMessage()
+    assert "x" * 300 in record.getMessage() and "x" * 301 not in record.getMessage()
+
+
+def test_a_retryable_telnyx_answer_is_not_logged(caplog):
+    with caplog.at_level("WARNING", logger="turncall_builder"):
+        telnyx_api.lookup_failure(telnyx_answered(503), E164)
+    assert not [r for r in caplog.records if "telnyx lookup" in r.getMessage()]
 
 
 # --- roles --------------------------------------------------------------------

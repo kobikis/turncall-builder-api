@@ -157,7 +157,8 @@ app.add_middleware(
 async def _refusal(_request: Request, exc: Refusal) -> JSONResponse:
     """A refusal with its `reason` code beside the `detail` sentence."""
     return JSONResponse(
-        status_code=exc.status_code, content={"detail": exc.detail, "reason": exc.reason}
+        status_code=exc.status_code,
+        content={**exc.extra, "detail": exc.detail, "reason": exc.reason},
     )
 
 

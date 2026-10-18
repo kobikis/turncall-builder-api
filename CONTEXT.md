@@ -272,7 +272,11 @@ on the Workspace's Telnyx [[Integration]]; with no Integration it was bound on
 TurnCall's platform account, so it isn't releasable either, and connecting one
 wouldn't change that. Each refusal names its `reason` (`routed`, `pending`,
 `asterisk`, `not_connected`, `not_on_account`), with one status per reason
-on every number route. The release then runs on that account, never the
+on every number route. A `reason` is reserved for a refusal about the
+Workspace or the number (#115), like the [[Integration]]'s
+`numbers_not_on_account`: malformed input (no carrier, an unknown one, a
+number not in E.164) is a 422 with only `detail`, and auth errors and 404s
+carry none. The release then runs on that account, never the
 platform's. When TurnCall says the carrier did it but it
 could not record that, the registry follows the carrier anyway; when nobody
 can say (TurnCall failed partway, or did not answer), the change **may have
@@ -531,6 +535,24 @@ provider falls back to the key the TurnCall server itself holds — which is why
 card states which key will run the call rather than only "connected". Entering
 and disconnecting are admin-only; an editor sees presence, because the agent form
 has to be able to flag a provider with no key. See ADR-0023.
+
+A **Telnyx** Integration is checked against the Workspace's numbers first
+(#114): TurnCall verifies a Telnyx number's webhooks with the key of whatever
+account its project holds, so projecting an account that doesn't hold a bound
+number makes that number stop answering calls. Connecting or re-saving one
+lists the new key's account (once, a page per 250 numbers; #116) and compares
+every Telnyx number bound in a TurnCall project of the Workspace (unassigned
+rows don't count). Any it doesn't hold refuse the save with a 409, `reason:
+"numbers_not_on_account"` and the `numbers`, unless the request repeats every
+one of them in `acknowledge_numbers`; then it goes ahead and the audit entry
+records them. Re-applying checks only the projects it would write into (none
+when every one holds the current key), and adopting can't refuse: it never
+moves a Telnyx key, since an agent's own key is only its LLM's. Telnyx
+refusing the key, or not answering, is a 502 and nothing is saved. A 429 or
+5xx is retried only while the wait fits under 10 s and the check's deadline
+(`TELNYX_CONNECT_CHECK_DEADLINE_S`, 20 s by default; the release check's is
+`TELNYX_RELEASE_CHECK_DEADLINE_S`, 10 s; #117, #118); past either, the 502
+says how long to wait.
 _Avoid_: "provider" (that is the *selected backend*, TurnCall's word), "API key"
 alone (the AWS one is a credential set), "[[Connected app]]" (Pipedream's, and
 minted per call).

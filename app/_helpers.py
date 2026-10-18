@@ -22,11 +22,14 @@ logger = logging.getLogger(__name__)
 class Refusal(HTTPException):
     """A refusal a client can tell apart without parsing its sentence. It is
     answered as `{"detail": <sentence>, "reason": <code>}`: `detail` stays the
-    plain string the console shows, and `reason` is a stable code beside it."""
+    plain string the console shows, and `reason` is a stable code beside it.
+    Any `extra` field is answered top-level beside them, such as the `numbers`
+    a `numbers_not_on_account` refusal names (#114)."""
 
-    def __init__(self, status_code: int, detail: str, reason: str) -> None:
+    def __init__(self, status_code: int, detail: str, reason: str, **extra: Any) -> None:
         super().__init__(status_code=status_code, detail=detail)
         self.reason = reason
+        self.extra = extra
 
 
 class _ToolShape(BaseModel):

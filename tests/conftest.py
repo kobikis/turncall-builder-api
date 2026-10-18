@@ -249,3 +249,25 @@ class FakeStream:
             if isinstance(event, BaseException):
                 raise event
             yield event
+
+
+@pytest.fixture
+def telnyx_clock(monkeypatch):
+    """A fake clock for telnyx_api's deadlines (#117): sleeping advances it at
+    once, and `advance` moves it as a slow request would. `waits` lists every
+    sleep asked for."""
+    from app import telnyx_api
+
+    clock = SimpleNamespace(now=1000.0, waits=[])
+
+    async def sleep(seconds):
+        clock.waits.append(seconds)
+        clock.now += seconds
+
+    def advance(seconds):
+        clock.now += seconds
+
+    clock.advance = advance
+    monkeypatch.setattr(telnyx_api, "_clock", lambda: clock.now)
+    monkeypatch.setattr(telnyx_api, "_sleep", sleep)
+    return clock

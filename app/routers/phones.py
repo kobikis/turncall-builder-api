@@ -31,11 +31,12 @@ _CARRIER_NAMES = {TWILIO: "Twilio", TELNYX: "Telnyx"}
 
 # Why a number route refuses, and its one status on every route: search,
 # purchase, the release check and release (#112). Answered as `reason` beside
-# the `detail` sentence, so a client needn't parse the sentence.
+# the `detail` sentence, so a client needn't parse the sentence. Reserved for
+# a state of the Workspace or the number (#115): malformed input is a 422 with
+# only `detail`, and auth errors and 404s carry none.
 _REFUSALS = {
     "not_connected": 400,  # no account connected for the carrier: connect it
     "asterisk": 422,  # an Asterisk number or carrier: never bought or released here
-    "carrier_invalid": 422,  # no carrier, or one that isn't twilio or telnyx
     # The account the check looked on doesn't hold it: its stored Twilio
     # account, else the Workspace's Twilio or Telnyx account (so it may be on
     # TurnCall's platform account, which only the TurnCall operator releases).
@@ -471,9 +472,11 @@ def _purchase_carrier(carrier: str | None) -> str:
             "Asterisk numbers belong to the PBX's dialplan; "
             "numbers are bought and released on Twilio or Telnyx only.",
         )
-    raise _refuse(
-        "carrier_invalid",
-        "Choose a carrier to buy on: twilio or telnyx."
+    # Malformed input, not a state of the Workspace or the number: a 422 with
+    # only its sentence, no `reason` (#115).
+    raise HTTPException(
+        status_code=422,
+        detail="Choose a carrier to buy on: twilio or telnyx."
         if not carrier
         else f"{carrier} is not a carrier numbers can be bought on; choose twilio or telnyx.",
     )
@@ -693,21 +696,14 @@ def _on_platform_telnyx(e164: str) -> str:
 
 
 async def _find_on_telnyx(api_key: str, e164: str) -> dict[str, Any] | None:
-    """The number on the Workspace's Telnyx account, or None. Telnyx refusing
-    the key, or not answering, is a 502: nothing can be said about the number."""
+    """The number on the Workspace's Telnyx account, or None. A lookup that
+    fails is a 502 saying whether a retry can help: nothing can be said about
+    the number."""
     try:
         return await telnyx_api.find_number(api_key, e164)
-    except telnyx_api.TelnyxRejected as exc:
+    except telnyx_api.LOOKUP_ERRORS as exc:
         raise HTTPException(
-            status_code=502,
-            detail=f"Telnyx refused the workspace's Telnyx account when looking up {e164}: "
-            "check the Telnyx card on Integrations.",
-        ) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Telnyx didn't answer when looking up {e164} on the workspace's Telnyx "
-            "account — retry in a moment.",
+            status_code=502, detail=telnyx_api.lookup_failure(exc, e164)
         ) from exc
 
 
