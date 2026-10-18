@@ -225,6 +225,15 @@ async def _sync_call_init_secret(backend: dict[str, Any] | None, secret: str | N
         await generator.restart(backend["service_dir"], backend["port"])
 
 
+class _BindRefused(HTTPException):
+    """TurnCall refusing a bind, with its own sentence (`said`): told apart
+    from the builder's own refusals, which a caller may not reword."""
+
+    def __init__(self, status_code: int, said: str) -> None:
+        super().__init__(status_code=status_code, detail=f"TurnCall rejected the bind: {said}")
+        self.said = said
+
+
 async def _bind_in_turncall(
     payload: dict[str, Any], api_key: str, e164: str
 ) -> dict[str, Any]:
@@ -245,10 +254,7 @@ async def _bind_in_turncall(
         # user's to fix, so it keeps its status; anything else is upstream.
         status = exc.response.status_code
         reason = str(_turncall_http_error(exc).detail)[:300]
-        raise HTTPException(
-            status_code=status if status in (422, 503) else 502,
-            detail=f"TurnCall rejected the bind: {reason}",
-        ) from exc
+        raise _BindRefused(status if status in (422, 503) else 502, reason) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502,
@@ -414,6 +420,10 @@ async def _bind(
         "label": body.label,
         "carrier": carrier,
         "workspace_id": workspace_id,
+        # Named, so the write clears them: a bound number has no purchase
+        # under way (record_number keeps a field that is left out).
+        "purchase_status": None,
+        "telnyx_order_id": None,
         **_seal(twilio, source),
     }
     await phones.record_number(pool, number)
@@ -441,7 +451,12 @@ async def _bind(
 # Workspace's searches (and any limits TurnCall counts per project) on its
 # own project, not the builder's shared one. A search writes the Telnyx key
 # only while the projection log says the project lacks it, so searching again
-# writes nothing. Buying and releasing write it every time (#109).
+# writes nothing. Buying and releasing write it every time (#109). Every write
+# of the key checks the Telnyx numbers bound in the project first, as
+# connecting does, but with no acknowledgement: numbers it doesn't hold refuse
+# the call, and Integrations is where to resolve them (#109 review). A search
+# records an audit entry when it creates the project or writes the key; a buy
+# or release's own entry covers its write.
 #
 # Every refusal's `detail` is a sentence: the console shows it as it is. So the
 # bodies and query take plain strings and are checked here, not by a schema
@@ -489,43 +504,84 @@ async def _telnyx_integration(pool: Any, workspace_id: str) -> dict[str, Any] | 
     return telnyx if telnyx and not telnyx["disconnecting"] else None
 
 
+def _numbers_not_on_account(numbers: list[str], doing: str) -> Refusal:
+    """Telnyx numbers bound in the webhook project that the Workspace's Telnyx
+    account doesn't hold: writing its key there would stop them answering
+    calls. No acknowledgement here; Integrations takes one."""
+    one = len(numbers) == 1
+    it, they = ("it", "it") if one else ("they", "them")
+    return Refusal(
+        409,
+        f"{provider_integrations.name_numbers(numbers)} {'is' if one else 'are'} bound in "
+        f"the workspace's webhook project but not on the workspace's Telnyx account, so "
+        f"the workspace's Telnyx key wasn't written there and nothing was {doing}: {it} would stop answering "
+        f"calls. Resolve this on Integrations: re-apply the Telnyx card and acknowledge "
+        f"{they} there, or move {they} to the workspace's Telnyx account first.",
+        "numbers_not_on_account",
+        numbers=numbers,
+    )
+
+
 async def _carrier_project(
     pool: Any,
     workspace_id: str,
     carrier: str,
     doing: str,
+    telnyx: dict[str, Any] | None,
     *,
-    telnyx: dict[str, Any] | None = None,
+    document: dict[str, Any] | None = None,
     rewrite: bool = False,
+    audit: AuditTrail | None = None,
+    ctx: AuthContext | None = None,
 ) -> dict[str, str]:
     """The Workspace's webhook project, ready to act on `carrier`: on Telnyx,
     holding the Workspace's current `telnyx` credential. Without it TurnCall
     would use the platform's Telnyx account, so a copy that cannot be written
-    refuses the call. A Workspace with no Telnyx Integration is refused before
-    anything reaches TurnCall; `telnyx` is the row when the caller has read it.
+    refuses the call. `telnyx` is the Workspace's Telnyx Integration as the
+    caller read it (None: it has none, refused on Telnyx before anything
+    reaches TurnCall), and `document` its credential when read too.
 
     `rewrite` writes the copy even when the log says the project holds it, as
-    buying and releasing must; a project created here was just written."""
-    if carrier == TELNYX:
-        telnyx = telnyx or await _telnyx_integration(pool, workspace_id)
-        if telnyx is None:
-            raise _not_connected(TELNYX)
+    buying and releasing must; a project created here was just written. The
+    write checks the Telnyx numbers bound in the project: 409
+    `numbers_not_on_account` when the account doesn't hold them.
+
+    `audit`: the trail of a route whose own entry doesn't cover these writes
+    (a search), which then records the project's creation and a write of the
+    key."""
+    if carrier == TELNYX and telnyx is None:
+        raise _not_connected(TELNYX)
     wp, created = await _workspace_project(pool, workspace_id)
+    if created and audit is not None:
+        await audit.record(
+            ctx, "integration", "webhook_project", "created",
+            resource_name="the workspace's webhook project",
+            changes={"/project_id": {"before": None, "after": wp["project_id"]}},
+        )
     if carrier != TELNYX:
         return wp
     try:
-        error = await provider_integrations.ensure_in_target(
+        ensured = await provider_integrations.ensure_in_target(
             pool, runtime.get_client(), workspace_id, telnyx,
             phones.as_projection_target(workspace_id, wp),
-            rewrite=rewrite and not created,
+            rewrite=rewrite and not created, document=document,
         )
     except IntegrationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if error:
+    except provider_integrations.NumbersNotOnAccount as exc:
+        raise _numbers_not_on_account(exc.numbers, doing) from exc
+    except provider_integrations.NumberLookupFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if ensured.error:
         raise HTTPException(
             status_code=502,
             detail=f"The workspace's Telnyx account could not be given to TurnCall, "
-            f"so nothing was {doing}: {error}",
+            f"so nothing was {doing}: {ensured.error}",
+        )
+    if ensured.written and not created and audit is not None:
+        # A re-apply of the Telnyx Integration into one project.
+        await audit.record(
+            ctx, "integration", TELNYX, "reapplied", resource_name=TELNYX, changes={}
         )
     return wp
 
@@ -562,39 +618,56 @@ def _done_anyway(exc: httpx.HTTPStatusError, done: str) -> dict[str, Any] | None
     return number if isinstance(number, dict) and number.get("e164_number") else None
 
 
-def _may_have_happened(exc: httpx.HTTPStatusError) -> str | None:
-    """Why a failed buy or release may have reached the carrier anyway, or
-    None for a refusal that says nothing happened: any other 500 (TurnCall
-    failed partway), or a gateway's 502/503/504 in front of TurnCall, which is
-    not TurnCall's own answer (that one says what the carrier did)."""
+def _may_have_happened(exc: httpx.HTTPStatusError) -> tuple[str, str | None] | None:
+    """Why a failed buy or release may have reached the carrier anyway, and
+    TurnCall's own sentence when it gave one; None for a refusal that says
+    nothing happened.
+
+    Any other 500: TurnCall failed partway. A gateway's 502/503/504 in front
+    of TurnCall (not TurnCall's envelope): it did not answer. TurnCall's own
+    502 or 504: the carrier failed or timed out once asked, so it may have
+    acted. TurnCall's own 503 (no account) comes before any carrier call, and
+    stays a refusal."""
     status = exc.response.status_code
     if status == 500:
-        return "TurnCall failed"
+        return "TurnCall failed", None
     if status in (502, 503, 504) and "error" not in (_body(exc) or {}):
-        return "TurnCall did not answer"
+        return "TurnCall did not answer", None
+    if status in (502, 504):
+        return f"TurnCall answered {status}", str(_turncall_http_error(exc).detail)
     return None
 
 
-def _uncertain(why: str, e164: str, carrier: str, verb: tuple[str, str]) -> HTTPException:
+def _uncertain(
+    why: str, e164: str, carrier: str, verb: tuple[str, str], said: str | None = None
+) -> HTTPException:
     done, doing = verb
     return HTTPException(
         status_code=502,
         detail=f"{why}, so {e164} may have been {done}: check the "
-        f"{_CARRIER_NAMES[carrier]} account before {doing} it again",
+        f"{_CARRIER_NAMES[carrier]} account before {doing} it again"
+        + (f" (TurnCall: {said})" if said else ""),
     )
 
 
+# A 2xx from TurnCall whose body can't be read: the carrier acted, but what it
+# did isn't known (#109 review).
+_UNREADABLE = "TurnCall's answer couldn't be read"
+_UNREADABLE_ERRORS = (ValueError, KeyError, TypeError)
+
+
 def _unfinished_order(number: dict[str, Any], exc: HTTPException) -> HTTPException | None:
-    """TurnCall refusing to bind a pending number because it is not on the
-    Telnyx account yet: the order has not finished, so say that."""
-    if number.get("purchase_status") != "pending" or exc.status_code != 422:
+    """TurnCall refusing (422) to bind a pending number: Telnyx hasn't put it
+    on the account yet, so the order hasn't finished. Decided by the row and
+    TurnCall's status, never its wording; its sentence comes along."""
+    if number.get("purchase_status") != "pending":
         return None
-    if "is not a phone number on" not in str(exc.detail):
+    if not isinstance(exc, _BindRefused) or exc.status_code != 422:
         return None
     return HTTPException(
         status_code=422,
         detail=f"Telnyx hasn't finished the order for {number['e164']}{_order(number)} "
-        "yet, so it can't be bound: try again in a few minutes.",
+        f"yet, so it can't be bound: try again in a few minutes. (TurnCall: {exc.said})",
     )
 
 
@@ -654,6 +727,10 @@ class _ReleaseCheck:
     twilio: tuple[str, str] | None
     number: dict[str, Any]
     corrected: bool = False
+    # On Telnyx, the Workspace's Integration and its credential as the check
+    # read them, so the release doesn't read them again.
+    telnyx: dict[str, Any] | None = None
+    telnyx_document: dict[str, Any] | None = None
 
 
 def _account_whose(credentials: str, e164: str) -> str:
@@ -689,9 +766,20 @@ async def _find_on_twilio(
 
 
 def _on_platform_telnyx(e164: str) -> str:
+    """With no Telnyx Integration, TurnCall bound the number on its platform
+    account: that much is certain."""
     return (
         f"{e164} is on TurnCall's platform Telnyx account, not the workspace's, so only "
         "the TurnCall operator can release it."
+    )
+
+
+def _not_on_workspace_telnyx(e164: str) -> str:
+    """Not on the Workspace's Telnyx account: where it is can't be said."""
+    return (
+        f"{e164} isn't on the workspace's Telnyx account, so there is nothing to release "
+        "there: it may be on TurnCall's platform Telnyx account (only the TurnCall "
+        "operator can release it there), or already released."
     )
 
 
@@ -718,8 +806,9 @@ async def _release_check(
     Found on the Workspace's with no stored pair, its row is corrected to the
     Workspace's account (and Twilio's SID), and the audit log says so. It is
     unassigned, so TurnCall holds nothing to update. A Telnyx number is looked
-    up on the Workspace's Telnyx Integration; without one, or not found there,
-    it is on TurnCall's platform account, which only the operator releases."""
+    up on the Workspace's Telnyx Integration; without one it is on TurnCall's
+    platform account, which only the operator releases. Not found there, it
+    may be on the platform account, or already released."""
     e164 = existing["e164"]
     credentials = _public(existing)["twilio_credentials"]
 
@@ -746,7 +835,8 @@ async def _release_check(
         # Without a Telnyx Integration TurnCall bound it on its platform
         # account; connecting one won't make it releasable (#113). With one,
         # it is looked up there. Storing which account it is on is #110.
-        if await _telnyx_integration(pool, ctx.workspace_id) is None:
+        telnyx = await _telnyx_integration(pool, ctx.workspace_id)
+        if telnyx is None:
             return refused("not_on_account", _on_platform_telnyx(e164))
         try:
             document = await integration_store.get_document(pool, ctx.workspace_id, TELNYX)
@@ -754,8 +844,11 @@ async def _release_check(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         api_key = (document or {}).get("api_key")
         if not api_key or await _find_on_telnyx(api_key, e164) is None:
-            return refused("not_on_account", _on_platform_telnyx(e164))
-        return _ReleaseCheck(True, None, None, credentials, None, existing)
+            return refused("not_on_account", _not_on_workspace_telnyx(e164))
+        return _ReleaseCheck(
+            True, None, None, credentials, None, existing,
+            telnyx=telnyx, telnyx_document=document,
+        )
 
     try:
         stored = await phones.twilio_account(pool, existing["id"])
@@ -808,27 +901,38 @@ async def search_available_numbers(
     area_code: str | None = None,
     contains: str | None = None,
     limit: str | None = None,
+    *,
+    audit: Audit,
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
     """Numbers the Workspace can buy on one of its carrier accounts, and the
     carriers it can buy on. Without `carrier`, only the carriers: nothing is
-    searched. Filters are TurnCall's, and checked there."""
+    searched. Filters are TurnCall's, and checked there.
+
+    A read, but audited where it writes: creating the Workspace's webhook
+    project, or writing its Telnyx key there."""
     pool = runtime.get_pool()
     telnyx = await _telnyx_integration(pool, ctx.workspace_id)
+    try:
+        pair = await twilio_store.credentials(pool, ctx.workspace_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     carriers = [
-        c for c, connected in (
-            (TWILIO, await twilio_store.get(pool, ctx.workspace_id) is not None),
-            (TELNYX, telnyx is not None),
-        )
+        c for c, connected in ((TWILIO, pair is not None), (TELNYX, telnyx is not None))
         if connected
     ]
     if carrier is None:
+        audit.unchanged()
         return {"success": True, "data": {"carriers": carriers, "numbers": []}}
     carrier = _purchase_carrier(carrier)
-    twilio = await _workspace_twilio(pool, ctx.workspace_id) if carrier == TWILIO else None
-    if carrier == TELNYX and telnyx is None:
-        raise _not_connected(TELNYX)
-    wp = await _carrier_project(pool, ctx.workspace_id, carrier, "searched", telnyx=telnyx)
+    if carrier == TWILIO and pair is None:
+        raise _not_connected(TWILIO)
+    twilio = pair if carrier == TWILIO else None
+    wp = await _carrier_project(
+        pool, ctx.workspace_id, carrier, "searched", telnyx, audit=audit, ctx=ctx
+    )
+    if not audit.satisfied:
+        audit.unchanged()  # the project and its keys were there already
     params = {
         "carrier": carrier, "country": country, "number_type": number_type,
         "area_code": area_code, "contains": contains, "limit": limit,
@@ -870,7 +974,8 @@ async def purchase_phone_number(
             detail="Choose a number to buy, in E.164 form (like +13125550100).",
         )
     twilio = await _workspace_twilio(pool, workspace_id) if carrier == TWILIO else None
-    wp = await _carrier_project(pool, workspace_id, carrier, "bought", rewrite=True)
+    telnyx = await _telnyx_integration(pool, workspace_id) if carrier == TELNYX else None
+    wp = await _carrier_project(pool, workspace_id, carrier, "bought", telnyx, rewrite=True)
 
     # Nothing has landed until TurnCall says the carrier sold it. Where that
     # is unknown, it is marked landed so the entry is written (partial, with
@@ -888,9 +993,9 @@ async def purchase_phone_number(
     except httpx.HTTPStatusError as exc:
         bought = _done_anyway(exc, "bought")
         if bought is None:
-            if why := _may_have_happened(exc):
+            if maybe := _may_have_happened(exc):
                 change.landed()
-                raise _uncertain(why, e164, carrier, _BOUGHT) from exc
+                raise _uncertain(maybe[0], e164, carrier, _BOUGHT, maybe[1]) from exc
             raise _turncall_refused(exc, f"buy {e164}") from exc
         warning = (
             f"{name} sold {bought['e164_number']} to this workspace and it is on Phone "
@@ -899,6 +1004,12 @@ async def purchase_phone_number(
     except httpx.HTTPError as exc:
         change.landed()
         raise _uncertain("TurnCall did not answer", e164, carrier, _BOUGHT) from exc
+    except _UNREADABLE_ERRORS as exc:
+        change.landed()
+        raise _uncertain(_UNREADABLE, e164, carrier, _BOUGHT) from exc
+    if not isinstance(bought, dict):
+        change.landed()
+        raise _uncertain(_UNREADABLE, e164, carrier, _BOUGHT)
     change.landed()
     status = bought.get("status") or "active"
     number = _bought_number(workspace_id, carrier, e164, twilio, bought)
@@ -983,7 +1094,10 @@ async def release_phone_number(
         raise _refuse(check.reason, check.detail)
     carrier = existing.get("carrier") or TWILIO
     twilio = check.twilio
-    wp = await _carrier_project(pool, workspace_id, carrier, "released", rewrite=True)
+    wp = await _carrier_project(
+        pool, workspace_id, carrier, "released", check.telnyx,
+        document=check.telnyx_document, rewrite=True,
+    )
 
     change = _begin(audit, ctx, "released", check.number, None)
     warning = None
@@ -995,9 +1109,9 @@ async def release_phone_number(
     except httpx.HTTPStatusError as exc:
         released = _done_anyway(exc, "released")
         if released is None:
-            if why := _may_have_happened(exc):
+            if maybe := _may_have_happened(exc):
                 change.landed()
-                raise _uncertain(why, e164, carrier, _RELEASED) from exc
+                raise _uncertain(maybe[0], e164, carrier, _RELEASED, maybe[1]) from exc
             raise _turncall_refused(exc, f"release {e164}") from exc
         warning = (
             f"{_CARRIER_NAMES[carrier]} took {e164} back and it is gone from Phone "
@@ -1006,6 +1120,12 @@ async def release_phone_number(
     except httpx.HTTPError as exc:
         change.landed()
         raise _uncertain("TurnCall did not answer", e164, carrier, _RELEASED) from exc
+    except _UNREADABLE_ERRORS as exc:
+        change.landed()
+        raise _uncertain(_UNREADABLE, e164, carrier, _RELEASED) from exc
+    if not isinstance(released, dict):
+        change.landed()
+        raise _uncertain(_UNREADABLE, e164, carrier, _RELEASED)
     change.landed()
     await phones.delete_number(pool, phone_id)
     await change.record()

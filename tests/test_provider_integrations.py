@@ -677,6 +677,7 @@ def test_many_numbers_are_checked_against_one_listing(client, telnyx):
 def test_other_providers_are_never_looked_up_on_telnyx(client, telnyx):
     telnyx.phones.list_numbers.return_value = [_number(N1)]
     telnyx.integration_store.save.return_value = _integration()
+    telnyx.integration_store.get.return_value = _integration()  # what the projection reads
     r = client.put("/integrations/providers/deepgram", json={"api_key": KEY}, headers=WS)
     assert r.status_code == 200, r.text
     assert telnyx.listing.calls == []
@@ -778,3 +779,49 @@ def test_adopting_never_projects_a_telnyx_key(client, telnyx):
     assert "reason" not in r.json()
     assert telnyx.listing.calls == []
     _nothing_saved(telnyx)
+
+
+# --- the check on every write of a Telnyx key (#109 review) ---------------------
+#
+# Connecting and applying check (and take acknowledgements); the write itself
+# checks too, so no path writes a Telnyx key into a project holding bound
+# Telnyx numbers its account doesn't hold.
+
+
+def test_a_new_target_holding_unheld_telnyx_numbers_is_not_written(telnyx):
+    import asyncio
+
+    from app import provider_integrations
+
+    telnyx.integration_store.list_for_workspace.return_value = [_integration("telnyx")]
+    telnyx.phones.list_numbers.return_value = [_number(N1, "p-new")]
+    asyncio.run(provider_integrations.project_into_new_target(
+        object(), telnyx.client, TEST_WORKSPACE_ID,
+        {"agent_id": "new", "api_key": "tc_new", "config": {}, "project_id": "p-new"},
+    ))
+    telnyx.client.put_credential.assert_not_called()
+    recorded = telnyx.integration_store.record_projection.await_args
+    assert recorded.kwargs["state"] == "failed"
+    assert N1 in recorded.kwargs["error"]
+
+
+def test_a_number_bound_after_connect_checked_is_not_moved(client, telnyx, monkeypatch):
+    """A number bound between the connect's check and its writes: that
+    project's write is refused and logged failed, the others go ahead."""
+    telnyx.registry.list_backends.return_value = [
+        backend_row(agent_id="a1", api_key="tc_a1", project_id="p1"),
+        backend_row(agent_id="a2", api_key="tc_a2", project_id="p2"),
+    ]
+    telnyx.listing.held = {N1}
+    seen = iter([
+        [_number(N1, "p1")],  # what the connect's check sees
+        [_number(N1, "p1")],  # a1's write
+        [_number(N1, "p1"), _number(N2, "p2")],  # a2's write: N2 bound since
+    ])
+    telnyx.phones.list_numbers.side_effect = lambda *a, **kw: next(seen)
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert [c.args[2] for c in telnyx.client.put_credential.await_args_list] == ["tc_a1"]
+    states = {a["agent_id"]: a["state"] for a in r.json()["data"]["agents"]}
+    assert states == {"a1": "applied", "a2": "failed"}
+    assert telnyx.listing.calls == [TELNYX_KEY, TELNYX_KEY]

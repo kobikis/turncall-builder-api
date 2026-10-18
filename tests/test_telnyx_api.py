@@ -65,6 +65,17 @@ def test_listing_reads_every_page_unfiltered(monkeypatch, telnyx_clock):
     assert seen[0].headers["authorization"] == "Bearer KEY"
 
 
+def test_finding_a_number_stops_at_the_page_it_is_on(monkeypatch, telnyx_clock):
+    """The lookup shares the listing's page loop, and leaves it once found."""
+    seen = _serve(monkeypatch, lambda r: _page([E164], total_pages=3))
+    assert asyncio.run(telnyx_api.find_number("KEY", E164)) == {
+        "id": E164[-4:], "phone_number": E164,
+    }
+    assert [r.url.params["page[number]"] for r in seen] == ["1"]
+    assert seen[0].url.params["filter[phone_number]"] == E164.lstrip("+")
+    assert seen[0].url.params["page[size]"] == "250"
+
+
 @pytest.mark.parametrize("status", [401, 403])
 def test_listing_names_a_refused_key(monkeypatch, telnyx_clock, status):
     _serve(monkeypatch, lambda r: httpx.Response(status))

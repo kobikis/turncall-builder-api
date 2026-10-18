@@ -152,13 +152,8 @@ def _acknowledged(raw: Any) -> list[str]:
         raise HTTPException(status_code=422, detail=_readable(exc)) from exc
 
 
-_NAMED = 10  # numbers a refusal's sentence names; `numbers` carries them all
-
-
 def _not_on_account(numbers: list[str], when: str) -> str:
-    named = ", ".join(numbers[:_NAMED])
-    if len(numbers) > _NAMED:
-        named += f" and {len(numbers) - _NAMED} more"
+    named = provider_integrations.name_numbers(numbers)
     one = len(numbers) == 1
     return (
         f"{named} {'is' if one else 'are'} not on this Telnyx account. "
@@ -226,6 +221,9 @@ async def connect(
             f"{validation['checked']}). It was not saved.",
         )
     noted: dict[str, Any] = {}
+    # The Telnyx numbers checked here (held, or acknowledged): the projection's
+    # own check on each write skips them, and catches any bound since.
+    cleared: list[str] = []
     if provider == provider_integrations.TELNYX:
         # A save writes into every target.
         targets = await provider_integrations.telnyx_write_targets(
@@ -235,6 +233,7 @@ async def connect(
             document["api_key"], targets.numbers, acknowledged,
             when="this account is connected", new_key=True,
         )
+        cleared = targets.numbers
     pool, client = runtime.get_pool(), runtime.get_client()
     existed = await integration_store.get(pool, ctx.workspace_id, provider) is not None
     # That the key changed, never the key (ADR-0028). Landed once stored: a
@@ -249,7 +248,9 @@ async def connect(
             document=document, last4=provider_integrations.last4(document), validation=validation,
         )
         change.landed()
-        agents = await provider_integrations.project(pool, client, ctx.workspace_id, provider)
+        agents = await provider_integrations.project(
+            pool, client, ctx.workspace_id, provider, cleared=cleared
+        )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
     await change.record()
@@ -275,11 +276,13 @@ async def reapply(
     if integration["disconnecting"]:
         raise HTTPException(status_code=409, detail=f"{provider} is being disconnected — finish that first")
     noted: dict[str, Any] = {}
+    cleared: list[str] = []  # as connect's
     if provider == provider_integrations.TELNYX:
         # Apply writes only into targets not holding the current key.
         targets = await provider_integrations.telnyx_write_targets(
             pool, ctx.workspace_id, skip_holding=integration
         )
+        cleared = targets.numbers
         acknowledged = _acknowledged((body or {}).get("acknowledge_numbers"))
         if targets.numbers:
             try:
@@ -291,7 +294,9 @@ async def reapply(
                 when="this account is applied to their projects",
             )
     try:
-        agents = await provider_integrations.project(pool, runtime.get_client(), ctx.workspace_id, provider)
+        agents = await provider_integrations.project(
+            pool, runtime.get_client(), ctx.workspace_id, provider, cleared=cleared
+        )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
     await audit.record(ctx, "integration", provider, "reapplied", resource_name=provider, changes=noted)

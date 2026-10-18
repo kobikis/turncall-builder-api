@@ -11,6 +11,8 @@ import asyncio
 import logging
 import math
 import time
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 import httpx
@@ -129,6 +131,25 @@ async def _page(
     raise AssertionError("unreachable: the last attempt returns or raises")
 
 
+async def _numbers(
+    api_key: str, filters: dict[str, Any], deadline_s: float
+) -> AsyncIterator[dict[str, Any]]:
+    """Every number on the account matching `filters`, page after page, all
+    within one deadline of `deadline_s`: the one page loop `find_number` and
+    `list_numbers` share. Stopping early reads no further pages (close it, as
+    `aclosing` does)."""
+    params: dict[str, Any] = {**filters, "page[size]": _PAGE_SIZE, "page[number]": 1}
+    deadline = _Deadline(deadline_s)
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S) as client:
+        while True:
+            numbers, total = await _page(client, api_key, params, deadline)
+            for n in numbers:
+                yield n
+            if params["page[number]"] >= total:
+                return
+            params["page[number]"] += 1
+
+
 async def find_number(
     api_key: str, e164: str, *, deadline_s: float | None = None
 ) -> dict[str, Any] | None:
@@ -145,19 +166,13 @@ async def find_number(
     (TELNYX_RELEASE_CHECK_DEADLINE_S by default), httpx.HTTPError otherwise;
     `lookup_failure` says which.
     """
-    params: dict[str, Any] = {
-        "filter[phone_number]": e164.lstrip("+"), "page[size]": _PAGE_SIZE, "page[number]": 1,
-    }
-    deadline = _Deadline(deadline_s or load_settings().telnyx_release_check_deadline_s)
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S) as client:
-        while True:
-            numbers, total = await _page(client, api_key, params, deadline)
-            for n in numbers:
-                if n["phone_number"] == e164:
-                    return {"id": str(n.get("id") or ""), "phone_number": e164}
-            if params["page[number]"] >= total:
-                return None
-            params["page[number]"] += 1
+    filters = {"filter[phone_number]": e164.lstrip("+")}
+    deadline = deadline_s or load_settings().telnyx_release_check_deadline_s
+    async with aclosing(_numbers(api_key, filters, deadline)) as numbers:
+        async for n in numbers:
+            if n["phone_number"] == e164:
+                return {"id": str(n.get("id") or ""), "phone_number": e164}
+    return None
 
 
 async def list_numbers(api_key: str, *, deadline_s: float | None = None) -> set[str]:
@@ -171,16 +186,8 @@ async def list_numbers(api_key: str, *, deadline_s: float | None = None) -> set[
 
     Raises as `find_number` does; `deadline_s` is
     TELNYX_CONNECT_CHECK_DEADLINE_S by default."""
-    params: dict[str, Any] = {"page[size]": _PAGE_SIZE, "page[number]": 1}
-    held: set[str] = set()
-    deadline = _Deadline(deadline_s or load_settings().telnyx_connect_check_deadline_s)
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S) as client:
-        while True:
-            numbers, total = await _page(client, api_key, params, deadline)
-            held.update(n["phone_number"] for n in numbers)
-            if params["page[number]"] >= total:
-                return held
-            params["page[number]"] += 1
+    deadline = deadline_s or load_settings().telnyx_connect_check_deadline_s
+    return {n["phone_number"] async for n in _numbers(api_key, {}, deadline)}
 
 
 # Everything a lookup raises that `lookup_failure` has a sentence for.

@@ -20,6 +20,7 @@ condition is tools and Automations, and a credential is neither.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from typing import Any, NamedTuple
 
 from . import agent_update, integration_store, provider_catalog, telnyx_api
@@ -103,7 +104,9 @@ def last4(document: dict[str, Any]) -> str:
 _HOLDS = ("applied", "pinned")
 
 
-async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> list[dict[str, Any]]:
+async def project(
+    pool: Any, client: Any, workspace_id: str, provider: str, *, cleared: Collection[str] = ()
+) -> list[dict[str, Any]]:
     """Write the Workspace's credential into every agent's TurnCall project.
 
     Returns per-agent state: `applied`, `pinned` (written too, but its own LLM
@@ -111,6 +114,9 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
     agents already holding this version are not written to. Does nothing while a
     disconnect is unfinished — re-applying would put the key back into agents
     already cleared.
+
+    `cleared`: Telnyx numbers the caller has checked on this account already
+    (held, or acknowledged); see `_telnyx_write_allowed`.
     """
     integration = await integration_store.get(pool, workspace_id, provider)
     if integration is None or integration["disconnecting"]:
@@ -120,7 +126,8 @@ async def project(pool: Any, client: Any, workspace_id: str, provider: str) -> l
     return [
         await _project_one(
             pool, client, workspace_id, integration, document, target,
-            write=target["agent_id"] not in holding,
+            write=target["agent_id"] not in holding, holds=target["agent_id"] in holding,
+            cleared=cleared, refused_is_failed=True,
         )
         for target in await _targets(pool, workspace_id)
     ]
@@ -146,10 +153,35 @@ async def _project_one(
     target: dict[str, Any],
     *,
     write: bool = True,
+    holds: bool | None = None,
+    cleared: Collection[str] = (),
+    refused_is_failed: bool = False,
 ) -> dict[str, Any]:
     """Write the credential into one target (unless it holds it already) and
-    log the outcome: its state, and the reason when it failed."""
+    log the outcome: its state, and the reason when it failed.
+
+    The one write every projection goes through, so a Telnyx key is checked
+    here against the numbers bound in the target (`_telnyx_write_allowed`):
+    NumbersNotOnAccount or NumberLookupFailed, and nothing is written or
+    logged. With `refused_is_failed` the refusal is logged as the target's
+    failure instead, for a projection over many targets. `holds`: whether the
+    log says the target holds this version (None: not known, and looked up
+    only if needed)."""
     provider = integration["provider"]
+    if write and provider == TELNYX:
+        try:
+            await _telnyx_write_allowed(
+                pool, workspace_id, integration, document, target, holds=holds, cleared=cleared
+            )
+        except (NumbersNotOnAccount, NumberLookupFailed) as exc:
+            if not refused_is_failed:
+                raise
+            error = _refused_write(exc)
+            await integration_store.record_projection(
+                pool, workspace_id, provider, target["agent_id"],
+                state="failed", version=integration["version"], error=error,
+            )
+            return {"agent_id": target["agent_id"], "state": "failed", "error": error}
     error = await _write(client, provider, document, target) if write else None
     state = _state(target, provider, error)
     await integration_store.record_projection(
@@ -165,8 +197,7 @@ async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
     targets = list(await registry.list_backends(pool, workspace_id))
     webhook = await phones.workspace_webhook_project(pool, workspace_id)
     if webhook:
-        target = phones.as_projection_target(workspace_id, webhook)
-        targets.append({**target, "project_id": webhook["project_id"]})
+        targets.append(phones.as_projection_target(workspace_id, webhook))
     return targets
 
 
@@ -205,15 +236,32 @@ async def telnyx_write_targets(
         for t in await _targets(pool, workspace_id)
         if t["agent_id"] not in holding and t.get("project_id")
     }
-    numbers = sorted({
+    return TelnyxWriteTargets(projects, await _bound_telnyx(pool, workspace_id, projects))
+
+
+async def _bound_telnyx(pool: Any, workspace_id: str, projects: set[str]) -> list[str]:
+    """The Workspace's Telnyx numbers bound in `projects`, E.164, sorted. An
+    unassigned row is in no project."""
+    if not projects:
+        return []
+    return sorted({
         n["e164"]
         for n in await phones.list_numbers(pool, workspace_id)
         if n.get("carrier") == TELNYX and n.get("project_id") in projects
-    }) if projects else []
-    return TelnyxWriteTargets(projects, numbers)
+    })
 
 
 _NUMBERS = "the workspace's Telnyx numbers"
+_NAMED = 10  # numbers a refusal's sentence names; its `numbers` carries them all
+
+
+def name_numbers(numbers: list[str]) -> str:
+    """Numbers as a refusal's sentence names them: at most ten, then "and N
+    more"."""
+    named = ", ".join(numbers[:_NAMED])
+    if len(numbers) > _NAMED:
+        named += f" and {len(numbers) - _NAMED} more"
+    return named
 
 
 async def _missing_on_account(api_key: str, numbers: list[str], *, new_key: bool) -> list[str]:
@@ -247,6 +295,55 @@ async def check_telnyx_numbers(
     return missing
 
 
+async def _telnyx_write_allowed(
+    pool: Any,
+    workspace_id: str,
+    integration: dict[str, Any],
+    document: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    holds: bool | None,
+    cleared: Collection[str],
+) -> None:
+    """Refuse writing this Telnyx key into `target` while numbers bound in its
+    project aren't on the key's account (#109 review): they would stop
+    answering calls. Raises NumbersNotOnAccount with them, or
+    NumberLookupFailed.
+
+    Nothing is looked up when no number is bound there (a new project, or an
+    agent's with none), for numbers in `cleared` (checked by the caller,
+    connect or apply, which take acknowledgements), or when the log says the
+    target holds this version already: rewriting it moves no number to another
+    account, and its numbers were checked (or acknowledged) when it was
+    written."""
+    project_id = target.get("project_id")
+    if not project_id:
+        return
+    numbers = [
+        e164 for e164 in await _bound_telnyx(pool, workspace_id, {project_id})
+        if e164 not in cleared
+    ]
+    if not numbers:
+        return
+    if holds is None:
+        holds = target["agent_id"] in await _holding(pool, workspace_id, integration)
+    if holds:
+        return
+    missing = await _missing_on_account(document["api_key"], numbers, new_key=False)
+    if missing:
+        raise NumbersNotOnAccount(missing)
+
+
+def _refused_write(exc: Exception) -> str:
+    """A refused Telnyx write, as the projection log keeps it."""
+    if isinstance(exc, NumbersNotOnAccount):
+        return (
+            f"not written: {name_numbers(exc.numbers)} bound here, not on this Telnyx "
+            "account; re-apply and acknowledge them to go ahead"
+        )
+    return f"not written: {exc}"
+
+
 async def _write(client: Any, provider: str, document: dict[str, Any], backend: dict[str, Any]) -> str | None:
     """One agent's write; the reason it failed, or None."""
     try:
@@ -271,7 +368,9 @@ async def project_into_new_target(
     its first webhook number is bound (#65).
 
     Best-effort: the agent exists either way, and a failure is recorded so the
-    card shows it and the next apply retries it.
+    card shows it and the next apply retries it. A Telnyx key the numbers
+    bound in the target's project aren't on is recorded failed too (a new
+    project has none bound).
     """
     for integration in await integration_store.list_for_workspace(pool, workspace_id):
         if integration["disconnecting"]:
@@ -279,7 +378,18 @@ async def project_into_new_target(
         document = await integration_store.get_document(
             pool, workspace_id, integration["provider"]
         )
-        await _project_one(pool, client, workspace_id, integration, document, target)
+        await _project_one(
+            pool, client, workspace_id, integration, document, target,
+            holds=False, refused_is_failed=True,
+        )
+
+
+class Ensured(NamedTuple):
+    """What `ensure_in_target` did: whether it wrote the credential, and why
+    the target doesn't hold it (None when it does)."""
+
+    written: bool
+    error: str | None
 
 
 async def ensure_in_target(
@@ -290,22 +400,34 @@ async def ensure_in_target(
     target: dict[str, Any],
     *,
     rewrite: bool = False,
-) -> str | None:
+    document: dict[str, Any] | None = None,
+) -> Ensured:
     """Make sure one target holds the Workspace's current credential for
-    `integration` (a connected one, as `integration_store.get` read it). None
-    when it holds it; else why not.
+    `integration` (a connected one, as `integration_store.get` read it), and
+    say whether it was written and, when the target doesn't hold it, why not.
+    `document` is the credential when the caller has read it.
 
     For a call that must run on the Workspace's account and never fall back
     to the platform's key, which TurnCall would use if the copy were missing:
     searching, buying and releasing Telnyx numbers (#108). By default the log
     is trusted, as `project()` trusts it. `rewrite` writes it regardless: the
     log only says the last write succeeded, not that TurnCall still holds it,
-    and buying or releasing on the wrong account cannot be undone (#109)."""
-    if not rewrite and target["agent_id"] in await _holding(pool, workspace_id, integration):
-        return None
-    document = await integration_store.get_document(pool, workspace_id, integration["provider"])
-    outcome = await _project_one(pool, client, workspace_id, integration, document, target)
-    return outcome["error"]
+    and buying or releasing on the wrong account cannot be undone (#109).
+
+    A Telnyx key is checked against the numbers bound in the target first, with
+    no acknowledgement: NumbersNotOnAccount or NumberLookupFailed propagate,
+    and nothing is written (#109 review)."""
+    holds = target["agent_id"] in await _holding(pool, workspace_id, integration)
+    if holds and not rewrite:
+        return Ensured(False, None)
+    if document is None:
+        document = await integration_store.get_document(
+            pool, workspace_id, integration["provider"]
+        )
+    outcome = await _project_one(
+        pool, client, workspace_id, integration, document, target, holds=holds
+    )
+    return Ensured(outcome["error"] is None, outcome["error"])
 
 
 async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -> dict[str, Any]:

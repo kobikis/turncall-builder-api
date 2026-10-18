@@ -250,9 +250,14 @@ accounts: its [[Workspace Twilio account]] (sent as the pair) or its Telnyx
 [[Integration]] (the `telnyx` credential in its webhook project: a search
 writes it only while the projection log says it is missing; a buy or release
 writes it every time, since a stale copy would put the change on the TurnCall
-server's own account); never the TurnCall server's own.
+server's own account); never the TurnCall server's own. Writing it checks the
+Telnyx numbers bound in that project first, as connecting the Integration
+does, but with no acknowledgement: numbers its account doesn't hold refuse
+the search, buy or release with `numbers_not_on_account` (409), resolved on
+Integrations by re-applying the Telnyx card and acknowledging them there.
 All three are TurnCall calls made with the Workspace's webhook project key,
-so the first search creates that project. A bought number lands in the
+so the first search creates that project; a search that creates it, or
+writes the Telnyx key, is audited. A bought number lands in the
 [[Number registry]] unassigned (on Twilio with `twilio_source = 'workspace'`)
 and is bound through the ordinary edit; a Telnyx order that has not finished
 is **pending** (`purchase_status = 'pending'`, with its `telnyx_order_id` and
@@ -268,7 +273,8 @@ on the Workspace's account has its row corrected to it (`twilio_source =
 'workspace'`, Twilio's SID; audited); one the account doesn't hold isn't
 releasable, since it may be on TurnCall's platform account, which only the
 TurnCall operator can release on. A Telnyx number is looked up the same way
-on the Workspace's Telnyx [[Integration]]; with no Integration it was bound on
+on the Workspace's Telnyx [[Integration]]: not there, it may be on TurnCall's
+platform account or already released. With no Integration it was bound on
 TurnCall's platform account, so it isn't releasable either, and connecting one
 wouldn't change that. Each refusal names its `reason` (`routed`, `pending`,
 `asterisk`, `not_connected`, `not_on_account`), with one status per reason
@@ -279,8 +285,9 @@ number not in E.164) is a 422 with only `detail`, and auth errors and 404s
 carry none. The release then runs on that account, never the
 platform's. When TurnCall says the carrier did it but it
 could not record that, the registry follows the carrier anyway; when nobody
-can say (TurnCall failed partway, or did not answer), the change **may have
-happened**: nothing changes in the registry, the audit entry is partial, and
+can say (TurnCall failed partway, did not answer, answered that the carrier
+failed or timed out once asked, or answered 2xx with a body that can't be
+read), the change **may have happened**: nothing changes in the registry, the audit entry is partial, and
 the carrier account is the one to check. **Removing** a number (`DELETE`) is not
 releasing: it unbinds and drops the registry row, and the number stays on the
 carrier account, billed.
@@ -550,7 +557,11 @@ unless the request repeats every one of them in `acknowledge_numbers`; then it
 goes ahead and the audit entry records them. Re-applying checks the same way,
 but only the projects it would write into (those not holding the current key),
 and adopting can't refuse: it never moves a Telnyx key, since an agent's own
-key is only its LLM's. Telnyx
+key is only its LLM's. The check also sits in the one write every projection
+makes, so no path (a new project, a search, buy or release, or a number bound
+between a connect's check and its writes) writes a Telnyx key into a project
+holding bound numbers its account doesn't hold; a project the log says holds
+the current key already is rewritten without one. Telnyx
 refusing the key, or not answering, is a 502 and nothing is saved. A 429 or
 5xx is retried only while the wait fits under 10 s and the check's deadline
 (`TELNYX_CONNECT_CHECK_DEADLINE_S`, 20 s by default; the release check's is
@@ -567,7 +578,10 @@ chosen when binding a number instead of entering a pair per number. Not an
 *number* (Twilio's own unit), so a bind sends this account's pair and the phone
 mirror marks the number `twilio_source = 'workspace'`; saving the card again
 re-sends the pair to each such number. A number may still bring its own pair (a
-second account, a subaccount). Disconnect is refused while numbers use it.
+second account, a subaccount). Disconnect is refused while numbers bound in
+TurnCall use it; an unassigned one (bought, or found on the account by a
+release check) routes nowhere and doesn't count, and with no account
+connected, releasing it is `not_connected`.
 _Avoid_: "Twilio integration" (suggests projection into agents).
 
 **Workspace Pipedream project**:

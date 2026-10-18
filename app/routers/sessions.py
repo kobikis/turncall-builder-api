@@ -597,7 +597,7 @@ async def create_agent(
             pool,
             client,
             ctx.workspace_id,
-            {"agent_id": agent_id, "api_key": key, "config": config},
+            {"agent_id": agent_id, "api_key": key, "config": config, "project_id": project_id},
         )
     except Exception:  # noqa: BLE001
         logger.exception("projecting integrations into %s failed", agent_id)

@@ -73,6 +73,9 @@ AUDITED_READS = {
     ("GET", "/integrations/callback"),
     # A number found on the Workspace's Twilio account has its row corrected.
     ("GET", "/phone-numbers/{phone_id}/release-check"),
+    # The first search creates the Workspace's webhook project, and a Telnyx
+    # search writes the Workspace's key into it while the log says it's missing.
+    ("GET", "/phone-numbers/available"),
 }
 
 

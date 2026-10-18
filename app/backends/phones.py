@@ -100,11 +100,13 @@ def as_projection_target(workspace_id: str, project: dict[str, str]) -> dict[str
     """The Workspace's webhook project in the shape Integrations project into.
 
     Its id is not an agent's, so the Integrations card (which lists projections
-    of live agents only) never shows it as one."""
+    of live agents only) never shows it as one. `project_id` lets a Telnyx
+    write check the numbers bound there first."""
     return {
         "agent_id": f"webhook-numbers:{workspace_id}",
         "api_key": project["api_key"],
         "config": None,
+        "project_id": project["project_id"],
     }
 
 
@@ -125,8 +127,9 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
 
     The Twilio pair is written when given and otherwise kept: an edit that does
     not re-enter the token must not erase it. A bought number's purchase state
-    (`purchase_status`, `telnyx_order_id`) is written as given: absent is null,
-    which is what a bind leaves."""
+    (`purchase_status`, `telnyx_order_id`) is written when its key is present,
+    None included (a bind clears it so), and kept when absent: a write that
+    doesn't know about it must not end a pending purchase."""
     await pool.execute(
         """INSERT INTO phone_numbers
              (id, e164, sid, routing_type, agent_id, project_id, server_url,
@@ -142,7 +145,9 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
              twilio_account_sid=COALESCE($11, phone_numbers.twilio_account_sid),
              twilio_auth_token_encrypted=COALESCE($12, phone_numbers.twilio_auth_token_encrypted),
              twilio_source=COALESCE($13, phone_numbers.twilio_source),
-             label=$14, carrier=$15, purchase_status=$16, telnyx_order_id=$17""",
+             label=$14, carrier=$15,
+             purchase_status=CASE WHEN $18 THEN $16 ELSE phone_numbers.purchase_status END,
+             telnyx_order_id=CASE WHEN $19 THEN $17 ELSE phone_numbers.telnyx_order_id END""",
         number["id"],
         number["e164"],
         number["sid"],
@@ -160,6 +165,8 @@ async def record_number(pool: asyncpg.Pool, number: dict[str, Any]) -> None:
         number.get("carrier", "twilio"),
         number.get("purchase_status"),
         number.get("telnyx_order_id"),
+        "purchase_status" in number,
+        "telnyx_order_id" in number,
     )
 
 
