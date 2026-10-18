@@ -69,7 +69,11 @@ NOT_AUDITED: dict[tuple[str, str], str] = {
 }
 
 # Not mutating by method, but where a change happens: audited all the same.
-AUDITED_READS = {("GET", "/integrations/callback")}
+AUDITED_READS = {
+    ("GET", "/integrations/callback"),
+    # A number found on the Workspace's Twilio account has its row corrected.
+    ("GET", "/phone-numbers/{phone_id}/release-check"),
+}
 
 
 def _routes() -> list[tuple[str, str, object]]:

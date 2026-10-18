@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .. import compliance, integration_store, provider_integrations, runtime, twilio_store
+from .. import (
+    compliance, db, integration_store, provider_integrations, runtime, twilio_api, twilio_store,
+)
 from .._helpers import _turncall_http_error
-from ..audit import Audit, Change, diff, masked
+from ..audit import Audit, AuditTrail, Change, diff, masked
 from ..integration_store import BOX, IntegrationError
 from ..provider_integrations import TELNYX
 from ..backends import generator, phones, registry
@@ -606,6 +609,136 @@ def _bought_number(
     }
 
 
+# --- whether a number can be released (#111) ---------------------------------
+#
+# A Twilio row with no stored pair (`twilio_credentials: "platform"`) says only
+# that the builder holds no account for it: a number entered on the form
+# without one may be on the Workspace's Twilio account, or on TurnCall's own.
+# Releasing it on the Workspace's pair used to be the guess, which TurnCall
+# refused (422) for a number that account doesn't hold. So the account is
+# asked first, by exact E.164, and a row found there is corrected to say so.
+
+
+@dataclass
+class _ReleaseCheck:
+    releasable: bool
+    detail: str | None
+    twilio_credentials: str
+    # What a release sends: the Twilio pair it runs on (None on Telnyx), and the
+    # row as it stands after any correction.
+    twilio: tuple[str, str] | None
+    number: dict[str, Any]
+    corrected: bool = False
+
+
+def _account_whose(credentials: str, e164: str) -> str:
+    """The account a Twilio number is looked up on, as a sentence names it."""
+    if credentials == "number":
+        return f"the Twilio account {e164} was added with"
+    return "the workspace's Twilio account"
+
+
+async def _find_on_twilio(
+    pair: tuple[str, str], e164: str, credentials: str
+) -> dict[str, Any] | None:
+    """The number on this Twilio account, or None. Twilio refusing the pair,
+    or not answering, is a 502: nothing can be said about the number."""
+    whose = _account_whose(credentials, e164)
+    try:
+        return await twilio_api.find_number(pair[0], pair[1], e164)
+    except twilio_api.TwilioRejected as exc:
+        fix = (
+            "check the Twilio card on Integrations" if credentials != "number"
+            else "enter that account again by editing the number"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Twilio refused {whose} ({pair[0]}) when looking up {e164}: {fix}.",
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Twilio didn't answer when looking up {e164} on {whose} — "
+            "retry in a moment.",
+        ) from exc
+
+
+async def _release_check(
+    pool: Any, existing: dict[str, Any], audit: AuditTrail, ctx: AuthContext
+) -> _ReleaseCheck:
+    """Whether `existing` can be released, and on which account, with a
+    sentence when it can't. Shared by the check route and the release, so
+    the console's answer is the release's.
+
+    A Twilio number is looked up on its stored account, else the Workspace's.
+    Found on the Workspace's with no stored pair, its row is corrected to the
+    Workspace's account (and Twilio's SID), and the audit log says so. It is
+    unassigned, so TurnCall holds nothing to update."""
+    e164 = existing["e164"]
+    credentials = _public(existing)["twilio_credentials"]
+
+    def refused(detail: str) -> _ReleaseCheck:
+        return _ReleaseCheck(False, detail, credentials, None, existing)
+
+    if existing["routing_type"] != "none":
+        return refused(f"{e164} is still routed. Set it to unassigned before releasing it.")
+    if existing.get("purchase_status") == "pending":
+        return refused(
+            f"Telnyx hasn't finished the order for {e164}{_order(existing)} yet; "
+            "it can be released once the order lands."
+        )
+    carrier = existing.get("carrier") or TWILIO
+    if carrier not in PURCHASE_CARRIERS:
+        return refused(
+            f"{e164} is on {carrier}; only Twilio and Telnyx numbers can be released."
+        )
+    if carrier == TELNYX:
+        # Which Telnyx account the number is on is #110's question.
+        if await _telnyx_integration(pool, ctx.workspace_id) is None:
+            return refused(str(_not_connected(TELNYX).detail))
+        return _ReleaseCheck(True, None, credentials, None, existing)
+
+    try:
+        stored = await phones.twilio_account(pool, existing["id"])
+        workspace = None if stored else await twilio_store.credentials(pool, ctx.workspace_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    pair = stored or workspace
+    if pair is None:
+        return refused(str(_not_connected(TWILIO).detail))
+    found = await _find_on_twilio(pair, e164, credentials if stored else "workspace")
+    if found is None:
+        if stored is None:
+            return refused(
+                f"{e164} isn't on the workspace's Twilio account ({pair[0]}). It may be "
+                "on TurnCall's platform account, and only the TurnCall operator can "
+                "release it there."
+            )
+        return refused(
+            f"{e164} isn't on {_account_whose(credentials, e164)} ({pair[0]}), so there "
+            "is nothing to release there: it may already have been released or moved "
+            "on Twilio."
+        )
+    if stored is not None:
+        return _ReleaseCheck(True, None, credentials, stored, existing)
+
+    # Found on the Workspace's account: the row says so from now on.
+    corrected = {
+        **{k: v for k, v in existing.items() if k != "twilio_credentials"},
+        "workspace_id": ctx.workspace_id,
+        "sid": found["sid"] or existing["sid"],
+        **_seal(pair, "workspace"),
+    }
+    async with db.transaction(pool) as conn:
+        await phones.record_number(conn, corrected)
+        fields = _entry(existing, corrected)
+        await audit.record(
+            ctx, "phone_number", fields.pop("resource_id"), "updated", db=conn, **fields
+        )
+    number = _public(corrected)
+    return _ReleaseCheck(True, None, "workspace", pair, number, corrected=True)
+
+
 @router.get("/phone-numbers/available")
 async def search_available_numbers(
     carrier: str | None = None,
@@ -723,65 +856,72 @@ async def purchase_phone_number(
     }
 
 
+@router.get("/phone-numbers/{phone_id}/release-check")
+async def check_release(
+    phone_id: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
+    """Whether the number can be released, before the console asks for the
+    confirmation: `releasable`, and `detail`, a sentence saying why not.
+    The release runs the same check. A Twilio number is looked up on its
+    account; one with no stored pair found on the Workspace's account has its
+    row corrected to say so (audited), and `twilio_credentials` is then
+    `"workspace"`."""
+    pool = runtime.get_pool()
+    existing = await phones.get_number(pool, phone_id, ctx.workspace_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="phone number not found")
+    check = await _release_check(pool, existing, audit, ctx)
+    if not check.corrected:
+        audit.unchanged()  # only looked
+    return {
+        "success": True,
+        "data": {
+            "releasable": check.releasable,
+            "detail": check.detail,
+            "twilio_credentials": check.twilio_credentials,
+        },
+    }
+
+
 @router.post("/phone-numbers/{phone_id}/release")
 async def release_phone_number(
     phone_id: str, body: PhoneRelease, audit: Audit, ctx: AuthContext = Depends(require_admin)
 ) -> dict[str, Any]:
     """Give an unassigned number back to its carrier, and drop it from the
     Number registry. **Irreversible**: the carrier may sell it to someone
-    else. `confirm` must repeat the number. A pending Telnyx purchase is not
-    on the account yet, so it is refused until the order lands.
+    else. `confirm` must repeat the number.
 
     Not `DELETE /phone-numbers/{id}`: that only removes the registry row (and
     unbinds a routed number), leaving the number on the carrier account, still
     billed. Release is the one that ends the number's billing.
 
-    On Twilio it runs on the number's own stored account (the Workspace's, for
-    a number bought or bound with it), else the Workspace's; on Telnyx, the
-    Workspace's Telnyx Integration. Never the platform's: with neither, it is
-    refused."""
+    It runs the release check first (`GET .../release-check`) and refuses, 409
+    with its sentence, a number that isn't releasable: routed, a pending Telnyx
+    purchase, Asterisk, no account connected, or a Twilio number its account
+    doesn't hold. On Twilio it runs on the number's own stored account (the
+    Workspace's, for a number bought or bound with it, or found there by the
+    check), on Telnyx the Workspace's Telnyx Integration. Never the
+    platform's."""
     pool = runtime.get_pool()
     workspace_id = ctx.workspace_id
     existing = await phones.get_number(pool, phone_id, workspace_id)
     if not existing:
         raise HTTPException(status_code=404, detail="phone number not found")
     e164 = existing["e164"]
-    if existing["routing_type"] != "none":
-        raise HTTPException(
-            status_code=409,
-            detail=f"{e164} is still routed. Set it to unassigned before releasing it.",
-        )
-    if existing.get("purchase_status") == "pending":
-        raise HTTPException(
-            status_code=409,
-            detail=f"Telnyx hasn't finished the order for {e164}{_order(existing)} yet; "
-            "it can be released once the order lands.",
-        )
     if (body.confirm or "").strip() != e164:
         raise HTTPException(
             status_code=422,
             detail=f"Releasing is irreversible: confirm by typing the number being "
             f"released ({e164}).",
         )
+    check = await _release_check(pool, existing, audit, ctx)
+    if not check.releasable:
+        raise HTTPException(status_code=409, detail=check.detail)
     carrier = existing.get("carrier") or TWILIO
-    if carrier not in PURCHASE_CARRIERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"{e164} is on {carrier}; only Twilio and Telnyx numbers can be released.",
-        )
-    twilio = None
-    if carrier == TWILIO:
-        try:
-            twilio = await phones.twilio_account(pool, phone_id)
-        except IntegrationError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        # No stored pair: the number was recorded without its account. The
-        # Workspace's is the only other one it can be released on; TurnCall
-        # refuses (422) a number that account does not hold.
-        twilio = twilio or await _workspace_twilio(pool, workspace_id)
+    twilio = check.twilio
     wp = await _carrier_project(pool, workspace_id, carrier, "released", rewrite=True)
 
-    change = _begin(audit, ctx, "released", existing, None)
+    change = _begin(audit, ctx, "released", check.number, None)
     warning = None
     try:
         released = await runtime.get_client().release_phone_number(

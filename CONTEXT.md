@@ -233,7 +233,14 @@ number the Workspace has but routes nowhere yet, entered on the form or
 bought. `sid` is never null: a number without one (an Asterisk number, a
 Telnyx number bound by E.164, a pending Telnyx purchase) holds `""`. Source of
 truth for the Console's Phone Numbers list, so listing is one local query, not
-an N-project fan-out.
+an N-project fan-out. A row's `twilio_credentials` says which Twilio account the
+builder holds for it: `"workspace"` (the [[Workspace Twilio account]]),
+`"number"` (a pair entered for it), or `"platform"`: none. `"platform"` only
+guarantees the builder holds no account for it (bound, TurnCall runs it on its
+own pair); it does **not** say the number is on TurnCall's platform account. A
+number entered on the form without a pair may be on the Workspace's own
+account, and stays `"platform"` until a release check finds it there (every
+Telnyx row reads `"platform"` too).
 _Avoid_: phone book, directory
 
 **Buy a number** / **Release a number**:
@@ -253,8 +260,15 @@ no SID): not on the account yet, so a bind is refused with that sentence and
 a release before TurnCall is asked, until Telnyx puts it there. A bind that
 succeeds ends it. Release is only for an unassigned
 number, repeats the number as `confirm`, and is irreversible: the carrier may
-sell it to someone else. On Twilio it runs on the number's own stored
-account, else the Workspace's. When TurnCall says the carrier did it but it
+sell it to someone else. A **release check** runs first (the console asks for
+it before offering the confirmation, and the release repeats it): a Twilio
+number is looked up on its stored account, else the Workspace's, by exact
+E.164 (Twilio's own filter matches partially). One with no stored pair found
+on the Workspace's account has its row corrected to it (`twilio_source =
+'workspace'`, Twilio's SID; audited); one the account doesn't hold isn't
+releasable, since it may be on TurnCall's platform account, which only the
+TurnCall operator can release on. The release then runs on that account,
+never the platform's. When TurnCall says the carrier did it but it
 could not record that, the registry follows the carrier anyway; when nobody
 can say (TurnCall failed partway, or did not answer), the change **may have
 happened**: nothing changes in the registry, the audit entry is partial, and
