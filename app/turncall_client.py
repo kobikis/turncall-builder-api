@@ -323,6 +323,46 @@ class TurnCallClient:
             "DELETE", f"/v1/phone-numbers/{phone_id}", api_key=api_key, extract="none"
         )
 
+    # Search, buy and release (turncall ADR-0025, #344). All three need an
+    # admin key. Twilio's account is the pair given (headers on the search,
+    # which keep the token out of the URL; the body on buy and release);
+    # Telnyx's is the key's project's `telnyx` credential.
+
+    async def search_available_numbers(
+        self,
+        params: dict[str, Any],
+        api_key: str,
+        twilio: tuple[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Numbers the carrier account can buy. A None filter is left out."""
+        headers = (
+            {"X-Twilio-Account-Sid": twilio[0], "X-Twilio-Auth-Token": twilio[1]}
+            if twilio
+            else {}
+        )
+        return await self._request(
+            "GET", "/v1/phone-numbers/available", api_key=api_key, headers=headers,
+            params={k: v for k, v in params.items() if v is not None},
+        )
+
+    async def purchase_phone_number(
+        self, payload: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Buy a number onto the carrier account. A Telnyx order is waited on
+        for a few seconds and may answer `status: "pending"`."""
+        return await self._request(
+            "POST", "/v1/phone-numbers/purchase", api_key=api_key, json=payload, timeout=60
+        )
+
+    async def release_phone_number(
+        self, payload: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Give a number back to its carrier. Irreversible; `confirm` repeats
+        the number, and TurnCall refuses one it still binds (409)."""
+        return await self._request(
+            "POST", "/v1/phone-numbers/release", api_key=api_key, json=payload, timeout=60
+        )
+
     # ------------------------------------------------------------ calls
 
     async def list_calls(

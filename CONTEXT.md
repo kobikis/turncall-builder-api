@@ -227,10 +227,33 @@ _Avoid_: DID, line, phone
 **Number registry**:
 The builder's `phone_numbers` table mirroring every Number binding it made
 (`e164`, `sid`, `carrier`, `agent_id`, `project_id`, `sms_enabled`; rows from
-before carriers read as `twilio`). Source of truth for the
-Console's Phone Numbers list, so listing is one local query, not an N-project
-fan-out.
+before carriers read as `twilio`), and every number it holds unbound: an
+**unassigned** row (`routing_type = 'none'`, no `project_id`, a local id) is a
+number the Workspace has but routes nowhere yet, entered on the form or
+bought. `sid` is never null: a number without one (an Asterisk number, a
+Telnyx number bound by E.164, a pending Telnyx purchase) holds `""`. Source of
+truth for the Console's Phone Numbers list, so listing is one local query, not
+an N-project fan-out.
 _Avoid_: phone book, directory
+
+**Buy a number** / **Release a number**:
+Getting a new number onto the Workspace's carrier account, and giving one
+back (turncall ADR-0025). Admin-only, and only on the Workspace's own
+accounts: its [[Workspace Twilio account]] (sent as the pair) or its Telnyx
+[[Integration]] (the `telnyx` credential in its webhook project, rewritten
+first if that copy is missing or stale); never the TurnCall server's own.
+Both are TurnCall calls made with the Workspace's webhook project key. A
+bought number lands in the [[Number registry]] unassigned (on Twilio with
+`twilio_source = 'workspace'`) and is bound through the ordinary edit; a
+Telnyx order that has not finished is **pending**, with no SID, and binds
+once Telnyx has put it on the account. Release is only for an unassigned
+number, repeats the number as `confirm`, and is irreversible: the carrier may
+sell it to someone else. On Twilio it runs on the number's own stored
+account, else the Workspace's. **Removing** a number (`DELETE`) is not
+releasing: it unbinds and drops the registry row, and the number stays on the
+carrier account, billed.
+_Avoid_: "delete" for release, "provision", "order" (Telnyx's word for the
+purchase itself)
 
 **Do-not-call list**:
 The numbers an Agent never calls: TurnCall's suppression list for the Agent's

@@ -1,7 +1,9 @@
-"""Phone-number binding endpoints + routing resolution."""
+"""Phone-number binding endpoints + routing resolution, and buying and
+releasing numbers on the Workspace's carrier accounts (#108)."""
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Literal
 
@@ -9,12 +11,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .. import compliance, provider_integrations, runtime, twilio_store
+from .. import compliance, integration_store, provider_integrations, runtime, twilio_store
 from .._helpers import _turncall_http_error
 from ..audit import Audit, Change, diff, masked
 from ..integration_store import BOX, IntegrationError
 from ..backends import generator, phones, registry
-from ..deps import AuthContext, require_editor, require_member
+from ..deps import AuthContext, require_admin, require_editor, require_member
 
 router = APIRouter()
 
@@ -118,6 +120,23 @@ async def _key_for_number(pool: Any, number: dict[str, Any], workspace_id: str) 
     return wp["api_key"]
 
 
+async def _workspace_project(pool: Any, workspace_id: str) -> dict[str, str]:
+    """The Workspace's webhook project, created on first use with the
+    Workspace's keys and compliance settings in it."""
+    client = runtime.get_client()
+    wp, created = await phones.ensure_workspace_webhook_project(pool, client, workspace_id)
+    if created:
+        # Its calls run on the Workspace's keys, like any agent's (#65), and
+        # under its compliance settings (#103).
+        await provider_integrations.project_into_new_target(
+            pool, client, workspace_id, phones.as_projection_target(workspace_id, wp)
+        )
+        await compliance.project_into_new_target(
+            pool, client, workspace_id, compliance.webhook_target(workspace_id, wp)
+        )
+    return wp
+
+
 async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dict[str, Any]:
     """Resolve a routing choice to its TurnCall fields + owning project/key.
 
@@ -150,17 +169,7 @@ async def _resolve_routing(pool: Any, body: PhoneBind, workspace_id: str) -> dic
     if body.routing_type == "webhook":
         if not body.server_url:
             raise HTTPException(status_code=400, detail="server_url required for webhook routing")
-        client = runtime.get_client()
-        wp, created = await phones.ensure_workspace_webhook_project(pool, client, workspace_id)
-        if created:
-            # Its calls run on the Workspace's keys, like any agent's (#65), and
-            # under its compliance settings (#103).
-            await provider_integrations.project_into_new_target(
-                pool, client, workspace_id, phones.as_projection_target(workspace_id, wp)
-            )
-            await compliance.project_into_new_target(
-                pool, client, workspace_id, compliance.webhook_target(workspace_id, wp)
-            )
+        wp = await _workspace_project(pool, workspace_id)
         return {
             "fields": {"routing_target_type": "webhook", "server_url": body.server_url},
             "project_id": wp["project_id"],
@@ -369,6 +378,334 @@ async def _bind(
     number["twilio_webhooks_configured"] = data.get("twilio_webhooks_configured")
     number["webhooks_configured"] = data.get("webhooks_configured")
     return _public(number)
+
+
+# --- search, buy and release (#108, turncall ADR-0025) -----------------------
+#
+# Admin-only: buying spends the Workspace's money and releasing is
+# irreversible. They run only on the Workspace's own carrier accounts — its
+# Twilio account (twilio_store), sent as the pair, and its Telnyx Integration,
+# projected into the TurnCall project as the `telnyx` credential — and never
+# fall through to the platform's. They are TurnCall calls made with the
+# Workspace's webhook project key, which, like every key the builder mints,
+# has TurnCall's `admin` role (TurnCallClient.create_api_key).
+#
+# Every refusal's `detail` is a sentence: the console shows it as it is. So the
+# bodies and query take plain strings and are checked here, not by a schema
+# that would answer with FastAPI's array.
+
+TELNYX = "telnyx"
+PURCHASE_CARRIERS = (TWILIO, TELNYX)
+_CARRIER_NAMES = {TWILIO: "Twilio", TELNYX: "Telnyx"}
+_E164 = re.compile(r"\+[1-9][0-9]{1,14}")
+
+
+class PhonePurchase(BaseModel):
+    carrier: str | None = None
+    e164: str | None = None
+
+
+class PhoneRelease(BaseModel):
+    # The number being released, repeated. Checked in the handler.
+    confirm: str | None = None
+
+
+def _purchase_carrier(carrier: str | None) -> str:
+    if carrier in PURCHASE_CARRIERS:
+        return carrier  # type: ignore[return-value]
+    if carrier == "asterisk":
+        raise HTTPException(
+            status_code=422,
+            detail="Asterisk numbers belong to the PBX's dialplan; "
+            "numbers are bought and released on Twilio or Telnyx only.",
+        )
+    raise HTTPException(
+        status_code=422,
+        detail="Choose a carrier to buy on: twilio or telnyx."
+        if not carrier
+        else f"{carrier} is not a carrier numbers can be bought on; choose twilio or telnyx.",
+    )
+
+
+def _not_connected(carrier: str) -> HTTPException:
+    name = _CARRIER_NAMES[carrier]
+    return HTTPException(
+        status_code=400,
+        detail=f"This workspace has no {name} account connected — connect it on Integrations",
+    )
+
+
+async def _purchase_carriers(pool: Any, workspace_id: str) -> list[str]:
+    """The carriers this Workspace can buy on: the accounts it connected."""
+    carriers = []
+    if await twilio_store.get(pool, workspace_id):
+        carriers.append(TWILIO)
+    telnyx = await integration_store.get(pool, workspace_id, TELNYX)
+    if telnyx and not telnyx["disconnecting"]:
+        carriers.append(TELNYX)
+    return carriers
+
+
+async def _workspace_twilio(pool: Any, workspace_id: str) -> tuple[str, str]:
+    try:
+        creds = await twilio_store.credentials(pool, workspace_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if creds is None:
+        raise _not_connected(TWILIO)
+    return creds
+
+
+async def _telnyx_connected(pool: Any, workspace_id: str) -> None:
+    telnyx = await integration_store.get(pool, workspace_id, TELNYX)
+    if telnyx is None or telnyx["disconnecting"]:
+        raise _not_connected(TELNYX)
+
+
+async def _carrier_project(
+    pool: Any, workspace_id: str, carrier: str, doing: str
+) -> dict[str, str]:
+    """The Workspace's webhook project, ready to act on `carrier`: on Telnyx,
+    holding the Workspace's current `telnyx` credential. Without it TurnCall
+    would use the platform's Telnyx account, so a copy that cannot be written
+    refuses the call. Call this once the account is known to be connected."""
+    wp = await _workspace_project(pool, workspace_id)
+    if carrier != TELNYX:
+        return wp
+    try:
+        error = await provider_integrations.ensure_in_target(
+            pool, runtime.get_client(), workspace_id, TELNYX,
+            phones.as_projection_target(workspace_id, wp),
+        )
+    except IntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"The workspace's Telnyx account could not be given to TurnCall, "
+            f"so nothing was {doing}: {error}",
+        )
+    return wp
+
+
+def _turncall_refused(exc: httpx.HTTPStatusError, doing: str) -> HTTPException:
+    """TurnCall's refusal with its own status and sentence (403 shared
+    account, 409 bound, 422, 502 carrier, 503 no account)."""
+    err = _turncall_http_error(exc)
+    # TurnCall refusing the builder's own key is not the console's session
+    # expiring: that is what a 401 from here would say.
+    return HTTPException(
+        status_code=502 if err.status_code == 401 else err.status_code,
+        detail=f"TurnCall refused to {doing}: {err.detail}",
+        headers=err.headers,
+    )
+
+
+@router.get("/phone-numbers/available")
+async def search_available_numbers(
+    carrier: str | None = None,
+    country: str | None = None,
+    number_type: str | None = None,
+    area_code: str | None = None,
+    contains: str | None = None,
+    limit: str | None = None,
+    ctx: AuthContext = Depends(require_admin),
+) -> dict[str, Any]:
+    """Numbers the Workspace can buy on one of its carrier accounts, and the
+    carriers it can buy on. Without `carrier`, only the carriers: nothing is
+    searched. Filters are TurnCall's, and checked there."""
+    pool = runtime.get_pool()
+    carriers = await _purchase_carriers(pool, ctx.workspace_id)
+    if carrier is None:
+        return {"success": True, "data": {"carriers": carriers, "numbers": []}}
+    carrier = _purchase_carrier(carrier)
+    twilio = None
+    if carrier == TWILIO:
+        twilio = await _workspace_twilio(pool, ctx.workspace_id)
+    else:
+        await _telnyx_connected(pool, ctx.workspace_id)
+    wp = await _carrier_project(pool, ctx.workspace_id, carrier, "searched")
+    params = {
+        "carrier": carrier, "country": country, "number_type": number_type,
+        "area_code": area_code, "contains": contains, "limit": limit,
+    }
+    try:
+        numbers = await runtime.get_client().search_available_numbers(
+            params, wp["api_key"], twilio
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _turncall_refused(exc, "search for numbers") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail="TurnCall is unreachable — retry in a moment"
+        ) from exc
+    return {"success": True, "data": {"carriers": carriers, "numbers": numbers}}
+
+
+@router.post("/phone-numbers/purchase")
+async def purchase_phone_number(
+    body: PhonePurchase, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
+    """Buy a number on the Workspace's carrier account and record it in the
+    Number registry, unassigned: bind it with `PUT /phone-numbers/{id}`. A
+    Telnyx order TurnCall could not see finish is `pending`, with no SID;
+    it binds once Telnyx has put it on the account."""
+    pool = runtime.get_pool()
+    workspace_id = ctx.workspace_id
+    carrier = _purchase_carrier(body.carrier)
+    e164 = (body.e164 or "").strip()
+    if not _E164.fullmatch(e164):
+        raise HTTPException(
+            status_code=422,
+            detail="Choose a number to buy, in E.164 form (like +13125550100).",
+        )
+    twilio = None
+    if carrier == TWILIO:
+        twilio = await _workspace_twilio(pool, workspace_id)
+    else:
+        await _telnyx_connected(pool, workspace_id)
+    wp = await _carrier_project(pool, workspace_id, carrier, "bought")
+
+    # Nothing has landed until TurnCall says the carrier sold it.
+    change = audit.begin(
+        ctx, "phone_number", e164, "purchased", landed=False, resource_name=e164,
+        after={"e164": e164, "carrier": carrier},
+    )
+    payload: dict[str, Any] = {
+        "carrier": carrier,
+        "e164_number": e164,
+        **({"twilio_account_sid": twilio[0], "twilio_auth_token": twilio[1]} if twilio else {}),
+    }
+    try:
+        bought = await runtime.get_client().purchase_phone_number(payload, wp["api_key"])
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 500:
+            # TurnCall's "the carrier sold it but I could not record it": the
+            # money is spent, so the entry is written (as partial).
+            change.landed()
+        raise _turncall_refused(exc, f"buy {e164}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"TurnCall did not answer, so {e164} may have been bought: check "
+            f"the {_CARRIER_NAMES[carrier]} account before buying it again",
+        ) from exc
+    change.landed()
+    status = bought.get("status") or "active"
+    number = {
+        "id": str(uuid.uuid4()),  # local id — no TurnCall binding yet
+        "e164": bought.get("e164_number") or e164,
+        # Not null: the column holds "" for a number without one (an Asterisk
+        # number, a Telnyx one bound by E.164), and so for a pending order.
+        "sid": bought.get("external_number_sid") or "",
+        "routing_type": "none",
+        "agent_id": None,
+        "project_id": None,
+        "server_url": None,
+        "sms_enabled": False,
+        "label": None,
+        "carrier": carrier,
+        "workspace_id": workspace_id,
+        **_seal(twilio, "workspace"),
+    }
+    try:
+        await phones.record_number(pool, number)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{_CARRIER_NAMES[carrier]} sold {number['e164']} to this workspace, but "
+            "the builder could not record it: add it on Phone Numbers to bind it",
+        ) from exc
+    await change.record(**_entry(None, number, diff(None, {"status": status})))
+    return {
+        "success": True,
+        "data": {
+            **_public(number),
+            "status": status,
+            "telnyx_order_id": bought.get("telnyx_order_id"),
+        },
+    }
+
+
+@router.post("/phone-numbers/{phone_id}/release")
+async def release_phone_number(
+    phone_id: str, body: PhoneRelease, audit: Audit, ctx: AuthContext = Depends(require_admin)
+) -> dict[str, Any]:
+    """Give an unassigned number back to its carrier, and drop it from the
+    Number registry. **Irreversible**: the carrier may sell it to someone
+    else. `confirm` must repeat the number.
+
+    Not `DELETE /phone-numbers/{id}`: that only removes the registry row (and
+    unbinds a routed number), leaving the number on the carrier account, still
+    billed. Release is the one that ends the number's billing.
+
+    On Twilio it runs on the number's own stored account (the Workspace's, for
+    a number bought or bound with it), else the Workspace's; on Telnyx, the
+    Workspace's Telnyx Integration."""
+    pool = runtime.get_pool()
+    workspace_id = ctx.workspace_id
+    existing = await phones.get_number(pool, phone_id, workspace_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="phone number not found")
+    e164 = existing["e164"]
+    if existing["routing_type"] != "none":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{e164} is still routed. Set it to unassigned before releasing it.",
+        )
+    if (body.confirm or "").strip() != e164:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Releasing is irreversible: confirm by typing the number being "
+            f"released ({e164}).",
+        )
+    carrier = existing.get("carrier") or TWILIO
+    if carrier not in PURCHASE_CARRIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{e164} is on {carrier}; only Twilio and Telnyx numbers can be released.",
+        )
+    twilio = None
+    if carrier == TWILIO:
+        try:
+            twilio = await phones.twilio_account(pool, phone_id)
+        except IntegrationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        twilio = twilio or await _workspace_twilio(pool, workspace_id)
+    else:
+        await _telnyx_connected(pool, workspace_id)
+    wp = await _carrier_project(pool, workspace_id, carrier, "released")
+
+    change = _begin(audit, ctx, "released", existing, None)
+    payload: dict[str, Any] = {
+        "carrier": carrier,
+        "e164_number": e164,
+        "confirm": e164,
+        **({"twilio_account_sid": twilio[0], "twilio_auth_token": twilio[1]} if twilio else {}),
+    }
+    try:
+        released = await runtime.get_client().release_phone_number(payload, wp["api_key"])
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 500:
+            change.landed()  # the carrier took it back; TurnCall did not record it
+        raise _turncall_refused(exc, f"release {e164}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"TurnCall did not answer, so {e164} may have been released: check "
+            f"the {_CARRIER_NAMES[carrier]} account before releasing it again",
+        ) from exc
+    change.landed()
+    await phones.delete_number(pool, phone_id)
+    await change.record()
+    return {
+        "success": True,
+        "data": {
+            "released": e164,
+            "carrier": carrier,
+            "external_number_sid": released.get("external_number_sid"),
+        },
+    }
 
 
 @router.get("/phone-numbers")
@@ -589,7 +926,10 @@ async def delete_phone_number(
     phone_id: str, audit: Audit, ctx: AuthContext = Depends(require_editor)
 ) -> dict[str, Any]:
     """Unbind: TurnCall removes the binding AND clears the Twilio number's
-    webhooks, so the number stops pointing at TurnCall entirely."""
+    webhooks, so the number stops pointing at TurnCall entirely. An
+    unassigned number is only dropped from the registry. Neither gives the
+    number back to its carrier: it stays on the account, billed, until
+    released (`POST /phone-numbers/{id}/release`)."""
     pool = runtime.get_pool()
     existing = await phones.get_number(pool, phone_id, ctx.workspace_id)
     if not existing:

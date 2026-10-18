@@ -161,6 +161,36 @@ async def project_into_new_target(
         )
 
 
+async def ensure_in_target(
+    pool: Any, client: Any, workspace_id: str, provider: str, target: dict[str, Any]
+) -> str | None:
+    """Make sure one target holds the Workspace's current credential for
+    `provider`, writing it now if its projection failed or is stale. None
+    when it holds it; else why not.
+
+    For a call that must run on the Workspace's account and never fall back
+    to the platform's key, which TurnCall would use if the copy were
+    missing: searching, buying and releasing Telnyx numbers (#108)."""
+    integration = await integration_store.get(pool, workspace_id, provider)
+    if integration is None or integration["disconnecting"]:
+        return f"this workspace has no {provider} account connected"
+    version = integration["version"]
+    if any(
+        p["agent_id"] == target["agent_id"]
+        and p["state"] in ("applied", "pinned")
+        and p["version"] == version
+        for p in await integration_store.list_projections(pool, workspace_id, provider)
+    ):
+        return None
+    document = await integration_store.get_document(pool, workspace_id, provider)
+    error = await _write(client, provider, document, target)
+    await integration_store.record_projection(
+        pool, workspace_id, provider, target["agent_id"],
+        state=_state(target, provider, error), version=version, error=error,
+    )
+    return error
+
+
 async def disconnect(pool: Any, client: Any, workspace_id: str, provider: str) -> dict[str, Any]:
     """Remove the credential from every agent, then — only then — the record.
 
