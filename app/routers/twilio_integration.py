@@ -152,9 +152,18 @@ async def _resend(pool: Any, workspace_id: str, pair: tuple[str, str]) -> list[d
 async def disconnect(audit: Audit, ctx: AuthContext = Depends(require_admin)) -> dict[str, Any]:
     """Refused while numbers are bound with it: TurnCall would keep running
     them on a pair this page no longer shows, and a rotation could no longer
-    reach them. Move those numbers to other credentials first."""
+    reach them. Move those numbers to other credentials first.
+
+    Only numbers bound in TurnCall count: an unassigned one (a bought number,
+    or one a release check found on the account) routes nowhere, so there is
+    no pair to re-send. It keeps saying "workspace", and resolves through
+    whichever account is connected when it is next used: with none, releasing
+    it is `not_connected`."""
     pool = runtime.get_pool()
-    using = await phones.on_workspace_twilio(pool, ctx.workspace_id)
+    using = [
+        n for n in await phones.on_workspace_twilio(pool, ctx.workspace_id)
+        if n["routing_type"] != "none"
+    ]
     if using:
         names = ", ".join(n["e164"] for n in using)
         raise HTTPException(

@@ -145,6 +145,24 @@ async def _run_assertions(dsn: str) -> None:
         await phones.record_number(pool, {**number, "id": "pn-3", "label": "Support line"})
         assert (await phones.get_number(pool, "pn-3", ws))["label"] == "Support line"
 
+        # A pending purchase (#108) survives a write that doesn't carry it, and
+        # a write that names it as None (a bind) clears it.
+        await phones.record_number(pool, {**number, "id": "pn-5", "e164": "+15550005555",
+                                          "carrier": "telnyx", "purchase_status": "pending",
+                                          "telnyx_order_id": "order-1"})
+        await phones.record_number(pool, {**number, "id": "pn-5", "e164": "+15550005555",
+                                          "carrier": "telnyx", "label": "kept pending"})
+        kept = await phones.get_number(pool, "pn-5", ws)
+        assert (kept["purchase_status"], kept["telnyx_order_id"], kept["label"]) == (
+            "pending", "order-1", "kept pending"
+        )
+        await phones.record_number(pool, {**number, "id": "pn-5", "e164": "+15550005555",
+                                          "carrier": "telnyx", "purchase_status": None,
+                                          "telnyx_order_id": None})
+        cleared = await phones.get_number(pool, "pn-5", ws)
+        assert (cleared["purchase_status"], cleared["telnyx_order_id"]) == (None, None)
+        await phones.delete_number(pool, "pn-5")
+
         # A Workspace's own webhook project (#65): two racing first binds make
         # one TurnCall project, not two, and only one of them says "created".
         class _Client:

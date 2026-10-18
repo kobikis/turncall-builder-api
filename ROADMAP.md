@@ -126,7 +126,10 @@ per-agent key:
 - `POST /phone-numbers` — bind: SID + E.164 + `routing_type` + sms
 - `PUT  /phone-numbers/{id}` — re-point / change routing / toggle SMS (transparent
   cross-project rebind)
-- `DELETE /phone-numbers/{id}` — unbind
+- `DELETE /phone-numbers/{id}` — unbind (leaves the number on the carrier account)
+- `GET  /phone-numbers/available`, `POST /phone-numbers/purchase`,
+  `POST /phone-numbers/{id}/release` — search, buy and release on the
+  Workspace's carrier accounts, admin-only (#108, turncall ADR-0025)
 
 **Routing type** (the Add-Number form's key choice, mirrors TurnCall's
 `routing_target_type`):

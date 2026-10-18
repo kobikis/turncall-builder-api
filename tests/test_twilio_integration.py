@@ -108,6 +108,31 @@ def test_disconnect_is_refused_while_numbers_use_it(client, mocks):
     mocks.twilio_store.delete.assert_not_called()
 
 
+def test_unassigned_numbers_dont_hold_the_disconnect(client, mocks):
+    """Only a number bound in TurnCall needs the pair re-sent: an unassigned
+    one (a bought number, or one a release check found on the account) routes
+    nowhere, and binding it later sends whatever account is connected then."""
+    mocks.phones.on_workspace_twilio.return_value = [
+        _number(id="pn-2", e164="+15550002222", routing_type="none", agent_id=None, project_id=None),
+    ]
+    r = client.delete("/integrations/twilio", headers=WS)
+    assert r.status_code == 200, r.text
+    mocks.twilio_store.delete.assert_awaited_once()
+
+
+def test_disconnect_names_only_the_bound_numbers(client, mocks):
+    mocks.phones.on_workspace_twilio.return_value = [
+        _number(),
+        _number(id="pn-2", e164="+15550002222", routing_type="none", agent_id=None, project_id=None),
+    ]
+    r = client.delete("/integrations/twilio", headers=WS)
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail.startswith("1 number(s) use this Twilio account (+15550001111)")
+    assert "+15550002222" not in detail
+    mocks.twilio_store.delete.assert_not_called()
+
+
 def test_disconnect_with_no_numbers(client, mocks):
     r = client.delete("/integrations/twilio", headers=WS)
     assert r.status_code == 200

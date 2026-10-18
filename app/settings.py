@@ -52,6 +52,10 @@ class Settings:
     # good. The deployment's setting, not a Workspace's: an admin must not be
     # able to shorten the trail that records what they did.
     audit_log_retention_days: int | None = None
+    # The overall deadline of a Telnyx numbers check (#117, #118): every
+    # request and wait it makes, across every page. See telnyx_api.
+    telnyx_connect_check_deadline_s: float = 20.0
+    telnyx_release_check_deadline_s: float = 10.0
 
 
 def parse_audit_retention(raw: str | None) -> int | None:
@@ -70,6 +74,22 @@ def parse_audit_retention(raw: str | None) -> int | None:
             f"AUDIT_LOG_RETENTION_DAYS must be a whole number of days from 1 to 36500, got {raw!r}"
         )
     return days
+
+
+def parse_deadline(name: str, raw: str | None, default: float) -> float:
+    """A check's deadline in seconds, from 1 to 600; unset or empty is
+    `default`. Anything else refuses to start, rather than a check that gives
+    up at once or never does."""
+    raw = (raw or "").strip()
+    if not raw:
+        return default
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = 0.0
+    if not 1 <= seconds <= 600:
+        raise ValueError(f"{name} must be a number of seconds from 1 to 600, got {raw!r}")
+    return seconds
 
 
 @lru_cache(maxsize=1)
@@ -109,5 +129,15 @@ def load_settings() -> Settings:
         ),
         audit_log_retention_days=parse_audit_retention(
             os.environ.get("AUDIT_LOG_RETENTION_DAYS")
+        ),
+        telnyx_connect_check_deadline_s=parse_deadline(
+            "TELNYX_CONNECT_CHECK_DEADLINE_S",
+            os.environ.get("TELNYX_CONNECT_CHECK_DEADLINE_S"),
+            Settings.telnyx_connect_check_deadline_s,
+        ),
+        telnyx_release_check_deadline_s=parse_deadline(
+            "TELNYX_RELEASE_CHECK_DEADLINE_S",
+            os.environ.get("TELNYX_RELEASE_CHECK_DEADLINE_S"),
+            Settings.telnyx_release_check_deadline_s,
         ),
     )

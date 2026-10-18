@@ -7,11 +7,14 @@ SQL is covered by test_integration_store_db.py.
 
 from __future__ import annotations
 
+import base64
+
+import httpx
 import pytest
 
-from app import provider_catalog
+from app import provider_catalog, telnyx_api
 from app.routers.auth import COOKIE_NAME as COOKIE
-from tests.conftest import TEST_WORKSPACE_ID, backend_row
+from tests.conftest import TEST_WORKSPACE_ID, audit_entries, backend_row
 
 WS = {"X-Workspace-Id": TEST_WORKSPACE_ID}
 KEY = "dg-secret-key-1234"
@@ -178,6 +181,22 @@ def test_partial_failure_is_recorded_and_the_retry_finishes_it(client, engine, p
     r = client.post("/integrations/providers/deepgram/apply", headers=WS)
     assert r.status_code == 200
     assert [c.args[2] for c in engine.client.put_credential.await_args_list] == ["tc_a2"]
+
+
+def test_a_pinned_agent_holding_the_current_version_is_not_written_again(client, engine):
+    """`pinned` holds the credential as `applied` does (its own LLM key only
+    wins for the model), so re-applying skips it like any agent holding it."""
+    _two_agents(engine, config={"name": "P", "llm": {"provider": "openai", "api_key": "sk-own"}})
+    engine.integration_store.get.return_value = _integration("openai")
+    engine.integration_store.list_projections.return_value = [
+        {"agent_id": "a1", "state": "applied", "version": V1},
+        {"agent_id": "a2", "state": "pinned", "version": V1},
+    ]
+    r = client.post("/integrations/providers/openai/apply", headers=WS)
+    assert r.status_code == 200
+    engine.client.put_credential.assert_not_called()
+    states = {a["agent_id"]: a["state"] for a in r.json()["data"]["agents"]}
+    assert states == {"a1": "applied", "a2": "pinned"}
 
 
 def test_rerunning_a_complete_projection_writes_nothing(client, engine):
@@ -435,3 +454,374 @@ def test_disconnect_also_removes_it_from_the_workspace_webhook_project(client, e
     assert r.json()["data"]["complete"] is True
     keys = [c.args[1] for c in engine.client.delete_credential.await_args_list]
     assert keys == ["tc_a1", "tc_a2", "tc_wp_ws"]
+
+
+# --- Telnyx numbers on the account being connected (#114) -----------------------
+
+TELNYX_KEY = "KEYtelnyx-new-5678"
+PUBLIC_KEY = base64.b64encode(b"k" * 32).decode()
+TELNYX_BODY = {"api_key": TELNYX_KEY, "public_key": PUBLIC_KEY}
+N1, N2, N3 = "+13125550100", "+13125550101", "+13125550102"
+TELNYX_ENGINE = {
+    **ENGINE,
+    "accounts": {
+        **ENGINE["accounts"],
+        "telnyx": {"serves": {}, "platform_key": True, "project_credential": True},
+    },
+}
+
+
+def _number(e164, project_id="p1", carrier="telnyx"):
+    return {"id": e164, "e164": e164, "carrier": carrier, "project_id": project_id}
+
+
+@pytest.fixture
+def telnyx(engine, probe, monkeypatch):
+    """A Workspace with one agent (project p1) and Telnyx numbers to look up;
+    `telnyx.held` is what the new account holds."""
+    engine.client.list_providers.return_value = TELNYX_ENGINE
+    engine.registry.list_backends.return_value = [backend_row(agent_id="a1", api_key="tc_a1")]
+    engine.integration_store.get.return_value = _integration("telnyx")
+    engine.integration_store.save.return_value = _integration("telnyx")
+    engine.integration_store.get_document.return_value = TELNYX_BODY
+    engine.phones.list_numbers.return_value = []
+
+    async def list_numbers(api_key, **kw):
+        list_numbers.calls.append(api_key)
+        if list_numbers.error:
+            raise list_numbers.error
+        return set(list_numbers.held)
+
+    list_numbers.calls, list_numbers.held, list_numbers.error = [], set(), None
+    monkeypatch.setattr(telnyx_api, "list_numbers", list_numbers)
+
+    async def find_number(*a, **kw):  # the release check's, never this check's
+        raise AssertionError("the connect check lists the account once")
+
+    monkeypatch.setattr(telnyx_api, "find_number", find_number)
+    engine.listing = list_numbers
+    return engine
+
+
+def _connect(client, **extra):
+    return client.put("/integrations/providers/telnyx", json={**TELNYX_BODY, **extra}, headers=WS)
+
+
+def _nothing_saved(mocks):
+    mocks.integration_store.save.assert_not_called()
+    mocks.client.put_credential.assert_not_called()
+    assert audit_entries(mocks) == []
+
+
+def test_connecting_telnyx_with_no_bound_numbers_looks_nothing_up(client, telnyx):
+    # An unassigned Telnyx row and a bound Twilio number don't count.
+    telnyx.phones.list_numbers.return_value = [
+        _number(N1, project_id=None), _number(N2, carrier="twilio"),
+    ]
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == []
+    telnyx.integration_store.save.assert_awaited_once()
+
+
+def test_connecting_telnyx_holding_every_bound_number_goes_ahead(client, telnyx):
+    telnyx.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
+    telnyx.phones.list_numbers.return_value = [_number(N1), _number(N2, project_id="wp-ws")]
+    telnyx.listing.held = {N1, N2}
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == [TELNYX_KEY]  # the new key's account, once
+    telnyx.client.put_credential.assert_awaited()
+    assert "/acknowledged_numbers" not in audit_entries(telnyx)[0]["changes"]
+
+
+def test_connecting_telnyx_missing_bound_numbers_is_refused_with_them(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1), _number(N2), _number(N3)]
+    telnyx.listing.held = {N2}
+    r = _connect(client)
+    assert r.status_code == 409
+    body = r.json()
+    assert body["reason"] == "numbers_not_on_account"
+    assert body["numbers"] == [N1, N3]
+    assert isinstance(body["detail"], str)
+    assert N1 in body["detail"] and N3 in body["detail"] and N2 not in body["detail"]
+    assert "stop answering calls" in body["detail"]
+    _nothing_saved(telnyx)
+
+
+SHARED = "wp-shared"  # the shared webhook project: `webhook_project` id=1, no Workspace
+
+
+def test_connecting_telnyx_flags_only_numbers_in_the_projects_it_writes_into(client, telnyx):
+    """A number still in the shared webhook project, or in a project that isn't
+    a target, keeps its account: only an Agent's project number is flagged (#119)."""
+    telnyx.phones.list_numbers.return_value = [
+        _number(N1, "p1"), _number(N2, SHARED), _number(N3, "p-not-a-target"),
+    ]
+    r = _connect(client)
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N1]
+    assert N2 not in r.json()["detail"] and N3 not in r.json()["detail"]
+    _nothing_saved(telnyx)
+    # Acknowledging the one flagged number is enough.
+    r = _connect(client, acknowledge_numbers=[N1])
+    assert r.status_code == 200, r.text
+    assert audit_entries(telnyx)[0]["changes"]["/acknowledged_numbers"]["after"] == [N1]
+
+
+def test_connecting_telnyx_with_only_shared_project_numbers_looks_nothing_up(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1, SHARED), _number(N2, SHARED)]
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == []
+
+
+def test_an_acknowledged_resend_connects_and_audits_the_numbers(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1), _number(N2), _number(N3)]
+    telnyx.listing.held = {N2}
+    r = _connect(client, acknowledge_numbers=[N1, f" {N3} "])
+    assert r.status_code == 200, r.text
+    telnyx.integration_store.save.assert_awaited_once()
+    # Not a field of the stored credential.
+    assert "acknowledge_numbers" not in telnyx.integration_store.save.await_args.kwargs["document"]
+    telnyx.client.put_credential.assert_awaited()
+    changes = audit_entries(telnyx)[0]["changes"]
+    assert changes["/acknowledged_numbers"] == {"before": None, "after": [N1, N3]}
+    assert changes["/value"]["secret"] is True
+
+
+def test_a_partial_acknowledgement_is_still_refused(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1), _number(N3)]
+    r = _connect(client, acknowledge_numbers=[N1])
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N1, N3]
+    _nothing_saved(telnyx)
+
+
+def test_acknowledge_numbers_must_be_a_list_of_numbers(client, telnyx):
+    r = _connect(client, acknowledge_numbers=N1)
+    assert r.status_code == 422
+    assert isinstance(r.json()["detail"], str)
+    _nothing_saved(telnyx)
+
+
+def _answered(status, body="{}"):
+    request = httpx.Request("GET", "https://api.telnyx.com/v2/phone_numbers")
+    response = httpx.Response(status, text=body, request=request)
+    return httpx.HTTPStatusError(f"{status}", request=request, response=response)
+
+
+_RETRY = "retry in a moment."
+_NOT_A_RETRY = "this needs a fix in TurnCall's builder, not a retry."
+
+
+NUMBERS = "the workspace's Telnyx numbers"
+
+
+@pytest.mark.parametrize("error, says", [
+    (
+        telnyx_api.TelnyxRejected("Telnyx answered 401"),
+        f"Telnyx rejected this API key while checking {NUMBERS} on its account, so nothing "
+        "was saved: check the key and try again.",
+    ),
+    (httpx.ConnectError("boom"), f"Telnyx didn't answer when looking up {NUMBERS} on this Telnyx account; {_RETRY}"),
+    (httpx.ReadTimeout("slow"), f"Telnyx didn't answer when looking up {NUMBERS} on this Telnyx account; {_RETRY}"),
+    (_answered(429), f"Telnyx answered 429 when looking up {NUMBERS}; {_RETRY}"),
+    (_answered(500), f"Telnyx answered 500 when looking up {NUMBERS}; {_RETRY}"),
+    (_answered(404), f"Telnyx answered 404 when looking up {NUMBERS}; {_NOT_A_RETRY}"),
+    (
+        telnyx_api.TelnyxMalformed(200, "<html>"),
+        f"Telnyx answered 200 when looking up {NUMBERS}; {_NOT_A_RETRY}",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(429, 30),
+        "Telnyx is rate-limiting this Telnyx account; try again in about 30 seconds.",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(503, 2),
+        f"Telnyx answered 503 when looking up {NUMBERS}; try again in about 2 seconds.",
+    ),
+    (
+        telnyx_api.TelnyxRetryLater(None, None),
+        f"Telnyx is answering too slowly when looking up {NUMBERS} on this Telnyx account; "
+        f"{_RETRY}",
+    ),
+])
+def test_a_lookup_that_fails_is_a_502_and_saves_nothing(client, telnyx, error, says):
+    telnyx.phones.list_numbers.return_value = [_number(N1)]
+    telnyx.listing.error = error
+    r = _connect(client)
+    assert (r.status_code, r.json()) == (502, {"detail": says})
+    _nothing_saved(telnyx)
+
+
+def test_apply_says_the_stored_key_was_rejected(client, telnyx):
+    _applying(telnyx, holding=["a1"])
+    telnyx.listing.error = telnyx_api.TelnyxRejected("Telnyx answered 403")
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert (r.status_code, r.json()) == (502, {
+        "detail": f"Telnyx rejected the workspace's Telnyx API key while checking {NUMBERS}: "
+        "update it on the Integrations page.",
+    })
+
+
+def test_many_numbers_are_checked_against_one_listing(client, telnyx):
+    numbers = [f"+1312555{i:04d}" for i in range(400)]
+    telnyx.phones.list_numbers.return_value = [_number(n) for n in numbers]
+    telnyx.listing.held = set(numbers[1:])
+    r = _connect(client)
+    assert (r.status_code, r.json()["numbers"]) == (409, [numbers[0]])
+    assert telnyx.listing.calls == [TELNYX_KEY]
+
+
+def test_other_providers_are_never_looked_up_on_telnyx(client, telnyx):
+    telnyx.phones.list_numbers.return_value = [_number(N1)]
+    telnyx.integration_store.save.return_value = _integration()
+    telnyx.integration_store.get.return_value = _integration()  # what the projection reads
+    r = client.put("/integrations/providers/deepgram", json={"api_key": KEY}, headers=WS)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == []
+
+
+def _applying(telnyx, *, holding):
+    """Telnyx connected; a1 (project p1) and a2 (project p2), `holding` the
+    current version."""
+    telnyx.registry.list_backends.return_value = [
+        backend_row(agent_id="a1", api_key="tc_a1", project_id="p1"),
+        backend_row(agent_id="a2", api_key="tc_a2", project_id="p2"),
+    ]
+    telnyx.integration_store.list_projections.return_value = [
+        {"agent_id": a, "state": "applied", "version": V1} for a in holding
+    ]
+    telnyx.phones.list_numbers.return_value = [_number(N1, "p1"), _number(N2, "p2")]
+
+
+def test_apply_with_every_project_holding_the_key_looks_nothing_up(client, telnyx):
+    _applying(telnyx, holding=["a1", "a2"])
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 200, r.text
+    assert telnyx.listing.calls == []
+
+
+def test_apply_checks_only_the_projects_it_would_write_and_can_refuse(client, telnyx):
+    _applying(telnyx, holding=["a1"])
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 409
+    assert (r.json()["reason"], r.json()["numbers"]) == ("numbers_not_on_account", [N2])
+    assert telnyx.listing.calls == [TELNYX_KEY]
+    telnyx.client.put_credential.assert_not_called()
+    assert audit_entries(telnyx) == []
+
+
+def test_apply_acknowledged_goes_ahead_and_audits_the_numbers(client, telnyx):
+    _applying(telnyx, holding=["a1"])
+    r = client.post(
+        "/integrations/providers/telnyx/apply", json={"acknowledge_numbers": [N2]}, headers=WS
+    )
+    assert r.status_code == 200, r.text
+    assert [c.args[2] for c in telnyx.client.put_credential.await_args_list] == ["tc_a2"]
+    assert audit_entries(telnyx)[0]["changes"] == {
+        "/acknowledged_numbers": {"before": None, "after": [N2]},
+    }
+
+
+def test_apply_acknowledge_numbers_must_be_a_list_of_numbers(client, telnyx):
+    _applying(telnyx, holding=["a1"])
+    r = client.post(
+        "/integrations/providers/telnyx/apply", json={"acknowledge_numbers": N2}, headers=WS
+    )
+    assert r.status_code == 422
+    assert isinstance(r.json()["detail"], str)
+    telnyx.client.put_credential.assert_not_called()
+
+
+def test_apply_into_the_webhook_project_checks_its_numbers(client, telnyx):
+    _applying(telnyx, holding=["a1", "a2"])
+    telnyx.phones.workspace_webhook_project.return_value = {"project_id": "wp-ws", "api_key": "tc_wp_ws"}
+    telnyx.phones.list_numbers.return_value = [_number(N1, "p1"), _number(N3, "wp-ws")]
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N3]
+
+
+def test_apply_flags_only_numbers_in_the_projects_it_writes_into(client, telnyx):
+    """Writing into every target still leaves a shared-project number alone (#119)."""
+    _applying(telnyx, holding=[])
+    telnyx.phones.list_numbers.return_value = [
+        _number(N1, "p1"), _number(N2, SHARED), _number(N3, "p-not-a-target"),
+    ]
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 409
+    assert r.json()["numbers"] == [N1]
+    telnyx.client.put_credential.assert_not_called()
+    r = client.post(
+        "/integrations/providers/telnyx/apply", json={"acknowledge_numbers": [N1]}, headers=WS
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_apply_lookup_failure_is_a_502(client, telnyx):
+    _applying(telnyx, holding=[])
+    telnyx.listing.error = httpx.ReadTimeout("slow")
+    r = client.post("/integrations/providers/telnyx/apply", headers=WS)
+    assert r.status_code == 502
+    telnyx.client.put_credential.assert_not_called()
+
+
+def test_adopting_never_projects_a_telnyx_key(client, telnyx):
+    """An agent's own key is only its LLM's, and none bills to Telnyx."""
+    telnyx.registry.get_backend.return_value = backend_row(
+        agent_id="p", config={"name": "P", "llm": {"provider": "openai", "api_key": "sk-own"}}
+    )
+    telnyx.phones.list_numbers.return_value = [_number(N1)]
+    r = client.post("/integrations/providers/telnyx/adopt", json={"agent_id": "p"}, headers=WS)
+    assert r.status_code == 409
+    assert "reason" not in r.json()
+    assert telnyx.listing.calls == []
+    _nothing_saved(telnyx)
+
+
+# --- the check on every write of a Telnyx key (#109 review) ---------------------
+#
+# Connecting and applying check (and take acknowledgements); the write itself
+# checks too, so no path writes a Telnyx key into a project holding bound
+# Telnyx numbers its account doesn't hold.
+
+
+def test_a_new_target_holding_unheld_telnyx_numbers_is_not_written(telnyx):
+    import asyncio
+
+    from app import provider_integrations
+
+    telnyx.integration_store.list_for_workspace.return_value = [_integration("telnyx")]
+    telnyx.phones.list_numbers.return_value = [_number(N1, "p-new")]
+    asyncio.run(provider_integrations.project_into_new_target(
+        object(), telnyx.client, TEST_WORKSPACE_ID,
+        {"agent_id": "new", "api_key": "tc_new", "config": {}, "project_id": "p-new"},
+    ))
+    telnyx.client.put_credential.assert_not_called()
+    recorded = telnyx.integration_store.record_projection.await_args
+    assert recorded.kwargs["state"] == "failed"
+    assert N1 in recorded.kwargs["error"]
+
+
+def test_a_number_bound_after_connect_checked_is_not_moved(client, telnyx, monkeypatch):
+    """A number bound between the connect's check and its writes: that
+    project's write is refused and logged failed, the others go ahead."""
+    telnyx.registry.list_backends.return_value = [
+        backend_row(agent_id="a1", api_key="tc_a1", project_id="p1"),
+        backend_row(agent_id="a2", api_key="tc_a2", project_id="p2"),
+    ]
+    telnyx.listing.held = {N1}
+    seen = iter([
+        [_number(N1, "p1")],  # what the connect's check sees
+        [_number(N1, "p1")],  # a1's write
+        [_number(N1, "p1"), _number(N2, "p2")],  # a2's write: N2 bound since
+    ])
+    telnyx.phones.list_numbers.side_effect = lambda *a, **kw: next(seen)
+    r = _connect(client)
+    assert r.status_code == 200, r.text
+    assert [c.args[2] for c in telnyx.client.put_credential.await_args_list] == ["tc_a1"]
+    states = {a["agent_id"]: a["state"] for a in r.json()["data"]["agents"]}
+    assert states == {"a1": "applied", "a2": "failed"}
+    assert telnyx.listing.calls == [TELNYX_KEY, TELNYX_KEY]

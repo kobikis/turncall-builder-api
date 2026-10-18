@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .. import integration_store, provider_catalog, provider_integrations, runtime
-from .._helpers import _readable
+from .._helpers import Refusal, _readable
 from ..audit import Audit, secret_changed
 from ..backends import registry
 from ..deps import AuthContext, require_admin, require_member
@@ -130,6 +130,65 @@ def _store_error(exc: integration_store.IntegrationError) -> HTTPException:
     return HTTPException(status_code=503, detail=str(exc))
 
 
+class _Acknowledge(BaseModel):
+    """Telnyx numbers the admin accepts will stop answering calls (#114): the
+    `numbers` of a `numbers_not_on_account` refusal, sent back."""
+
+    model_config = ConfigDict(extra="forbid")
+    acknowledge_numbers: list[str] = Field(default_factory=list, max_length=10_000)
+
+    @field_validator("acknowledge_numbers")
+    @classmethod
+    def _stripped(cls, value: list[str]) -> list[str]:
+        return [n.strip() for n in value]
+
+
+def _acknowledged(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    try:
+        return _Acknowledge.model_validate({"acknowledge_numbers": raw}).acknowledge_numbers
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_readable(exc)) from exc
+
+
+def _not_on_account(numbers: list[str], when: str) -> str:
+    named = provider_integrations.name_numbers(numbers)
+    one = len(numbers) == 1
+    return (
+        f"{named} {'is' if one else 'are'} not on this Telnyx account. "
+        f"{'It is' if one else 'They are'} on another Telnyx account (likely TurnCall's "
+        f"platform account) and will stop answering calls once {when}. Move "
+        f"{'it' if one else 'them'} to this account first, or acknowledge "
+        f"{'it' if one else 'them'} to go ahead."
+    )
+
+
+async def _check_telnyx_numbers(
+    api_key: str,
+    numbers: list[str],
+    acknowledged: list[str],
+    *,
+    when: str,
+    new_key: bool = False,
+) -> dict[str, Any]:
+    """Refuse a Telnyx key whose account doesn't hold the numbers bound in the
+    projects it will be written into (`telnyx_write_targets`), unless every one
+    of them is acknowledged (#114, #119). Returns the audit entry's record of
+    the ones acknowledged, if any."""
+    try:
+        missing = await provider_integrations.check_telnyx_numbers(
+            api_key, numbers, acknowledged, new_key=new_key
+        )
+    except provider_integrations.NumbersNotOnAccount as exc:
+        raise Refusal(
+            409, _not_on_account(exc.numbers, when), "numbers_not_on_account", numbers=exc.numbers
+        ) from exc
+    except provider_integrations.NumberLookupFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"/acknowledged_numbers": {"before": None, "after": missing}} if missing else {}
+
+
 @router.get("")
 async def list_providers(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
     data = await provider_integrations.cards(runtime.get_pool(), runtime.get_client(), ctx.workspace_id)
@@ -144,7 +203,14 @@ async def connect(
     ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
     """Validate, store and project a credential. A key the provider rejects is
-    not stored; one that could not be checked is stored and says so."""
+    not stored; one that could not be checked is stored and says so.
+
+    A Telnyx key is refused (409, `numbers_not_on_account`) while its account
+    doesn't hold every Telnyx number bound in the projects it will be written
+    into (each agent's, and the Workspace's webhook project; never the shared
+    one), unless the request acknowledges each of them in
+    `acknowledge_numbers` (#114, #119)."""
+    acknowledged = _acknowledged(body.pop("acknowledge_numbers", None))
     await _known(provider)
     document = _document(provider, body)
     validation = await provider_catalog.probe(provider, document)
@@ -154,13 +220,27 @@ async def connect(
             detail=f"{provider} rejected this key ({validation['detail']}; checked "
             f"{validation['checked']}). It was not saved.",
         )
+    noted: dict[str, Any] = {}
+    # The Telnyx numbers checked here (held, or acknowledged): the projection's
+    # own check on each write skips them, and catches any bound since.
+    cleared: list[str] = []
+    if provider == provider_integrations.TELNYX:
+        # A save writes into every target.
+        targets = await provider_integrations.telnyx_write_targets(
+            runtime.get_pool(), ctx.workspace_id
+        )
+        noted = await _check_telnyx_numbers(
+            document["api_key"], targets.numbers, acknowledged,
+            when="this account is connected", new_key=True,
+        )
+        cleared = targets.numbers
     pool, client = runtime.get_pool(), runtime.get_client()
     existed = await integration_store.get(pool, ctx.workspace_id, provider) is not None
     # That the key changed, never the key (ADR-0028). Landed once stored: a
     # projection that fails after it is recorded as partial.
     change = audit.begin(
         ctx, "integration", provider, "updated" if existed else "created", landed=False,
-        resource_name=provider, changes=secret_changed(existed, True),
+        resource_name=provider, changes={**secret_changed(existed, True), **noted},
     )
     try:
         saved = await integration_store.save(
@@ -168,7 +248,9 @@ async def connect(
             document=document, last4=provider_integrations.last4(document), validation=validation,
         )
         change.landed()
-        agents = await provider_integrations.project(pool, client, ctx.workspace_id, provider)
+        agents = await provider_integrations.project(
+            pool, client, ctx.workspace_id, provider, cleared=cleared
+        )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
     await change.record()
@@ -177,20 +259,47 @@ async def connect(
 
 @router.post("/{provider}/apply")
 async def reapply(
-    provider: str, audit: Audit, ctx: AuthContext = Depends(require_admin)
+    provider: str,
+    audit: Audit,
+    body: dict[str, Any] | None = Body(None),  # noqa: B008
+    ctx: AuthContext = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Finish a projection that failed partway; agents already done are skipped."""
+    """Finish a projection that failed partway; agents already done are skipped.
+
+    For Telnyx, the projects it would write into are checked as connecting
+    checks them (#114, #119): only their bound numbers, and none when every
+    project holds the current key already."""
     pool = runtime.get_pool()
     integration = await integration_store.get(pool, ctx.workspace_id, provider)
     if integration is None:
         raise HTTPException(status_code=404, detail=f"{provider} is not connected")
     if integration["disconnecting"]:
         raise HTTPException(status_code=409, detail=f"{provider} is being disconnected — finish that first")
+    noted: dict[str, Any] = {}
+    cleared: list[str] = []  # as connect's
+    if provider == provider_integrations.TELNYX:
+        # Apply writes only into targets not holding the current key.
+        targets = await provider_integrations.telnyx_write_targets(
+            pool, ctx.workspace_id, skip_holding=integration
+        )
+        cleared = targets.numbers
+        acknowledged = _acknowledged((body or {}).get("acknowledge_numbers"))
+        if targets.numbers:
+            try:
+                document = await integration_store.get_document(pool, ctx.workspace_id, provider)
+            except integration_store.IntegrationError as exc:
+                raise _store_error(exc) from exc
+            noted = await _check_telnyx_numbers(
+                document["api_key"], targets.numbers, acknowledged,
+                when="this account is applied to their projects",
+            )
     try:
-        agents = await provider_integrations.project(pool, runtime.get_client(), ctx.workspace_id, provider)
+        agents = await provider_integrations.project(
+            pool, runtime.get_client(), ctx.workspace_id, provider, cleared=cleared
+        )
     except integration_store.IntegrationError as exc:
         raise _store_error(exc) from exc
-    await audit.record(ctx, "integration", provider, "reapplied", resource_name=provider, changes={})
+    await audit.record(ctx, "integration", provider, "reapplied", resource_name=provider, changes=noted)
     return {"success": True, "data": {"agents": agents}}
 
 
