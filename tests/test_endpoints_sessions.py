@@ -25,7 +25,7 @@ def test_providers_lists_stt_llm_tts_s2s(client):
     assert {"openai", "anthropic", "custom_openai", "openrouter", "ollama", "bedrock"} <= set(d["llm"])
     assert "deepgram" in d["tts"]
     assert "deepgram" in d["stt"]
-    assert set(d["s2s"]) == {"openai", "openai_live", "google", "aws"}
+    assert set(d["s2s"]) == {"openai", "openai_live", "google", "aws", "xai"}
 
 
 def test_providers_offer_assemblyai_stt_and_google_llm(client):
@@ -47,6 +47,32 @@ def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     monkeypatch.setattr(sessions.provider_catalog, "s2s_voices", fake_voices)
     assert client.get("/providers/s2s/openai/models").json()["data"]["models"] == ["gpt-4o-realtime-preview"]
     assert client.get("/providers/s2s/openai/voices").json()["data"]["voices"] == ["alloy", "echo"]
+
+
+def test_s2s_models_name_the_deprecated_ones(client):
+    """grok-voice-2.0 is still offered, and the console can label it."""
+    data = client.get("/providers/s2s/xai/models").json()["data"]
+    assert data["models"] == ["grok-voice-3.0", "grok-voice-2.0"]
+    assert data["deprecated"] == ["grok-voice-2.0"]
+
+
+def test_s2s_voices_are_listed_with_the_workspaces_key(client, monkeypatch):
+    from app.routers import sessions
+
+    seen = []
+
+    async def fake_keys(ctx):
+        return {"xai": "workspace-key"}
+
+    async def fake_voices(provider, keys=None):
+        seen.append((provider, keys))
+        return [{"value": "eve", "label": "Eve"}]
+
+    monkeypatch.setattr(sessions, "_workspace_keys", fake_keys)
+    monkeypatch.setattr(sessions.provider_catalog, "s2s_voices", fake_voices)
+    voices = client.get("/providers/s2s/xai/voices").json()["data"]["voices"]
+    assert voices == [{"value": "eve", "label": "Eve"}]
+    assert seen == [("xai", {"xai": "workspace-key"})]
 
 
 def test_stt_models_endpoint(client, monkeypatch):

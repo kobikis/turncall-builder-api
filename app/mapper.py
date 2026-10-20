@@ -109,7 +109,17 @@ _S2S_DEFAULTS = {
     "openai_live": ("gpt-live-1", "alloy"),
     "google": ("models/gemini-3.1-flash-live-preview", "Charon"),
     "aws": ("amazon.nova-2-sonic-v1:0", "matthew"),
+    # Pinned, never xAI's moving `grok-voice-latest` (turncall#384).
+    "xai": ("grok-voice-3.0", "eve"),
 }
+# Providers whose whole s2s block is sent, as the llm block is. Grok Voice
+# takes its session settings in s2s.extra (reasoning, replace, resumption), and
+# TurnCall refuses base_url, temperature and max_tokens on it with a 422 naming
+# the field (turncall#387), which a save passes through. Dropping them here
+# would run the agent without what its author set, saying nothing. The older
+# providers keep the trimmed block: a field the builder never sent must not
+# start failing their stored agents' saves.
+_S2S_SENT_WHOLE = {"xai"}
 
 
 def to_create_agent_request(
@@ -202,6 +212,7 @@ def to_create_agent_request(
         default_model, default_voice = _S2S_DEFAULTS.get(provider, _S2S_DEFAULTS["openai"])
         config["pipeline_mode"] = "s2s"
         config["s2s"] = {
+            **(_set(s2s) if provider in _S2S_SENT_WHOLE else {}),
             "provider": provider,
             "model": s2s.get("model") or default_model,
             "voice": s2s.get("voice") or default_voice,

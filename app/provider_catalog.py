@@ -5,7 +5,7 @@ options instead of a hand-maintained list. Keys come from the Workspace's
 Integration when it has one (#56), so the pickers list what the account that will
 run the call actually has; otherwise from the builder's own env (OPENAI_API_KEY,
 ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY, DEEPGRAM_API_KEY,
-GOOGLE_API_KEY, ASSEMBLYAI_API_KEY;
+GOOGLE_API_KEY, ASSEMBLYAI_API_KEY, XAI_API_KEY;
 OpenRouter's model list is public). Best-effort: a provider
 with no key / no list API / an error yields [] (the console still allows free
 text), and a stale cache is served over a transient failure. Cached ~1h.
@@ -135,6 +135,14 @@ _BEDROCK_MODELS = [
 _AWS_S2S_MODELS = ["amazon.nova-2-sonic-v1:0", "amazon.nova-sonic-v1:0"]
 _AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
 
+# Grok Voice (turncall#384). Curated, not fetched: grok-voice-3.0 is what
+# TurnCall runs when none is named (pinned, never the moving
+# `grok-voice-latest`); 2.0 is deprecated by xAI but still answers, so it is
+# offered and named as such. Voices are the account's own, custom ones
+# included, from xAI's voice list.
+_XAI_S2S_MODELS = ["grok-voice-3.0", "grok-voice-2.0"]
+_DEPRECATED_S2S_MODELS = {"xai": ["grok-voice-2.0"]}
+
 
 # The Builder's own environment: the fallback when a Workspace has no Integration.
 _ENV = {
@@ -145,6 +153,7 @@ _ENV = {
     "elevenlabs": "ELEVENLABS_API_KEY",
     "cartesia": "CARTESIA_API_KEY",
     "assemblyai": "ASSEMBLYAI_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 _ACCOUNT = {"openai_live": "openai"}
 
@@ -193,8 +202,14 @@ async def s2s_models(provider: str, keys: dict[str, str] | None = None) -> list[
     return await _cached(f"s2s:{provider}:{_fp(key)}", lambda c: _fetch_s2s_models(c, provider, key))
 
 
-async def s2s_voices(provider: str) -> list[dict[str, str]]:
-    return await _cached(f"s2sv:{provider}", lambda c: _fetch_s2s_voices(c, provider))
+def deprecated_s2s_models(provider: str) -> list[str]:
+    """The provider's listed models its vendor has deprecated, for the label."""
+    return list(_DEPRECATED_S2S_MODELS.get(provider, []))
+
+
+async def s2s_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
+    key = _key(provider, keys)
+    return await _cached(f"s2sv:{provider}:{_fp(key)}", lambda c: _fetch_s2s_voices(c, provider, key))
 
 
 async def _fetch_llm_models(client: httpx.AsyncClient, provider: str, key: str) -> list[str]:
@@ -275,6 +290,8 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) 
         return live or list(_GOOGLE_S2S_MODELS)  # no key / empty — published fallback
     if provider == "aws":
         return list(_AWS_S2S_MODELS)
+    if provider == "xai":
+        return list(_XAI_S2S_MODELS)
     return []
 
 
@@ -302,7 +319,7 @@ def _same(values: list[str]) -> list[dict[str, str]]:
     return [_pair(v, v) for v in values]
 
 
-async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str) -> list[dict[str, str]]:
+async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str, key: str) -> list[dict[str, str]]:
     if provider == "openai":
         return _same(_OPENAI_S2S_VOICES)
     if provider == "openai_live":
@@ -314,6 +331,17 @@ async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str) -> list[di
         return _same(_GOOGLE_S2S_VOICES)
     if provider == "aws":
         return _same(_AWS_S2S_VOICES)
+    if provider == "xai":
+        if not key:
+            return []
+        r = await client.get("https://api.x.ai/v1/tts/voices", headers={"Authorization": f"Bearer {key}"})
+        r.raise_for_status()
+        pairs = [
+            _pair(v["voice_id"], v.get("name") or v["voice_id"])
+            for v in r.json().get("voices", [])
+            if isinstance(v, dict) and v.get("voice_id")
+        ]
+        return sorted(pairs, key=lambda p: p["label"])
     return []
 
 
@@ -399,7 +427,13 @@ _PROBES: dict[str, tuple[str, Any]] = {
     "telnyx": ("https://api.telnyx.com/v2/balance", lambda k: {"Authorization": f"Bearer {k}"}),
     # AssemblyAI has no models endpoint; its transcript list authenticates.
     "assemblyai": ("https://api.assemblyai.com/v2/transcript?limit=1", lambda k: {"Authorization": k}),
+    # xAI's own key endpoint: it authenticates whatever the key's ACLs allow.
+    "xai": ("https://api.x.ai/v1/api-key", lambda k: {"Authorization": f"Bearer {k}"}),
 }
+# Providers that refuse a wrong key with a 400 rather than a 401/403, and the
+# words their body says it with (xAI: "Incorrect API key provided", measured
+# 2026-10-21). Any other 400 from them stays unverified.
+_BAD_KEY_400 = {"xai": "Incorrect API key"}
 
 
 async def probe(provider: str, document: dict[str, Any]) -> dict[str, Any]:
@@ -426,6 +460,9 @@ async def probe(provider: str, document: dict[str, Any]) -> dict[str, Any]:
         return {"status": "unverified", "checked": checked, "detail": f"unreachable: {type(exc).__name__}"}
     if r.status_code in (401, 403):
         return {"status": "rejected", "checked": checked, "detail": f"{provider} answered {r.status_code}"}
+    words = _BAD_KEY_400.get(provider)
+    if r.status_code == 400 and words and words in r.text:
+        return {"status": "rejected", "checked": checked, "detail": f"{provider} answered 400: the key is incorrect"}
     if r.is_success:
         return {"status": "valid", "checked": checked, "detail": f"accepted by {provider}'s list endpoint"}
     return {"status": "unverified", "checked": checked, "detail": f"{provider} answered {r.status_code}"}
