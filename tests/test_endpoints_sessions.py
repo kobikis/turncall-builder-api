@@ -34,6 +34,66 @@ def test_providers_offer_assemblyai_stt_and_google_llm(client):
     assert "google" in d["llm"]
 
 
+def test_providers_offer_xai_in_the_cascade(client):
+    d = client.get("/providers").json()["data"]
+    for role in ("stt", "llm", "tts"):
+        assert "xai" in d[role], role
+
+
+def _xai_serving(monkeypatch, handler):
+    import httpx
+
+    from app import provider_catalog
+
+    provider_catalog._CACHE.clear()
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        provider_catalog.httpx,
+        "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
+
+
+def test_xai_cascade_catalogs_with_the_workspaces_key(client, monkeypatch):
+    import httpx
+
+    from app.routers import sessions
+
+    async def fake_keys(ctx):
+        return {"xai": "workspace-key"}
+
+    def handler(request):
+        assert request.headers["authorization"] == "Bearer workspace-key"
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "grok-4.20-non-reasoning"}, {"id": "grok-4.3"}]})
+        return httpx.Response(200, json={"voices": [{"voice_id": "eve", "name": "Eve"}]})
+
+    monkeypatch.setattr(sessions, "_workspace_keys", fake_keys)
+    _xai_serving(monkeypatch, handler)
+    assert client.get("/providers/llm/xai/models").json()["data"]["models"] == [
+        "grok-4.20-non-reasoning", "grok-4.3",
+    ]
+    assert client.get("/providers/stt/xai/models").json()["data"]["models"] == ["grok-voice-transcribe-2.0"]
+    assert client.get("/providers/tts/xai/voices").json()["data"]["voices"] == [{"value": "eve", "label": "Eve"}]
+
+
+def test_xai_cascade_catalogs_without_a_key(client, monkeypatch):
+    from app.routers import sessions
+
+    async def no_keys(ctx):
+        return {}
+
+    def handler(request):
+        raise AssertionError("no key: nothing is asked of xAI")
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(sessions, "_workspace_keys", no_keys)
+    _xai_serving(monkeypatch, handler)
+    assert client.get("/providers/llm/xai/models").json()["data"]["models"] == ["grok-4.20-non-reasoning"]
+    assert client.get("/providers/stt/xai/models").json()["data"]["models"] == ["grok-voice-transcribe-2.0"]
+    assert client.get("/providers/tts/xai/voices").json()["data"]["voices"] == []
+
+
 def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     from app.routers import sessions
 
