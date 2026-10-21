@@ -68,6 +68,8 @@ _STT_MODELS = {
         "universal-3-5-pro",
         "universal-3-6-pro",
     ],
+    # TurnCall's default; xAI has no list endpoint for its transcription models.
+    "xai": ["grok-voice-transcribe-2.0"],
 }
 # TTS model sets are small and fixed, so they are listed rather than fetched.
 # Deepgram has none: its voice *is* its model, so the form shows no model field.
@@ -142,6 +144,12 @@ _AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
 # included, from xAI's voice list.
 _XAI_S2S_MODELS = ["grok-voice-3.0", "grok-voice-2.0"]
 _DEPRECATED_S2S_MODELS = {"xai": ["grok-voice-2.0"]}
+# xai as a cascade LLM (turncall#385): TurnCall's default, offered whenever the
+# account's own list cannot be had — no key, or a voice-only key xAI refuses
+# on its chat endpoints (403).
+_XAI_LLM_DEFAULT = "grok-4.20-non-reasoning"
+# xAI's /v1/models lists image, video and voice models beside the chat ones.
+_XAI_NOT_CHAT = ("image", "imagine", "video", "voice", "tts", "transcribe", "embed")
 
 
 # The Builder's own environment: the fallback when a Workspace has no Integration.
@@ -177,7 +185,10 @@ def _fp(key: str) -> str:
 
 async def llm_models(provider: str, keys: dict[str, str] | None = None) -> list[str]:
     key = _key(provider, keys)
-    return await _cached(f"llm:{provider}:{_fp(key)}", lambda c: _fetch_llm_models(c, provider, key))
+    models = await _cached(f"llm:{provider}:{_fp(key)}", lambda c: _fetch_llm_models(c, provider, key))
+    if provider == "xai":  # after the cache, so a failed fetch still offers the default
+        return models or [_XAI_LLM_DEFAULT]
+    return models
 
 
 async def tts_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
@@ -252,6 +263,13 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str, key: str) 
         ]
     if provider == "bedrock":
         return list(_BEDROCK_MODELS)
+    if provider == "xai":
+        if not key:
+            return []
+        r = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {key}"})
+        r.raise_for_status()
+        ids = [m["id"] for m in r.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+        return sorted(i for i in ids if i.startswith("grok") and not any(x in i for x in _XAI_NOT_CHAT))
     return []  # ollama / custom_openai target a per-agent endpoint
 
 
@@ -332,17 +350,23 @@ async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str, key: str) 
     if provider == "aws":
         return _same(_AWS_S2S_VOICES)
     if provider == "xai":
-        if not key:
-            return []
-        r = await client.get("https://api.x.ai/v1/tts/voices", headers={"Authorization": f"Bearer {key}"})
-        r.raise_for_status()
-        pairs = [
-            _pair(v["voice_id"], v.get("name") or v["voice_id"])
-            for v in r.json().get("voices", [])
-            if isinstance(v, dict) and v.get("voice_id")
-        ]
-        return sorted(pairs, key=lambda p: p["label"])
+        return await _xai_voices(client, key)
     return []
+
+
+async def _xai_voices(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
+    """The account's voices, custom ones included: Grok Voice (S2S) and xai TTS
+    speak with the same set."""
+    if not key:
+        return []
+    r = await client.get("https://api.x.ai/v1/tts/voices", headers={"Authorization": f"Bearer {key}"})
+    r.raise_for_status()
+    pairs = [
+        _pair(v["voice_id"], v.get("name") or v["voice_id"])
+        for v in r.json().get("voices", [])
+        if isinstance(v, dict) and v.get("voice_id")
+    ]
+    return sorted(pairs, key=lambda p: p["label"])
 
 
 async def _fetch_stt_models(client: httpx.AsyncClient, provider: str, key: str) -> list[str]:
@@ -400,6 +424,8 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str, key: str) 
         r.raise_for_status()
         names = [m.get("canonical_name") or m.get("name") for m in r.json().get("tts", [])]
         return _same(sorted({n for n in names if n}))  # dedup per-version/language rows
+    if provider == "xai":
+        return await _xai_voices(client, key)
     return []
 
 
