@@ -62,3 +62,72 @@ def test_google_without_a_key_lists_nothing(monkeypatch):
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     provider_catalog._CACHE.clear()
     assert asyncio.run(provider_catalog.llm_models("google", {})) == []
+
+
+# --- Grok Voice, the xai S2S provider (#120, turncall#384) --------------------
+
+# xAI's GET /v1/tts/voices, as it answered on 2026-10-21 (trimmed).
+_XAI_VOICES = {"voices": [
+    {"voice_id": "eve", "name": "Eve", "language": "multilingual", "gender": "female"},
+    {"voice_id": "ara", "name": "Ara", "language": "multilingual", "gender": "female"},
+    {"voice_id": "rex", "name": "Rex", "language": "multilingual", "gender": "male"},
+]}
+
+
+def test_xai_models_are_the_flagship_then_the_deprecated_one():
+    """Curated: xAI's model list is not what the realtime endpoint takes, and
+    TurnCall pins grok-voice-3.0 rather than the moving `grok-voice-latest`."""
+    provider_catalog._CACHE.clear()
+    assert asyncio.run(provider_catalog.s2s_models("xai")) == ["grok-voice-3.0", "grok-voice-2.0"]
+    assert provider_catalog.deprecated_s2s_models("xai") == ["grok-voice-2.0"]
+    assert provider_catalog.deprecated_s2s_models("openai") == []
+
+
+def test_xai_voices_are_the_accounts_own_listed_with_its_key(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=_XAI_VOICES)
+
+    _serving(monkeypatch, handler)
+    voices = asyncio.run(provider_catalog.s2s_voices("xai", {"xai": "k"}))
+    assert voices == [
+        {"value": "ara", "label": "Ara"},
+        {"value": "eve", "label": "Eve"},
+        {"value": "rex", "label": "Rex"},
+    ]
+    assert str(seen[0].url) == "https://api.x.ai/v1/tts/voices"
+    assert seen[0].headers["authorization"] == "Bearer k"
+
+
+def test_xai_voices_fall_back_to_the_builders_own_key(monkeypatch):
+    seen = []
+    monkeypatch.setenv("XAI_API_KEY", "env-key")
+    _serving(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json=_XAI_VOICES))
+    assert asyncio.run(provider_catalog.s2s_voices("xai", {}))
+    assert seen[0].headers["authorization"] == "Bearer env-key"
+
+
+def test_xai_voices_without_a_key_ask_nothing(monkeypatch):
+    seen = []
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    _serving(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json=_XAI_VOICES))
+    assert asyncio.run(provider_catalog.s2s_voices("xai", {})) == []
+    assert seen == []
+
+
+def test_xai_voices_are_empty_when_xai_refuses(monkeypatch):
+    # A wrong key is a 400 on xAI, not a 401 (measured).
+    _serving(monkeypatch, lambda r: httpx.Response(400, json={"error": "Incorrect API key provided."}))
+    assert asyncio.run(provider_catalog.s2s_voices("xai", {"xai": "bad"})) == []
+
+
+def test_xai_voices_are_cached_per_key(monkeypatch):
+    seen = []
+    _serving(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json=_XAI_VOICES))
+    asyncio.run(provider_catalog.s2s_voices("xai", {"xai": "k"}))
+    asyncio.run(provider_catalog.s2s_voices("xai", {"xai": "k"}))
+    assert len(seen) == 1
+    asyncio.run(provider_catalog.s2s_voices("xai", {"xai": "another"}))
+    assert len(seen) == 2

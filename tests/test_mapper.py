@@ -315,7 +315,7 @@ def test_compose_schema_allows_openai_live():
 
     enum = _AGENT_CONFIG_SCHEMA["properties"]["s2s"]["properties"]["provider"]["enum"]
     assert "openai_live" in enum
-    assert enum == ["openai", "openai_live", "google", "aws"]
+    assert enum == ["openai", "openai_live", "google", "aws", "xai"]
 
 
 def test_providers_endpoint_offers_openai_live():
@@ -324,6 +324,7 @@ def test_providers_endpoint_offers_openai_live():
     from app.routers.sessions import _S2S_PROVIDERS
 
     assert "openai_live" in _S2S_PROVIDERS
+    assert "xai" in _S2S_PROVIDERS
 
 
 def _with_servers(servers):
@@ -621,3 +622,67 @@ class TestAgentSettingsReachTurnCall:
         for key in ("language", "idle_message", "smart_turn_detection", "avatar"):
             assert key not in config
         assert "temperature" not in _config(llm={"temperature": None})["llm"]
+
+
+class TestGrokVoice:
+    """The xai S2S provider (#120, turncall#384)."""
+
+    @staticmethod
+    def _s2s(block):
+        return to_create_agent_request(
+            {"name": "Bot", "system_prompt": "hi", "pipeline_mode": "s2s", "s2s": block}
+        )["config"]["s2s"]
+
+    def test_defaults_are_groks_not_openais(self):
+        """TurnCall swaps OpenAI's sentinels too, but the builder names the
+        model it runs: grok-voice-3.0, pinned rather than xAI's moving alias."""
+        assert self._s2s({"provider": "xai"}) == {
+            "provider": "xai",
+            "model": "grok-voice-3.0",
+            "voice": "eve",
+        }
+
+    def test_an_explicit_model_and_voice_are_kept(self):
+        s2s = self._s2s({"provider": "xai", "model": "grok-voice-2.0", "voice": "my-cloned-voice"})
+        assert (s2s["model"], s2s["voice"]) == ("grok-voice-2.0", "my-cloned-voice")
+
+    def test_its_session_extras_reach_turncall(self):
+        """reasoning, replace and resumption are Grok's own session settings,
+        set in the Advanced JSON; TurnCall applies them or refuses a bad value."""
+        extra = {
+            "reasoning": {"effort": "none"},
+            "replace": {"turn call": "TurnCall"},
+            "resumption": {"enabled": True},
+        }
+        assert self._s2s({"provider": "xai", "extra": extra})["extra"] == extra
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("base_url", "wss://gateway.example/v1/realtime"), ("temperature", 0.3), ("max_tokens", 400)],
+    )
+    def test_what_grok_lacks_reaches_turncall_to_be_refused(self, field, value):
+        """Dropping it would run the agent without what its author asked for.
+        Sent, TurnCall answers the 422 naming the field, and the save passes
+        that status and reason through."""
+        assert self._s2s({"provider": "xai", field: value})[field] == value
+
+    def test_unset_fields_are_left_out(self):
+        s2s = self._s2s({"provider": "xai", "temperature": None, "base_url": "", "extra": None})
+        assert set(s2s) == {"provider", "model", "voice"}
+
+    def test_other_providers_keep_their_trimmed_block(self):
+        """Unchanged for the providers stored agents already use: a field the
+        builder never sent must not start failing their saves."""
+        assert "temperature" not in self._s2s({"provider": "google", "temperature": 0.3})
+
+    def test_the_compose_schema_and_skill_know_grok(self):
+        import pathlib
+
+        from app.builder import _AGENT_CONFIG_SCHEMA, SKILLS_DIR
+
+        s2s = _AGENT_CONFIG_SCHEMA["properties"]["s2s"]["properties"]
+        assert "grok-voice-3.0" in s2s["model"]["description"]
+        assert "eve" in s2s["voice"]["description"]
+        skill = (pathlib.Path(SKILLS_DIR) / "speech-to-speech" / "SKILL.md").read_text()
+        assert "grok-voice-3.0" in skill
+        assert "xai" in skill

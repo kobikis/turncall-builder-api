@@ -173,7 +173,7 @@ BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
 _LLM_PROVIDERS = ["openai", "anthropic", "google", "openrouter", "ollama", "custom_openai", "bedrock"]
 _TTS_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia"]
 _STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia", "assemblyai"]
-_S2S_PROVIDERS = ["openai", "openai_live", "google", "aws"]
+_S2S_PROVIDERS = ["openai", "openai_live", "google", "aws", "xai"]
 
 
 async def _workspace_keys(ctx: AuthContext) -> dict[str, str]:
@@ -201,14 +201,18 @@ async def stt_models(provider: str, ctx: AuthContext = Depends(require_member)) 
 
 @router.get("/providers/s2s/{provider}/models")
 async def s2s_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
-    """Model ids for an S2S/realtime provider (openai live, google fixed)."""
-    return {"success": True, "data": {"models": await provider_catalog.s2s_models(provider, await _workspace_keys(ctx))}}
+    """Model ids for an S2S/realtime provider (openai live, the others fixed),
+    and which of them the vendor has deprecated, so the picker can say so."""
+    return {"success": True, "data": {
+        "models": await provider_catalog.s2s_models(provider, await _workspace_keys(ctx)),
+        "deprecated": provider_catalog.deprecated_s2s_models(provider),
+    }}
 
 
 @router.get("/providers/s2s/{provider}/voices")
-async def s2s_voices(provider: str) -> dict[str, Any]:
-    """Voices for an S2S provider (openai fixed set; google is free text)."""
-    return {"success": True, "data": {"voices": await provider_catalog.s2s_voices(provider)}}
+async def s2s_voices(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
+    """Voices for an S2S provider (fixed sets; xai's are the account's, fetched live)."""
+    return {"success": True, "data": {"voices": await provider_catalog.s2s_voices(provider, await _workspace_keys(ctx))}}
 
 
 @router.get("/providers/llm/{provider}/models")

@@ -86,3 +86,45 @@ def test_twilio_rejection_is_named(monkeypatch):
                         lambda **kw: real(transport=httpx.MockTransport(lambda r: httpx.Response(401)), **kw))
     with pytest.raises(twilio_api.TwilioRejected):
         asyncio.run(twilio_api.list_numbers("AC1", "bad"))
+
+
+def _xai_answering(monkeypatch, response):
+    seen = []
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        provider_catalog.httpx,
+        "AsyncClient",
+        lambda **kw: real(
+            transport=httpx.MockTransport(lambda r: seen.append(r) or response), **kw
+        ),
+    )
+    return seen
+
+
+def test_xai_key_is_checked_against_its_key_endpoint(monkeypatch):
+    seen = _xai_answering(monkeypatch, httpx.Response(200, json={"api_key_blocked": False}))
+    result = asyncio.run(provider_catalog.probe("xai", {"api_key": "k"}))
+    assert result["status"] == "valid"
+    assert result["checked"] == "GET https://api.x.ai/v1/api-key"
+    assert seen[0].headers["authorization"] == "Bearer k"
+
+
+def test_xai_reads_its_400_for_a_wrong_key_as_a_rejection(monkeypatch):
+    """xAI answers a wrong key with 400 and this body, not a 401 (measured)."""
+    _xai_answering(monkeypatch, httpx.Response(400, json={
+        "code": "invalid-argument",
+        "error": "Incorrect API key provided. You can obtain an API key from https://console.x.ai.",
+    }))
+    result = asyncio.run(provider_catalog.probe("xai", {"api_key": "bad"}))
+    assert result["status"] == "rejected"
+    assert result["detail"] == "xai answered 400: the key is incorrect"
+
+
+def test_another_400_from_xai_stays_unverified(monkeypatch):
+    _xai_answering(monkeypatch, httpx.Response(400, json={"error": "something else"}))
+    assert asyncio.run(provider_catalog.probe("xai", {"api_key": "k"}))["status"] == "unverified"
+
+
+def test_a_400_elsewhere_is_not_read_as_xais(monkeypatch):
+    _xai_answering(monkeypatch, httpx.Response(400, json={"error": "Incorrect API key provided."}))
+    assert asyncio.run(provider_catalog.probe("openai", {"api_key": "k"}))["status"] == "unverified"
