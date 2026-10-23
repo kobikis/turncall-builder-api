@@ -105,6 +105,27 @@ def test_a_rejected_key_is_not_stored(client, engine, probe):
     engine.client.put_credential.assert_not_called()
 
 
+def test_a_heygen_key_liveavatar_refuses_is_not_stored(client, engine, monkeypatch):
+    """The real check, LiveAvatar answering: no stub between the save and it."""
+    engine.client.list_providers.return_value = {
+        **ENGINE,
+        "accounts": {**ENGINE["accounts"], "heygen": {
+            "serves": {}, "platform_key": False, "project_credential": False}},
+    }
+    seen = []
+    real = httpx.AsyncClient
+    monkeypatch.setattr(provider_catalog.httpx, "AsyncClient", lambda **kw: real(
+        transport=httpx.MockTransport(lambda r: seen.append(r) or httpx.Response(401)), **kw))
+
+    r = client.put("/integrations/providers/heygen", json={"api_key": "bad"}, headers=WS)
+
+    assert r.status_code == 400
+    assert "GET https://api.liveavatar.com/v1/avatars" in r.json()["detail"]
+    assert seen[0].headers["x-api-key"] == "bad"
+    engine.integration_store.save.assert_not_called()
+    engine.client.put_credential.assert_not_called()
+
+
 def test_an_unreachable_provider_is_stored_and_says_so(client, engine, probe):
     probe.result.update(status="unverified", detail="unreachable: ConnectError")
     engine.registry.list_backends.return_value = []

@@ -421,6 +421,15 @@ key. See ADR-0026 (decided, not yet built).
 _Avoid_: "embed key", "public key" (there is none), "web call" (a test call from the
 Console is not the Widget).
 
+**Avatar**:
+A lip-synced face that speaks an Agent's replies on a browser call, from a video
+provider (HeyGen's LiveAvatar or Tavus). It exists only where there is video and
+a voice to lip-sync: a browser call to an Agent that hears, thinks and speaks in
+separate stages. A phone call has no Avatar, and neither does a speech-to-speech
+Agent. A **sandbox** Avatar is the provider's free one, for short trial calls.
+_Avoid_: "replica" (Tavus's word for the face; only its ID field keeps the name),
+"persona", "video agent".
+
 **Audit entry**:
 One change a person made through the Console, as builder-api records it: the
 [[User]], the [[Workspace]], the [[Role]] they acted under, what changed, and, when
