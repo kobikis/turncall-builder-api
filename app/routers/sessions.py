@@ -227,6 +227,15 @@ async def tts_voices(provider: str, ctx: AuthContext = Depends(require_member)) 
     return {"success": True, "data": {"voices": await provider_catalog.tts_voices(provider, await _workspace_keys(ctx))}}
 
 
+@router.get("/providers/avatar/{provider}/avatars")
+async def avatars(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
+    """The account's Avatars (HeyGen or Tavus), fetched live (cached)."""
+    if provider not in provider_catalog.AVATAR_PROVIDERS:
+        known = ", ".join(provider_catalog.AVATAR_PROVIDERS)
+        raise HTTPException(status_code=422, detail=f"unknown avatar provider {provider!r} — one of {known}")
+    return {"success": True, "data": {"avatars": await provider_catalog.avatars(provider, await _workspace_keys(ctx))}}
+
+
 @router.get("/providers/tts/{provider}/models")
 def tts_models(provider: str) -> dict[str, Any]:
     """Model ids for a TTS provider (fixed lists; none for Deepgram)."""
