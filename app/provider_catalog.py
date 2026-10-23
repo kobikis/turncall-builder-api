@@ -449,6 +449,8 @@ _PROBES: dict[str, tuple[str, Any]] = {
         lambda k: {"X-API-Key": k, "Cartesia-Version": "2024-06-10"},
     ),
     "tavus": ("https://tavusapi.com/v2/replicas", lambda k: {"x-api-key": k}),
+    # A HeyGen key is a LiveAvatar key: pipecat's HeyGen service calls LiveAvatar.
+    "heygen": ("https://api.liveavatar.com/v1/avatars", lambda k: {"X-API-KEY": k}),
     # Telnyx: the balance needs the key and changes nothing (#84).
     "telnyx": ("https://api.telnyx.com/v2/balance", lambda k: {"Authorization": f"Bearer {k}"}),
     # AssemblyAI has no models endpoint; its transcript list authenticates.

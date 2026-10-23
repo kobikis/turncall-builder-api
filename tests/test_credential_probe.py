@@ -48,7 +48,23 @@ def test_unreachable_is_unverified_not_rejected(monkeypatch):
 
 def test_a_provider_with_nothing_to_ask_is_unchecked():
     assert asyncio.run(provider_catalog.probe("aws", {"access_key_id": "A"}))["status"] == "unchecked"
-    assert asyncio.run(provider_catalog.probe("heygen", {"api_key": "k"}))["status"] == "unchecked"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(200, "valid"), (401, "rejected"), (403, "rejected"), (500, "unverified")]
+)
+def test_heygen_key_is_checked_against_liveavatars_avatar_list(monkeypatch, status, expected):
+    """A HeyGen key is a LiveAvatar key (the API pipecat's HeyGen service calls)."""
+    seen = _answering(monkeypatch, status)
+    result = asyncio.run(provider_catalog.probe("heygen", {"api_key": "k"}))
+    assert result["status"] == expected
+    assert result["checked"] == "GET https://api.liveavatar.com/v1/avatars"
+    assert seen[0].headers["x-api-key"] == "k"
+
+
+def test_an_unreachable_liveavatar_leaves_a_heygen_key_unverified(monkeypatch):
+    _answering(monkeypatch, raise_exc=httpx.ConnectError("down"))
+    assert asyncio.run(provider_catalog.probe("heygen", {"api_key": "k"}))["status"] == "unverified"
 
 
 def test_assemblyai_key_is_checked_against_its_transcript_list(monkeypatch):
