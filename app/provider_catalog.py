@@ -437,6 +437,13 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str, key: str) 
 
 AVATAR_PROVIDERS = ("heygen", "tavus")
 
+# The picker lists these and a saved HeyGen key is checked against them (_PROBES).
+_LIVEAVATAR_AVATARS = "https://api.liveavatar.com/v1/avatars"
+
+
+def _liveavatar_headers(key: str) -> dict[str, str]:
+    return {"X-API-KEY": key}
+
 
 async def avatars(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
     """The account's Avatars as {value: the ID TurnCall takes, label: its name}."""
@@ -450,40 +457,58 @@ async def _fetch_avatars(client: httpx.AsyncClient, provider: str, key: str) -> 
     if provider == "heygen":
         return await _liveavatar_avatars(client, key)
     if provider == "tavus":
-        return await _tavus_replicas(client, key)
+        return await _tavus_faces(client, key)
     return []
 
 
 async def _liveavatar_avatars(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
     """The account's own avatars, then LiveAvatar's stock ones: custom avatars
-    are a paid add-on, so most accounts run a stock one (the Sandbox's included)."""
-    own = await _liveavatar_page(client, key, "https://api.liveavatar.com/v1/avatars")
-    stock = await _liveavatar_page(client, key, "https://api.liveavatar.com/v1/avatars/public")
-    return own + stock
+    are a paid add-on, so most accounts run a stock one (the Sandbox's included).
+    Each half degrades alone: one request failing keeps what the other found,
+    and only both failing is the catalog's failure (stale list or empty)."""
+    own = await _attempt(_liveavatar_page(client, key, _LIVEAVATAR_AVATARS))
+    stock = await _attempt(_liveavatar_page(client, key, f"{_LIVEAVATAR_AVATARS}/public"))
+    if isinstance(own, Exception) and isinstance(stock, Exception):
+        raise own
+    for half, result in (("own", own), ("stock", stock)):
+        if isinstance(result, Exception):
+            logger.warning("LiveAvatar %s avatars unavailable, listing the rest: %s", half, result)
+    return [*_or_none(own), *_or_none(stock)]
+
+
+async def _attempt(coro) -> list[dict[str, str]] | Exception:
+    try:
+        return await coro
+    except Exception as exc:  # noqa: BLE001 — the caller decides what one failure costs
+        return exc
+
+
+def _or_none(result: list[dict[str, str]] | Exception) -> list[dict[str, str]]:
+    return [] if isinstance(result, Exception) else result
 
 
 async def _liveavatar_page(client: httpx.AsyncClient, key: str, url: str) -> list[dict[str, str]]:
     # One page at LiveAvatar's maximum; the field still takes a typed ID past it.
-    r = await client.get(url, params={"page_size": 100}, headers={"X-API-KEY": key})
+    r = await client.get(url, params={"page_size": 100}, headers=_liveavatar_headers(key))
     r.raise_for_status()
     results = (r.json().get("data") or {}).get("results", [])
     pairs = [_pair(a["id"], a.get("name") or a["id"]) for a in results if _live(a)]
     return sorted(pairs, key=lambda p: p["label"])
 
 
-async def _tavus_replicas(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
-    """The account's replicas. Tavus now calls them faces (`/v2/faces`,
-    `face_id`); `/v2/replicas` and `replica_id` stay as its aliases, so either
-    spelling of a row is read, and the ID is what TurnCall's `replica_id` takes."""
+async def _tavus_faces(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
+    """The account's Avatars. Tavus calls them faces (`/v2/faces`, `face_id`);
+    `/v2/replicas` and `replica_id` stay as its aliases, so either spelling of a
+    row is read, and the ID is what TurnCall's `replica_id` takes."""
     r = await client.get("https://tavusapi.com/v2/faces", params={"limit": 100}, headers={"x-api-key": key})
     r.raise_for_status()
     pairs = []
     for face in r.json().get("data", []):
         if not isinstance(face, dict) or face.get("status", "completed") != "completed":
             continue  # `started` is still training, `error` never will
-        replica_id = face.get("face_id") or face.get("replica_id")
-        if replica_id:
-            pairs.append(_pair(replica_id, face.get("face_name") or face.get("replica_name") or replica_id))
+        face_id = face.get("face_id") or face.get("replica_id")
+        if face_id:
+            pairs.append(_pair(face_id, face.get("face_name") or face.get("replica_name") or face_id))
     return sorted(pairs, key=lambda p: p["label"])
 
 
@@ -519,7 +544,7 @@ _PROBES: dict[str, tuple[str, Any]] = {
     ),
     "tavus": ("https://tavusapi.com/v2/replicas", lambda k: {"x-api-key": k}),
     # A HeyGen key is a LiveAvatar key: pipecat's HeyGen service calls LiveAvatar.
-    "heygen": ("https://api.liveavatar.com/v1/avatars", lambda k: {"X-API-KEY": k}),
+    "heygen": (_LIVEAVATAR_AVATARS, _liveavatar_headers),
     # Telnyx: the balance needs the key and changes nothing (#84).
     "telnyx": ("https://api.telnyx.com/v2/balance", lambda k: {"Authorization": f"Bearer {k}"}),
     # AssemblyAI has no models endpoint; its transcript list authenticates.

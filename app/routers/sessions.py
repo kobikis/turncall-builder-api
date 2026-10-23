@@ -229,7 +229,7 @@ async def tts_voices(provider: str, ctx: AuthContext = Depends(require_member)) 
 
 @router.get("/providers/avatar/{provider}/avatars")
 async def avatars(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
-    """The account's Avatars (HeyGen) or replicas (Tavus), fetched live (cached)."""
+    """The account's Avatars (HeyGen or Tavus), fetched live (cached)."""
     if provider not in provider_catalog.AVATAR_PROVIDERS:
         known = ", ".join(provider_catalog.AVATAR_PROVIDERS)
         raise HTTPException(status_code=422, detail=f"unknown avatar provider {provider!r} — one of {known}")

@@ -101,6 +101,28 @@ def test_heygen_offers_the_stock_avatars_after_the_accounts_own(client, monkeypa
     assert all(r.url.params["page_size"] == "100" for r in asked)  # LiveAvatar's maximum
 
 
+@pytest.mark.parametrize(("failing", "kept"), [
+    ("/v1/avatars", {"value": "s-1", "label": "Stock"}),
+    ("/v1/avatars/public", {"value": "own", "label": "Own"}),
+])
+@pytest.mark.parametrize("failure", ["http_error", "unreachable"])
+def test_heygen_keeps_one_half_of_the_list_when_the_other_fails(client, monkeypatch, failing, kept, failure):
+    # The account's own avatars and the stock ones are two requests; one of
+    # them failing must not empty the picker of what the other found.
+    def handler(request):
+        if request.url.path == failing:
+            if failure == "unreachable":
+                raise httpx.ConnectError("liveavatar is down")
+            return httpx.Response(500, json={"message": "internal error"})
+        if request.url.path == "/v1/avatars/public":
+            return httpx.Response(200, json=_liveavatar_page({"id": "s-1", "name": "Stock"}))
+        return httpx.Response(200, json=_liveavatar_page({"id": "own", "name": "Own"}))
+
+    _keys(monkeypatch, {"heygen": "k"})
+    _serving(monkeypatch, handler)
+    assert _avatars(client, "heygen") == [kept]
+
+
 def test_heygen_leaves_out_avatars_that_cannot_run_a_call(client, monkeypatch):
     def handler(request):
         if request.url.path == "/v1/avatars/public":
@@ -117,8 +139,8 @@ def test_heygen_leaves_out_avatars_that_cannot_run_a_call(client, monkeypatch):
     assert _avatars(client, "heygen") == [{"value": "ready", "label": "Ready"}]
 
 
-def test_tavus_lists_the_accounts_replicas_by_name_with_the_workspaces_key(client, monkeypatch):
-    # Tavus renamed replicas to faces; /v2/replicas and `replica_id` stay as
+def test_tavus_lists_the_accounts_avatars_by_name_with_the_workspaces_key(client, monkeypatch):
+    # Tavus calls an Avatar a face; /v2/replicas and `replica_id` stay as
     # aliases, and the ID TurnCall takes is still `replica_id`.
     def handler(request):
         assert request.url.host == "tavusapi.com"
