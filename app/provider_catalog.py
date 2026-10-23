@@ -5,7 +5,8 @@ options instead of a hand-maintained list. Keys come from the Workspace's
 Integration when it has one (#56), so the pickers list what the account that will
 run the call actually has; otherwise from the builder's own env (OPENAI_API_KEY,
 ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, CARTESIA_API_KEY, DEEPGRAM_API_KEY,
-GOOGLE_API_KEY, ASSEMBLYAI_API_KEY, XAI_API_KEY;
+GOOGLE_API_KEY, ASSEMBLYAI_API_KEY, XAI_API_KEY, HEYGEN_LIVE_AVATAR_API_KEY,
+TAVUS_API_KEY;
 OpenRouter's model list is public). Best-effort: a provider
 with no key / no list API / an error yields [] (the console still allows free
 text), and a stale cache is served over a transient failure. Cached ~1h.
@@ -162,6 +163,9 @@ _ENV = {
     "cartesia": "CARTESIA_API_KEY",
     "assemblyai": "ASSEMBLYAI_API_KEY",
     "xai": "XAI_API_KEY",
+    # The same names TurnCall reads for the video avatars.
+    "heygen": "HEYGEN_LIVE_AVATAR_API_KEY",
+    "tavus": "TAVUS_API_KEY",
 }
 _ACCOUNT = {"openai_live": "openai"}
 
@@ -427,6 +431,71 @@ async def _fetch_tts_voices(client: httpx.AsyncClient, provider: str, key: str) 
     if provider == "xai":
         return await _xai_voices(client, key)
     return []
+
+
+# --- Avatars (#126) ------------------------------------------------------------
+
+AVATAR_PROVIDERS = ("heygen", "tavus")
+
+
+async def avatars(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
+    """The account's Avatars as {value: the ID TurnCall takes, label: its name}."""
+    key = _key(provider, keys)
+    return await _cached(f"avatar:{provider}:{_fp(key)}", lambda c: _fetch_avatars(c, provider, key))
+
+
+async def _fetch_avatars(client: httpx.AsyncClient, provider: str, key: str) -> list[dict[str, str]]:
+    if not key:
+        return []
+    if provider == "heygen":
+        return await _liveavatar_avatars(client, key)
+    if provider == "tavus":
+        return await _tavus_replicas(client, key)
+    return []
+
+
+async def _liveavatar_avatars(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
+    """The account's own avatars, then LiveAvatar's stock ones: custom avatars
+    are a paid add-on, so most accounts run a stock one (the Sandbox's included)."""
+    own = await _liveavatar_page(client, key, "https://api.liveavatar.com/v1/avatars")
+    stock = await _liveavatar_page(client, key, "https://api.liveavatar.com/v1/avatars/public")
+    return own + stock
+
+
+async def _liveavatar_page(client: httpx.AsyncClient, key: str, url: str) -> list[dict[str, str]]:
+    # One page at LiveAvatar's maximum; the field still takes a typed ID past it.
+    r = await client.get(url, params={"page_size": 100}, headers={"X-API-KEY": key})
+    r.raise_for_status()
+    results = (r.json().get("data") or {}).get("results", [])
+    pairs = [_pair(a["id"], a.get("name") or a["id"]) for a in results if _live(a)]
+    return sorted(pairs, key=lambda p: p["label"])
+
+
+async def _tavus_replicas(client: httpx.AsyncClient, key: str) -> list[dict[str, str]]:
+    """The account's replicas. Tavus now calls them faces (`/v2/faces`,
+    `face_id`); `/v2/replicas` and `replica_id` stay as its aliases, so either
+    spelling of a row is read, and the ID is what TurnCall's `replica_id` takes."""
+    r = await client.get("https://tavusapi.com/v2/faces", params={"limit": 100}, headers={"x-api-key": key})
+    r.raise_for_status()
+    pairs = []
+    for face in r.json().get("data", []):
+        if not isinstance(face, dict) or face.get("status", "completed") != "completed":
+            continue  # `started` is still training, `error` never will
+        replica_id = face.get("face_id") or face.get("replica_id")
+        if replica_id:
+            pairs.append(_pair(replica_id, face.get("face_name") or face.get("replica_name") or replica_id))
+    return sorted(pairs, key=lambda p: p["label"])
+
+
+def _live(avatar: Any) -> bool:
+    """An avatar a session can start with: not training, failed or expired.
+    A row that states no status is offered rather than guessed about."""
+    return (
+        isinstance(avatar, dict)
+        and bool(avatar.get("id"))
+        and avatar.get("status", "ACTIVE") == "ACTIVE"
+        and not avatar.get("is_expired")
+    )
 
 
 # --- credential validation (#56) ---------------------------------------------
