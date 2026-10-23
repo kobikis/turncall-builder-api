@@ -228,6 +228,24 @@ written by hand.
 - **Test variables** — Test Chat and Test Voice fill the agent's
   `{{placeholders}}` the way call-init would (#88).
 
+## V7 — Video avatar in the console (shipped)
+
+An agent's avatar can be seen before anyone else does (#124).
+
+- **The test call shows it.** The console's voice test keeps the face TurnCall
+  sends and shows it in the Test panel, on cascade and speech-to-speech agents
+  alike (builder-web#117, #120; turncall#401). When there is no face, the panel
+  says why, from TurnCall's `avatar.unavailable` call event (builder-web#121,
+  turncall#402).
+- **Picked, not pasted.** `GET /providers/avatar/{provider}/avatars` lists a
+  workspace's HeyGen (LiveAvatar) avatars or Tavus replicas by name, built like
+  the TTS voices endpoint (#126). The section locks the ID to LiveAvatar's
+  sandbox avatar when Sandbox is ticked and refuses a save with no ID
+  (builder-web#118).
+- **The HeyGen key is checked** on save, against LiveAvatar's avatar list
+  (#125).
+- Still open: the live check in Chrome (#127).
+
 ## Kubernetes (built, not yet merged)
 
 - **One Helm release for everything** — the chart in
