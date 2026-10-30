@@ -43,6 +43,7 @@ def test_emitted_fields_match_the_mapper():
         "avatar",
         "skills",
         "max_loaded_skills",
+        "procedures",
     }
 
 

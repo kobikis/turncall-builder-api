@@ -53,6 +53,10 @@ _PASSTHROUGH = (
     # Workspace's Skill library, and its 422 names the entry.
     "skills",
     "max_loaded_skills",
+    # Guided procedures (turncall#417, #137): graphs of steps the agent
+    # follows. Sent as written: TurnCall checks the graph, and its 422 names
+    # the procedure and the step (`field_errors`).
+    "procedures",
 )
 
 

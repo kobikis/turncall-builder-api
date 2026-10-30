@@ -22,6 +22,7 @@ from typing import Any, Literal
 from deepagents import create_deep_agent
 
 from .pipedream import CATALOG
+from .procedure_schema import PROCEDURES_PROPERTY
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from langchain.agents.structured_output import ToolStrategy
 
@@ -306,6 +307,8 @@ _AGENT_CONFIG_SCHEMA["properties"]["max_loaded_skills"] = {
     "Leave it out unless the user asks.",
 }
 
+_AGENT_CONFIG_SCHEMA["properties"]["procedures"] = PROCEDURES_PROPERTY
+
 COMPOSE_TOOL: dict[str, Any] = {
     "name": "compose",
     "description": "Drive the agent-building conversation. Ask ONE clarifying "
@@ -466,6 +469,15 @@ _D_PIPELINE = """Voice pipeline: default to cascade — leave pipeline_mode \
 unset and use the tts block. Anything else (speech-to-speech, voicemail \
 detection) is a departure from the default and has a skill covering it."""
 
+# Whether a process is a procedure is decided on every turn, so this stays in
+# the prompt; how to write one is the procedures builder skill (#137).
+_D_PROCEDURES = """Procedures: when the user describes a step-by-step \
+process the agent must follow on a call — troubleshooting, collections, intake, \
+a regulated script — write it as agent_config.procedures, not as prose in the \
+system_prompt: the platform then holds the route and shows the agent one step \
+at a time. Open the procedures builder skill before writing one. Keep every \
+procedure already in the config as it is unless the user asks to change it."""
+
 _D_KNOWLEDGE = """Knowledge base: the user can attach documents (a menu, price \
 list, policy, FAQ) to the agent, and the agent gets their full contents at call \
 time. NEVER ask the user to paste a document's contents — this holds before \
@@ -567,6 +579,7 @@ def build_system_prompt(
         _D_CALL_CONTEXT,
         _D_DEFAULTS,
         _D_PIPELINE,
+        _D_PROCEDURES,
         _D_KNOWLEDGE,
         _integrations_directive(),
     ]

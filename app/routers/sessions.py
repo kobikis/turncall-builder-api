@@ -362,7 +362,9 @@ async def _turn_events(
         )
     notes: list[str] = []
     if result.action == "finalize":
-        config, notes = _published_skills_only(result.agent_config or {}, agent_skills)
+        config, notes = _published_skills_only(
+            _keep_procedures(result.agent_config or {}, sess["config"]), agent_skills
+        )
         result = replace(result, agent_config=config)
         history.append(
             {"role": "assistant", "content": " ".join(["Updated the agent configuration.", *notes])}
@@ -378,6 +380,19 @@ async def _turn_events(
     if result.action == "finalize" and sess["agent_id"]:
         payload["pending_apply"] = True
     yield {"type": "result", **payload}
+
+
+def _keep_procedures(
+    config: dict[str, Any], current: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The finalized config, with the current config's procedures when it left
+    `procedures` out (#137): an edit that did not touch them keeps them, as a
+    long nested field is the easiest thing for a model to drop. An empty list
+    still removes them."""
+    kept = (current or {}).get("procedures")
+    if "procedures" in config or not kept:
+        return config
+    return {**config, "procedures": kept}
 
 
 def _published_skills_only(

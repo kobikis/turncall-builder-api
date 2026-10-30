@@ -339,3 +339,5 @@ ADR-0027). A hosted tier is decided at release (turncall#310).
 - ADR-0026 — The Agent Backend mints browser session tokens
 - ADR-0027 — End-of-call inputs can come from a takeaway
 - ADR-0028 — The builder audits people; TurnCall audits keys
+- ADR-0029 — A Skill library per Workspace
+- ADR-0030 — Procedures in the Builder escalate by transfer
