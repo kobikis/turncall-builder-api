@@ -47,7 +47,10 @@ _PROCEDURE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "id": {**_STEP_ID, "description": "snake_case, unique in the procedure."},
+                    "id": {
+                        **_STEP_ID,
+                        "description": "snake_case, unique in the procedure.",
+                    },
                     "kind": {
                         "type": "string",
                         "enum": ["ask", "instruct", "check", "escalate", "end"],
@@ -75,7 +78,10 @@ _PROCEDURE_SCHEMA: dict[str, Any] = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "to": {**_STEP_ID, "description": "The step it goes to."},
+                                "to": {
+                                    **_STEP_ID,
+                                    "description": "The step it goes to.",
+                                },
                                 "when": {
                                     "type": "string",
                                     "description": "The condition, in plain language.",
@@ -98,13 +104,18 @@ _PROCEDURE_SCHEMA: dict[str, Any] = {
                                         "description": "E.164, e.g. +15550009999: a "
                                         "number the user gave.",
                                     },
-                                    "transfer_mode": {"type": "string", "enum": ["cold", "warm"]},
+                                    "transfer_mode": {
+                                        "type": "string",
+                                        "enum": ["cold", "warm"],
+                                    },
                                     "briefing": {
                                         "anyOf": [
                                             {"type": "string"},
                                             {
                                                 "type": "object",
-                                                "properties": {"from_summary": {"type": "boolean"}},
+                                                "properties": {
+                                                    "from_summary": {"type": "boolean"}
+                                                },
                                             },
                                         ],
                                         "description": "Warm only: what the human "
