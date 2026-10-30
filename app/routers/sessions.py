@@ -21,6 +21,7 @@ from .. import (
     compliance,
     integration_store,
     mcp_registry_store,
+    pipedream_store,
     provider_integrations,
     provider_catalog,
     runtime,
@@ -637,6 +638,9 @@ async def create_agent(
                 config,
                 tools_base_url,
                 tools_secret=secret or None,
+                # Attached Connected apps become MCP servers from the first save,
+                # as on every update: a step tool naming an app's tool needs them.
+                pipedream_target=await pipedream_store.mcp_target(pool, ctx.workspace_id),
                 registered_mcp_servers=await mcp_registry_store.resolve(
                     pool, ctx.workspace_id, config.get("workspace_mcp_servers")
                 ),

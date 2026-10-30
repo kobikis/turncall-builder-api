@@ -217,3 +217,19 @@ def test_a_calls_read_carries_its_procedures_beside_its_skills(client, mocks):
     listed = client.get("/agents/a1/calls").json()["data"][0]
 
     assert one["procedures"] == listed["procedures"] == SUMMARY
+
+
+def test_create_sends_the_attached_apps_a_step_tool_names(client, mocks):
+    """Create maps attached Connected apps to MCP servers, as an update does:
+    without them TurnCall refuses a step whose tool is an app's."""
+    _wire_create_success(mocks)
+    _target(mocks)
+    session = mocks.store.get_session.return_value
+    session["config"] = {
+        **session["config"],
+        "integrations": [{"app": "google_calendar", "mid_call": True}],
+        "procedures": PROCEDURES,
+    }
+    assert client.post("/sessions/s1/create").status_code == 200
+    sent = mocks.client.create_agent.await_args.args[0]["config"]
+    assert [s["headers"]["x-pd-app-slug"] for s in sent["mcp_servers"]] == ["google_calendar"]
