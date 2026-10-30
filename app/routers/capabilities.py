@@ -85,12 +85,17 @@ async def _ensure_library(audit: AuditTrail, ctx: AuthContext) -> dict[str, Any]
         # The platform key is wrong or unset (turncall#102): nothing was made.
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if created:
+        # Begun before linking: the library exists from here, so linking that
+        # raises leaves it in the log as partial, never absent.
+        change = audit.begin(
+            ctx, "capability_library", ctx.workspace_id, "created",
+            resource_name="Capability library",
+            after={"project_id": library["project_id"], "links": {}},
+        )
         # Each link is recorded, and one that failed is retried from the
         # library's page: the Capability is made either way.
         links = await capability_library.link_all(pool, client, ctx.workspace_id)
-        await audit.record(
-            ctx, "capability_library", ctx.workspace_id, "created",
-            resource_name="Capability library",
+        await change.record(
             after={"project_id": library["project_id"], "links": _link_states(links)},
             agent_ids=[link["agent_id"] for link in links],
         )

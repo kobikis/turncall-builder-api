@@ -62,6 +62,23 @@ def test_making_the_library_links_every_agent_project_and_the_webhook_project(cl
     assert {"p1", "p2", "wp"} <= linked
 
 
+def test_a_library_whose_linking_fails_is_in_the_log_as_partial(client, mocks, tc):
+    # The library is made in TurnCall before its projects are linked; linking
+    # failing outright (not one link refused: that is recorded and retried)
+    # must not leave a library nothing in the log says was made.
+    mocks.registry.list_backends.side_effect = RuntimeError("database went away")
+
+    r = client.post("/capabilities", json=VERIFY)
+
+    assert r.status_code == 500
+    assert tc.sent("POST", "/v1/projects")  # the library was made
+    [entry] = audit_entries(mocks)
+    assert (entry["resource_type"], entry["action"]) == ("capability_library", "created")
+    assert entry["outcome"] == "partial"
+    assert entry["changes"]["/project_id"] == {"before": None, "after": "proj-1"}
+    assert not tc.sent("POST", "/v1/skills")  # and no Capability
+
+
 def test_running_the_links_again_writes_nothing(client, mocks, tc):
     client.post("/capabilities", json=VERIFY)
     before = len(tc.sent("PUT", "/v1/projects/"))
