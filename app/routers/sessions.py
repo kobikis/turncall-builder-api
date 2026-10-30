@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -32,6 +33,7 @@ from .._helpers import (
     _backend_view,
     _normalize_config,
     _validate_agent_config,
+    _turncall_http_error,
 )
 from ..audit import Audit
 from ..backends import generator, registry, scaffold, toolgen
@@ -531,9 +533,13 @@ async def apply_edit(
     if not b:
         raise HTTPException(status_code=404, detail="agent backend not found")
     change = begin_config_change(audit, ctx, b, sess["config"])
-    result = await agent_update.apply_update(
-        pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
-    )
+    try:
+        result = await agent_update.apply_update(
+            pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
+        )
+    except httpx.HTTPStatusError as exc:
+        # TurnCall refused the config: its status and reason, as the form's save.
+        raise _turncall_http_error(exc) from exc
     await change.record()
     return {"success": True, "data": {"agent_id": sess["agent_id"], **result}}
 
@@ -629,6 +635,10 @@ async def create_agent(
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent provisioning failed for project %s", project_id)
         await _rollback_provisioning(client, project_id, agent_id, key)
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422:
+            # TurnCall refused the config (a Capability's tool colliding, say):
+            # a retry fails the same way, so say what to fix instead.
+            raise _turncall_http_error(exc) from exc
         raise HTTPException(
             status_code=502,
             detail="Agent provisioning failed in TurnCall — rolled back; please retry.",

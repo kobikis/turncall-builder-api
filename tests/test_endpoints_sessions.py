@@ -278,6 +278,22 @@ def test_apply_pushes_to_generated_agent(client, mocks, monkeypatch):
     assert r.json()["data"] == {"agent_id": "a1", "backend_regenerated": True}
 
 
+def test_apply_refused_by_turncall_is_its_422(client, mocks, monkeypatch):
+    from tests.test_endpoints_agents import COLLISION, _refused
+
+    mocks.store.get_session.return_value = {
+        "history": [], "config": {"name": "A", "system_prompt": "hi"}, "agent_id": "a1",
+    }
+    mocks.registry.get_backend.return_value = {"agent_id": "a1", "port": 9001, "status": "running", "config": {}}
+    monkeypatch.setattr(
+        sessions.agent_update, "apply_update",
+        AsyncMock(side_effect=_refused(COLLISION, {"field": "skills[0]"})),
+    )
+    r = client.post("/sessions/sess-1/apply")
+    assert r.status_code == 422
+    assert r.json()["errors"] == [{"field": "skills[0]", "message": COLLISION}]
+
+
 def test_apply_before_generation_400(client, mocks):
     mocks.store.get_session.return_value = {"history": [], "config": {}, "agent_id": None}
     r = client.post("/sessions/sess-1/apply")
