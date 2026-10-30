@@ -23,13 +23,13 @@ def test_the_prompt_lists_the_published_capabilities():
     prompt = build_system_prompt(first_turn=False, capabilities=PUBLISHED)
     assert "- take_payment: When the caller wants to pay a bill" in prompt
     assert "- verify_caller: When the caller asks about their account" in prompt
-    assert "never create, edit or describe a new Capability" in prompt
+    assert "never create, edit or describe a new skill" in prompt
 
 
 @pytest.mark.parametrize("capabilities", [None, []])
 def test_with_none_the_prompt_says_nothing_of_them(capabilities):
     prompt = build_system_prompt(first_turn=False, capabilities=capabilities)
-    assert "Capabilit" not in prompt
+    assert "published skills" not in prompt and "Skills page" not in prompt
 
 
 def test_the_config_schema_offers_skills_by_name_only():
@@ -78,10 +78,10 @@ def test_an_unpublished_name_is_dropped_with_a_note(client, mocks, monkeypatch, 
     data = r.json()["data"]
     assert data["agent_config"]["skills"] == [{"skill": "verify_caller"}]
     assert data["notes"] == [
-        "Left out the Capability 'take_payment': this workspace has no published "
-        "Capability by that name.",
-        "Left out the Capability 'made_up': this workspace has no published "
-        "Capability by that name.",
+        "Left out the skill 'take_payment': this workspace has no published "
+        "skill by that name.",
+        "Left out the skill 'made_up': this workspace has no published "
+        "skill by that name.",
     ]
     saved = mocks.store.save_config.await_args.args[2]
     assert saved["skills"] == [{"skill": "verify_caller"}]

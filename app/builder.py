@@ -293,8 +293,8 @@ _AGENT_CONFIG_SCHEMA["properties"]["skills"] = {
         },
         "required": ["skill"],
     },
-    "description": "Capabilities the agent may load during a call, by name: "
-    "[{\"skill\": \"<name>\"}]. Only names from the Workspace's Capabilities "
+    "description": "Skills the agent may load during a call, by name: "
+    "[{\"skill\": \"<name>\"}]. Only names from the Workspace's skills "
     "listed in your instructions; leave it out when none are listed or none fit. "
     "Keep an entry already in the config as it is (a version_id included).",
 }
@@ -302,7 +302,7 @@ _AGENT_CONFIG_SCHEMA["properties"]["max_loaded_skills"] = {
     "type": "integer",
     "minimum": 1,
     "maximum": 10,
-    "description": "How many Capabilities may be loaded at once (default 3). "
+    "description": "How many skills may be loaded at once (default 3). "
     "Leave it out unless the user asks.",
 }
 
@@ -522,15 +522,16 @@ def _capabilities_directive(capabilities: list[dict[str, str]]) -> str:
     none" is a topic the model then raises with the user."""
     listed = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
     return (
-        "This Workspace has these published Capabilities: instructions and tools "
-        "an agent loads during a call when it needs them.\n"
+        "This Workspace has these published skills: instructions and tools an "
+        "agent loads during a call when it needs them. They are the agent's, not "
+        "your own builder skills.\n"
         f"{listed}\n"
         "When one fits what the agent has to do, list it in agent_config.skills as "
         '{"skill": "<name>"} and leave its job to it: do not repeat its '
         "instructions in the system prompt or write its tools as custom tools. "
         "Use only these names. You never create, edit or describe a new "
-        "Capability; when the agent needs one that is not here, say it can be "
-        "added on the Capabilities page."
+        "skill; when the agent needs one that is not here, say it can be "
+        "added on the Skills page."
     )
 
 
@@ -711,7 +712,7 @@ def _progress_for(name: str, args: dict[str, Any]) -> Progress | None:
         return Progress(f"Reading {os.path.basename(path)}")
     if name == "read_file" and "/SKILL.md" in path:
         skill = path.rsplit("/", 2)[-2]
-        return Progress(f"Using the {skill} skill", skill=skill)
+        return Progress(f"Using the {skill} builder skill", skill=skill)
     return None
 
 

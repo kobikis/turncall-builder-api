@@ -398,8 +398,8 @@ def _published_skills_only(
             kept.append(entry)
         else:
             notes.append(
-                f"Left out the Capability {name!r}: this workspace has no published "
-                "Capability by that name."
+                f"Left out the skill {name!r}: this workspace has no published "
+                "skill by that name."
             )
     return {**config, "skills": kept}, notes
 

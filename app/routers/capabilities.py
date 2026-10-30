@@ -56,7 +56,7 @@ class CapabilityEdit(BaseModel):
 
 
 def _no_library() -> HTTPException:
-    return HTTPException(status_code=404, detail="this workspace has no Capabilities yet")
+    return HTTPException(status_code=404, detail="this workspace has no skills yet")
 
 
 async def library_or_none(workspace_id: str) -> dict[str, Any] | None:
@@ -89,7 +89,7 @@ async def _ensure_library(audit: AuditTrail, ctx: AuthContext) -> dict[str, Any]
         # raises leaves it in the log as partial, never absent.
         change = audit.begin(
             ctx, "capability_library", ctx.workspace_id, "created",
-            resource_name="Capability library",
+            resource_name="Skill library",
             after={"project_id": library["project_id"], "links": {}},
         )
         # Each link is recorded, and one that failed is retried from the
@@ -205,7 +205,7 @@ async def get_capability(name: Name, ctx: AuthContext = Depends(require_member))
         key=lambda v: v["version"], reverse=True,
     )
     if not versions:
-        raise HTTPException(status_code=404, detail=f"no Capability named {name!r}")
+        raise HTTPException(status_code=404, detail=f"no skill named {name!r}")
     live = next((v for v in versions if v["state"] == "published"), None)
     return {
         "success": True,
@@ -394,7 +394,7 @@ async def relink(audit: Audit, ctx: AuthContext = Depends(require_editor)) -> di
     if links:
         await audit.record(
             ctx, "capability_library", ctx.workspace_id, "linked",
-            resource_name="Capability library",
+            resource_name="Skill library",
             changes={
                 f"/links/{link['project_id']}": {"before": link["was"], "after": link["state"]}
                 for link in links

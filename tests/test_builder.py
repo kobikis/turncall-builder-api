@@ -487,7 +487,7 @@ async def test_stream_says_what_it_is_doing_then_what_it_decided(agent):
     events = [e async for e in builder_mod.stream([{"role": "user", "content": "hi"}])]
     assert [e.text for e in events[:-1]] == [
         "Reading menu.pdf",
-        "Using the takeaway-orders skill",
+        "Using the takeaway-orders builder skill",
     ]
     assert events[-1].action == "ask"
 

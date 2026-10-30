@@ -92,50 +92,51 @@ _Avoid_: batch, form, questionnaire
 One editable piece of the Builder's system prompt — voice pipeline, tools,
 guardrails, knowledge, defaults, plus the interview and language pieces.
 [[Build mode]] and [[Edit mode]] assemble different sets of them per turn, so a
-turn only carries guidance it can act on. Succeeded by [[Skill]] (ADR-0014).
+turn only carries guidance it can act on. Succeeded by [[Builder skill]] (ADR-0014).
 _Avoid_: section, rule, prompt fragment
 
-**Skill**:
+**Builder skill**:
 A named piece of the Builder's own expertise, loaded on demand: a description the
 Builder always sees, and instructions it reads only once that description matches
 what it is doing. Succeeds [[Discipline]] — the same guidance, but a turn pays for
 a skill's full text only when it needs it, which is what makes a large library of
 them affordable. Always about how to *build* an agent. Never about what a finished
 agent knows: that is [[Agent Knowledge]], which the voice agent reads to callers.
-_Avoid_: plugin, module, prompt fragment, knowledge (the caller-facing one)
+_Avoid_: skill (a finished agent's: a [[Skill]]), plugin, module, prompt fragment,
+knowledge (the caller-facing one)
 
 **Workspace skill**:
-A [[Skill]] written by an admin rather than shipped with the builder, mounted
+A [[Builder skill]] written by an admin rather than shipped with the builder, mounted
 alongside the built-in ones (ADR-0015). Scoped to the [[Workspace]] — "how we
 build agents here" — and guidance only: it teaches the Builder how to decide,
 never what to pick, because a skill loads only when it looks relevant and a
 default that applies most of the time is worse than none.
 _Avoid_: custom skill, template, override
 
-**Capability**:
+**Skill**:
 What a finished agent can pick up mid-call: a name, a description of when to use
 it, instructions, and webhook tools that call the author's own [[Tool server]] by
-URL (no generated handler, no Agent Backend). It is TurnCall's *skill*, under the
-Console's name: the agent sees only the names and descriptions until it loads
+URL (no generated handler, no Agent Backend). It is TurnCall's skill, under the
+same name: the agent sees only the names and descriptions until it loads
 one with `load_skill`, so a Workspace can share many without carrying them all in
 every prompt. Versioned like an agent: a draft is edited, publishing makes it the
 live version every agent following it gets on its next call, rolling back
 restores an earlier one, and an agent may pin one version instead. Lives in the
-Workspace's [[Capability library]]; an agent lists the ones it may load in its
-Config (`skills`). Never about how to build an agent: that is a [[Skill]].
-_Avoid_: skill (the Builder's own, and TurnCall's word kept to its API), plugin,
-tool bundle
+Workspace's [[Skill library]]; an agent lists the ones it may load in its
+Config (`skills`). Never about how to build an agent: that is a [[Builder skill]].
+The Builder's code and routes still say `capability` (ADR-0029's first name).
+_Avoid_: Capability (its name in the Console until 2026-10-30), plugin, tool bundle
 
-**Capability library**:
-The one TurnCall project per [[Workspace]] that holds its [[Capability|Capabilities]],
-made by the Builder on the Workspace's first Capability through the platform
+**Skill library**:
+The one TurnCall project per [[Workspace]] that holds its [[Skill|Skills]],
+made by the Builder on the Workspace's first skill through the platform
 bootstrap, with its admin key sealed here. Every agent project in the Workspace,
 and its webhook project, is linked to it (TurnCall's skill library link, which
-only the platform credential can set), so each agent resolves Capability names
+only the platform credential can set), so each agent resolves skill names
 there and only there. Linking is a [[Projection]]-style write: recorded per
 project, idempotent on re-run, and a failed link kept, shown and retried. It
 holds no provider keys. See ADR-0029.
-_Avoid_: skill library (TurnCall's word for the link), shared project, catalog
+_Avoid_: Capability library, shared project, catalog
 
 **Confirm**:
 The Builder turn between the last question and [[Finalize]]: it states what it
@@ -166,7 +167,7 @@ _Avoid_: webhook, callback, notification
 **Config surface**:
 The subset of TurnCall agent fields the Builder is allowed to set (name,
 system_prompt, first_message, llm, voice, built-in tools, `aws.region` for
-the AWS providers, and the [[Capability|Capabilities]] it may load: `skills`,
+the AWS providers, and the [[Skill|Skills]] it may load: `skills`,
 `[{skill, version_id?}]`, and `max_loaded_skills`, passed through as written).
 Everything outside it takes TurnCall defaults.
 
@@ -237,7 +238,7 @@ _Avoid_: orchestrator, gateway
 
 **Console**:
 The builder-web management UI: a sidebar with Agents, Phone Numbers,
-Integrations, Capabilities, Members and Skills (each list → detail → edit), plus the Builder
+Integrations, Skills, Members and Builder skills (each list → detail → edit), plus the Builder
 reached as the "new agent" path.
 _Avoid_: dashboard, admin panel
 

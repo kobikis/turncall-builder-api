@@ -90,3 +90,11 @@ project other projects already read from), and a project that does not exist.
   become a warning and a skipped skill, never a failed call. Saving an agent
   that lists them is refused, naming each entry (`skills[i] '<name>' cannot be
   resolved: this project's skill library is gone`).
+
+## Addendum (2026-10-30): Skills and Builder skills
+
+The Console now calls these [[Skill|Skills]] and the Builder's own guidance
+[[Builder skill|Builder skills]]: one name for one thing, the name the agent's
+config, TurnCall's API and its call records already use. The Builder's routes,
+modules, tables and audit resource types keep `capability`, so nothing stored
+or called changes.

@@ -139,7 +139,7 @@ def test_list_reports_the_reserved_names(client, mocks):
 def test_saving_over_a_built_in_name_is_refused(client, mocks):
     mocks.workspace_skills.builtin_names.return_value = {"agent-tools"}
     mocks.workspace_skills.validate.side_effect = ValueError(
-        "'agent-tools' is a built-in skill — choose another name"
+        "'agent-tools' is a built-in builder skill — choose another name"
     )
     r = client.put("/skills/agent-tools", json={"description": "d", "body": "b"})
     assert r.status_code == 422

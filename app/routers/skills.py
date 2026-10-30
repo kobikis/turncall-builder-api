@@ -91,5 +91,5 @@ async def delete_skill(
                 resource_name=name, before=_audited(before), after=None, db=conn,
             )
     if not deleted:
-        raise HTTPException(status_code=404, detail="no such skill")
+        raise HTTPException(status_code=404, detail="no such builder skill")
     return {"success": True, "data": {"deleted": name}}

@@ -512,7 +512,7 @@ def test_a_streamed_turn_narrates_then_answers(client, mocks, monkeypatch):
         "stream",
         FakeStream(
             Progress("Reading menu.pdf"),
-            Progress("Using the takeaway-orders skill", skill="takeaway-orders"),
+            Progress("Using the takeaway-orders builder skill", skill="takeaway-orders"),
             ComposeResult(action="ask", question="How many covers, typically?"),
         ),
     )
