@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import (
-    capability_library, compliance, db, integration_store, provider_integrations, runtime,
+    skill_library, compliance, db, integration_store, provider_integrations, runtime,
     telnyx_api, twilio_api,
     twilio_store,
 )
@@ -162,8 +162,8 @@ async def _workspace_project(pool: Any, workspace_id: str) -> tuple[dict[str, st
         await compliance.project_into_new_target(
             pool, client, workspace_id, compliance.webhook_target(workspace_id, wp)
         )
-        # And its calls' inline agents resolve Capabilities in the library.
-        await capability_library.link_new_project(pool, client, workspace_id, wp["project_id"])
+        # And its calls' inline agents resolve skills in the library.
+        await skill_library.link_new_project(pool, client, workspace_id, wp["project_id"])
     return wp, created
 
 

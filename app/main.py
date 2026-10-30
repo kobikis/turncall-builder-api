@@ -32,8 +32,8 @@ from .routers import (
     auth,
     audit as audit_router,
     campaigns,
+    builder_skills,
     calls,
-    capabilities,
     compliance,
     evals,
     github,
@@ -183,7 +183,7 @@ for _router in (
     takeaways,
     ambience,
     # Before `integrations`, whose `/integrations/{...}` routes are broader.
-    auth, workspaces, members, github, skills, capabilities, provider_integrations,
+    auth, workspaces, members, github, builder_skills, skills, provider_integrations,
     mcp_registry,
     twilio_integration, pipedream_project, audit_router,
     integrations,

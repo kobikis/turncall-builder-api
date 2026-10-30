@@ -1,4 +1,4 @@
-"""An agent's Capabilities in its Config (#133): `skills` and
+"""An agent's Skills in its Config (#133): `skills` and
 `max_loaded_skills` reach TurnCall untouched on every path that pushes a
 config, and TurnCall's refusal of one entry comes back naming it."""
 
@@ -54,7 +54,7 @@ def test_an_edit_sends_them_and_stores_them(client, mocks):
 
 
 def test_an_unrelated_save_keeps_them(client, mocks):
-    """The Console edits the prompt on an agent that lists Capabilities: the
+    """The Console edits the prompt on an agent that lists Skills: the
     whole config goes back, so they are still there."""
     mocks.registry.get_backend.return_value = backend_row(config=CONFIG)
     edited = {**CONFIG, "system_prompt": "Be brief."}

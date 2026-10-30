@@ -763,8 +763,8 @@ class TurnCallClient:
             "DELETE", f"/v1/takeaways/{takeaway_id}", api_key=api_key, extract="none"
         )
 
-    # --- skills (turncall#423): the Console's Capabilities, ADR-0029 -----------
-    # Every call is made with the Workspace's Capability library key.
+    # --- skills (turncall#423): the Console's Skills, ADR-0029 -----------
+    # Every call is made with the Workspace's Skill library key.
 
     async def list_skills(
         self,

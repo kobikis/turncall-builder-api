@@ -124,7 +124,8 @@ live version every agent following it gets on its next call, rolling back
 restores an earlier one, and an agent may pin one version instead. Lives in the
 Workspace's [[Skill library]]; an agent lists the ones it may load in its
 Config (`skills`). Never about how to build an agent: that is a [[Builder skill]].
-The Builder's code and routes still say `capability` (ADR-0029's first name).
+Its audit entries' resource type is `capability`, the name it was first
+written under (ADR-0029, addendum).
 _Avoid_: Capability (its name in the Console until 2026-10-30), plugin, tool bundle
 
 **Skill library**:

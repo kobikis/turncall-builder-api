@@ -276,8 +276,8 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "system_prompt", "llm", "tts"],
 }
-# The Capabilities the agent may load mid-call (#135): names only, from the
-# Workspace's published list in the prompt. A Capability is written on the
+# The skills the agent may load mid-call (#135): names only, from the
+# Workspace's published list in the prompt. A skill is written on the
 # Console, never here.
 _AGENT_CONFIG_SCHEMA["properties"]["skills"] = {
     "type": "array",
@@ -516,11 +516,11 @@ def _integrations_directive() -> str:
 _CLOSING = """Always respond by calling the compose tool."""
 
 
-def _capabilities_directive(capabilities: list[dict[str, str]]) -> str:
-    """The Workspace's published Capabilities, which an agent may list in
+def _agent_skills_directive(agent_skills: list[dict[str, str]]) -> str:
+    """The Workspace's published skills, which an agent may list in
     `skills`. Nothing at all when there are none: a section saying "there are
     none" is a topic the model then raises with the user."""
-    listed = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+    listed = "\n".join(f"- {c['name']}: {c['description']}" for c in agent_skills)
     return (
         "This Workspace has these published skills: instructions and tools an "
         "agent loads during a call when it needs them. They are the agent's, not "
@@ -540,7 +540,7 @@ def build_system_prompt(
     first_turn: bool,
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
-    capabilities: list[dict[str, str]] | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> str:
     """Assemble the Builder's prompt from the disciplines this turn can use.
 
@@ -579,8 +579,8 @@ def build_system_prompt(
             "content; do not ask the user to paste it."
         )
 
-    if capabilities:
-        parts.append(_capabilities_directive(capabilities))
+    if agent_skills:
+        parts.append(_agent_skills_directive(agent_skills))
 
     if current_config is not None:
         parts.append(_EDIT_SYSTEM.format(config=json.dumps(current_config, indent=2)))
@@ -752,7 +752,7 @@ async def step(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
-    capabilities: list[dict[str, str]] | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> ComposeResult:
     """Run one builder turn. `messages` is the running [{role, content}] history.
 
@@ -775,7 +775,7 @@ async def step(
         knowledge_docs=knowledge_docs,
         documents_dir=documents_dir,
         workspace_skills_dir=workspace_skills_dir,
-        capabilities=capabilities,
+        agent_skills=agent_skills,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -793,7 +793,7 @@ async def stream(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
-    capabilities: list[dict[str, str]] | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> AsyncIterator[Progress | ComposeResult]:
     """One turn, yielding what it is doing and finally what it decided.
 
@@ -814,7 +814,7 @@ async def stream(
             first_turn=first_turn,
             current_config=current_config,
             knowledge_docs=knowledge_docs,
-            capabilities=capabilities,
+            agent_skills=agent_skills,
         ),
         backend=_backend(documents_dir, workspace_skills_dir),
         skills=_skill_sources(workspace_skills_dir),

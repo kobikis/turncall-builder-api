@@ -48,9 +48,9 @@ _PASSTHROUGH = (
     "idle_message",
     "max_call_duration_seconds",
     "avatar",
-    # The Capabilities an agent may load ([{skill, version_id?}]) and how many
+    # The Skills an agent may load ([{skill, version_id?}]) and how many
     # at once (#133). Sent as written: TurnCall checks each against the
-    # Workspace's Capability library, and its 422 names the entry.
+    # Workspace's Skill library, and its 422 names the entry.
     "skills",
     "max_loaded_skills",
 )

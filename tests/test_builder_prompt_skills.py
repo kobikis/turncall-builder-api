@@ -1,6 +1,6 @@
-"""The Builder and the Workspace's Capabilities (#135): the prompt lists the
+"""The Builder and the Workspace's Skills (#135): the prompt lists the
 published ones, the model may name them in `skills`, and a name with no
-published Capability never reaches the saved config."""
+published Skill never reaches the saved config."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from conftest import FakeStream
 from app import builder
 from app.builder import ComposeResult, build_system_prompt
 from app.routers import sessions
-from tests.test_capabilities import VERIFY
+from tests.test_skills import VERIFY
 from tests.turncall_fake import FakeLibraryStore, FakeTurnCall
 
 PUBLISHED = [
@@ -19,16 +19,16 @@ PUBLISHED = [
 ]
 
 
-def test_the_prompt_lists_the_published_capabilities():
-    prompt = build_system_prompt(first_turn=False, capabilities=PUBLISHED)
+def test_the_prompt_lists_the_published_skills():
+    prompt = build_system_prompt(first_turn=False, agent_skills=PUBLISHED)
     assert "- take_payment: When the caller wants to pay a bill" in prompt
     assert "- verify_caller: When the caller asks about their account" in prompt
     assert "never create, edit or describe a new skill" in prompt
 
 
-@pytest.mark.parametrize("capabilities", [None, []])
-def test_with_none_the_prompt_says_nothing_of_them(capabilities):
-    prompt = build_system_prompt(first_turn=False, capabilities=capabilities)
+@pytest.mark.parametrize("agent_skills", [None, []])
+def test_with_none_the_prompt_says_nothing_of_them(agent_skills):
+    prompt = build_system_prompt(first_turn=False, agent_skills=agent_skills)
     assert "published skills" not in prompt and "Skills page" not in prompt
 
 
@@ -48,9 +48,9 @@ def library(client, mocks):
     fake = FakeTurnCall()
     fake.install()
     FakeLibraryStore(mocks)
-    v = client.post("/capabilities", json=VERIFY).json()["data"]["id"]
-    client.post(f"/capability-versions/{v}/publish")
-    client.post("/capabilities", json={**VERIFY, "name": "take_payment"})
+    v = client.post("/skills", json=VERIFY).json()["data"]["id"]
+    client.post(f"/skill-versions/{v}/publish")
+    client.post("/skills", json={**VERIFY, "name": "take_payment"})
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     return fake
 
@@ -59,7 +59,7 @@ def test_a_turn_is_given_the_published_ones(client, mocks, monkeypatch, library)
     fake = FakeStream(ComposeResult(action="ask", question="?"))
     monkeypatch.setattr(sessions, "stream", fake)
     client.post("/sessions/s1/messages", json={"message": "hi"})
-    assert fake.kwargs["capabilities"] == [
+    assert fake.kwargs["agent_skills"] == [
         {"name": "verify_caller", "description": VERIFY["description"]}
     ]
 
@@ -101,7 +101,7 @@ def test_a_config_naming_only_published_ones_has_no_notes(client, mocks, monkeyp
 
 def test_an_unreadable_list_filters_nothing(client, mocks, monkeypatch):
     """Unknown is not none: the turn goes on, and TurnCall checks at save."""
-    mocks.capability_store.get.side_effect = RuntimeError("db down")
+    mocks.skill_store.get.side_effect = RuntimeError("db down")
     mocks.store.get_session.return_value = {"history": [], "config": None, "agent_id": None}
     cfg = {"name": "A", "system_prompt": "hi", "skills": [{"skill": "verify_caller"}]}
     fake = FakeStream(ComposeResult(action="finalize", agent_config=cfg))
@@ -109,5 +109,5 @@ def test_an_unreadable_list_filters_nothing(client, mocks, monkeypatch):
 
     data = client.post("/sessions/s1/messages", json={"message": "done"}).json()["data"]
 
-    assert fake.kwargs["capabilities"] is None
+    assert fake.kwargs["agent_skills"] is None
     assert data["agent_config"]["skills"] == [{"skill": "verify_caller"}]

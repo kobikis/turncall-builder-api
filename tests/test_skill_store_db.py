@@ -1,4 +1,4 @@
-"""The Capability library at rest, against a real Postgres (#131).
+"""The Skill library at rest, against a real Postgres (#131).
 
 The seam tests mock the store, so this is what proves its SQL: the key is
 sealed, two first creates racing make one library (one TurnCall project), and
@@ -17,12 +17,12 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from app import capability_store
+from app import skill_store
 from tests.conftest import __file__ as _conftest_file
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(_conftest_file)))
-_TEST_DB = "builder_capabilitytest"
-_TABLES = ("capability_libraries", "capability_links")
+_TEST_DB = "builder_skilltest"
+_TABLES = ("skill_libraries", "skill_links")
 
 
 def _base_url() -> str | None:
@@ -65,7 +65,7 @@ async def _run_assertions(dsn: str) -> None:
         ws = await pool.fetchval(
             "INSERT INTO workspaces (id, name) VALUES (gen_random_uuid(), 't') RETURNING id::text"
         )
-        assert await capability_store.get(pool, ws) is None
+        assert await skill_store.get(pool, ws) is None
 
         made: list[str] = []
 
@@ -75,28 +75,28 @@ async def _run_assertions(dsn: str) -> None:
             return made[-1], "tc_secret_key"
 
         first, second = await asyncio.gather(
-            capability_store.ensure(pool, ws, create),
-            capability_store.ensure(pool, ws, create),
+            skill_store.ensure(pool, ws, create),
+            skill_store.ensure(pool, ws, create),
         )
         # One TurnCall project, one row, and both callers handed it.
         assert made == ["proj-1"]
         assert sorted([first[1], second[1]]) == [False, True]
         assert first[0]["project_id"] == second[0]["project_id"] == "proj-1"
-        assert await pool.fetchval("SELECT count(*) FROM capability_libraries") == 1
+        assert await pool.fetchval("SELECT count(*) FROM skill_libraries") == 1
 
-        library = await capability_store.get(pool, ws)
+        library = await skill_store.get(pool, ws)
         assert (library["project_id"], library["api_key"]) == ("proj-1", "tc_secret_key")
-        sealed = await pool.fetchval("SELECT api_key_encrypted FROM capability_libraries")
+        sealed = await pool.fetchval("SELECT api_key_encrypted FROM skill_libraries")
         assert "tc_secret_key" not in sealed
 
-        assert await capability_store.library_project(pool, ws) == "proj-1"
+        assert await skill_store.library_project(pool, ws) == "proj-1"
 
         # One record per project, rewritten in place.
-        await capability_store.record_link(
+        await skill_store.record_link(
             pool, ws, "p1", library_project_id="proj-1", state="failed", error="down"
         )
-        await capability_store.record_link(pool, ws, "p1", library_project_id="proj-1", state="linked")
-        links = await capability_store.list_links(pool, ws)
+        await skill_store.record_link(pool, ws, "p1", library_project_id="proj-1", state="linked")
+        links = await skill_store.list_links(pool, ws)
         assert list(links) == ["p1"]
         assert (links["p1"]["state"], links["p1"]["error"]) == ("linked", None)
 
@@ -108,7 +108,7 @@ async def _run_assertions(dsn: str) -> None:
         await pool.close()
 
 
-def test_capability_store_round_trip_and_migration_down_up():
+def test_skill_store_round_trip_and_migration_down_up():
     base_url = _base_url()
     if not base_url or not asyncio.run(_server_reachable(base_url)):
         pytest.skip("no reachable Postgres (set TEST_DATABASE_URL to run)")

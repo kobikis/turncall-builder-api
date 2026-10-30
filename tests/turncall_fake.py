@@ -1,6 +1,6 @@
 """A TurnCall that answers on an httpx.MockTransport (#131-#134).
 
-Enough of the engine for the Capability routes: the platform bootstrap,
+Enough of the engine for the Skill routes: the platform bootstrap,
 skills (versions, publish, rollback, delete, the agents listing), the skill
 library link and agent saves. Every request is kept in `requests`, so a test
 asserts what reached TurnCall and with which key. A test can queue a refusal
@@ -150,14 +150,14 @@ def _ok(data: Any, *, audited: bool = False, status: int = 200) -> httpx.Respons
 
 
 class FakeLibraryStore:
-    """capability_store as its SQL behaves, in memory, on the conftest mock:
+    """skill_store as its SQL behaves, in memory, on the conftest mock:
     one library per Workspace (`create` runs only for the first) and one link
     record per project."""
 
     def __init__(self, mocks: Any) -> None:
         self.library: dict[str, Any] = {}
         self.links: dict[str, dict[str, Any]] = {}
-        store = mocks.capability_store
+        store = mocks.skill_store
         store.ensure.side_effect = self.ensure
         store.get.side_effect = self.get
         store.library_project.side_effect = self.library_project

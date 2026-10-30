@@ -131,7 +131,7 @@ def test_list_reports_the_reserved_names(client, mocks):
     with the list rather than being duplicated in the frontend."""
     mocks.workspace_skills.list_skills.return_value = []
     mocks.workspace_skills.builtin_names.return_value = {"agent-tools", "guardrails"}
-    r = client.get("/skills")
+    r = client.get("/builder-skills")
     assert r.status_code == 200
     assert "agent-tools" in r.json()["data"]["reserved"]
 
@@ -141,7 +141,7 @@ def test_saving_over_a_built_in_name_is_refused(client, mocks):
     mocks.workspace_skills.validate.side_effect = ValueError(
         "'agent-tools' is a built-in builder skill — choose another name"
     )
-    r = client.put("/skills/agent-tools", json={"description": "d", "body": "b"})
+    r = client.put("/builder-skills/agent-tools", json={"description": "d", "body": "b"})
     assert r.status_code == 422
     assert "built-in" in r.json()["detail"]
     mocks.workspace_skills.save_skill.assert_not_called()
@@ -150,14 +150,14 @@ def test_saving_over_a_built_in_name_is_refused(client, mocks):
 def test_saving_a_skill(client, mocks):
     mocks.workspace_skills.validate.side_effect = None
     mocks.workspace_skills.save_skill.return_value = {"name": "takeaway-orders"}
-    r = client.put("/skills/takeaway-orders", json={"description": "d", "body": "b"})
+    r = client.put("/builder-skills/takeaway-orders", json={"description": "d", "body": "b"})
     assert r.status_code == 200
     assert r.json()["data"]["name"] == "takeaway-orders"
 
 
 def test_deleting_a_skill_that_is_not_there_is_404(client, mocks):
     mocks.workspace_skills.delete_skill.return_value = False
-    assert client.delete("/skills/nope").status_code == 404
+    assert client.delete("/builder-skills/nope").status_code == 404
 
 
 def test_writing_a_skill_is_admin_only(mocks):
@@ -174,8 +174,8 @@ def test_writing_a_skill_is_admin_only(mocks):
     try:
         c = TestClient(main.app, raise_server_exceptions=False)
         mocks.workspace_skills.list_skills.return_value = []
-        assert c.get("/skills").status_code == 200  # an editor may read
-        assert c.put("/skills/x", json={"description": "d", "body": "b"}).status_code == 403
-        assert c.delete("/skills/x").status_code == 403
+        assert c.get("/builder-skills").status_code == 200  # an editor may read
+        assert c.put("/builder-skills/x", json={"description": "d", "body": "b"}).status_code == 403
+        assert c.delete("/builder-skills/x").status_code == 403
     finally:
         main.app.dependency_overrides.clear()

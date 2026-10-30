@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
-    capability_library,
+    skill_library,
     compliance,
     integration_store,
     mcp_registry_store,
@@ -325,9 +325,9 @@ async def _turn_events(
         doc_names.extend(await _agent_kb_doc_names(sess["agent_id"], ctx.workspace_id))
     doc_names = list(dict.fromkeys(doc_names))  # de-dupe, keep order
 
-    # The Workspace's published Capabilities, which the agent may list (#135).
+    # The Workspace's published skills, which the agent may list (#135).
     # None when unreadable: the turn goes on, and nothing is filtered.
-    capabilities = await capability_library.published(
+    agent_skills = await skill_library.published(
         runtime.get_pool(), runtime.get_client(), ctx.workspace_id
     )
 
@@ -346,7 +346,7 @@ async def _turn_events(
         workspace_skills_dir=await workspace_skills.materialize(
             runtime.get_pool(), ctx.workspace_id
         ),
-        capabilities=capabilities,
+        agent_skills=agent_skills,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -364,7 +364,7 @@ async def _turn_events(
         )
     notes: list[str] = []
     if result.action == "finalize":
-        config, notes = _published_skills_only(result.agent_config or {}, capabilities)
+        config, notes = _published_skills_only(result.agent_config or {}, agent_skills)
         result = replace(result, agent_config=config)
         history.append(
             {"role": "assistant", "content": " ".join(["Updated the agent configuration.", *notes])}
@@ -383,14 +383,14 @@ async def _turn_events(
 
 
 def _published_skills_only(
-    config: dict[str, Any], capabilities: list[dict[str, str]] | None
+    config: dict[str, Any], agent_skills: list[dict[str, str]] | None
 ) -> tuple[dict[str, Any], list[str]]:
-    """The config with every `skills` entry naming no published Capability
+    """The config with every `skills` entry naming no published skill
     dropped, and a note for each: TurnCall would refuse the whole save for it.
     Unchanged when the list could not be read (`None`)."""
-    if capabilities is None or not config.get("skills"):
+    if agent_skills is None or not config.get("skills"):
         return config, []
-    names = {c["name"] for c in capabilities}
+    names = {c["name"] for c in agent_skills}
     kept, notes = [], []
     for entry in config["skills"]:
         name = entry.get("skill") if isinstance(entry, dict) else None
@@ -602,10 +602,10 @@ async def create_agent(
     key = ""
     try:
         key = await client.create_api_key(project_id)
-        # Linked to the Workspace's Capability library (ADR-0029) before the
-        # agent is saved, so a Config naming Capabilities resolves them there.
+        # Linked to the Workspace's skill library (ADR-0029) before the
+        # agent is saved, so a Config naming skills resolves them there.
         # Best-effort and recorded: a failed link is retried from the library.
-        await capability_library.link_new_project(pool, client, ctx.workspace_id, project_id)
+        await skill_library.link_new_project(pool, client, ctx.workspace_id, project_id)
 
         # Register the webhook BEFORE the agent so the same secret signs its tool
         # calls from the first call (events + tools share one backend secret).
@@ -636,7 +636,7 @@ async def create_agent(
         logger.exception("agent provisioning failed for project %s", project_id)
         await _rollback_provisioning(client, project_id, agent_id, key)
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422:
-            # TurnCall refused the config (a Capability's tool colliding, say):
+            # TurnCall refused the config (a skill's tool colliding, say):
             # a retry fails the same way, so say what to fix instead.
             raise _turncall_http_error(exc) from exc
         raise HTTPException(

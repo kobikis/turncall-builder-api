@@ -1,7 +1,7 @@
 """The audit trail a route records a person's changes on (ADR-0028).
 
 A route that changes one of ADR-0028's resources (agents, numbers, integrations
-and connected apps, members and roles, workspace skills, Capabilities, linked
+and connected apps, members and roles, workspace (builder) skills, skills, linked
 repos) takes `audit: Audit` and records each change with `await audit.record(ctx, ...)`.
 Three things hold the rest:
 
@@ -87,7 +87,9 @@ RESOURCE_TYPES = frozenset(
         # Redaction and retention (#103): the Workspace's ("workspace") or one
         # Agent's override (its agent id).
         "compliance",
-        # A Capability version (its id), and the Workspace's Capability library
+        # A skill version (its id), and the Workspace's skill library. The names
+        # are the ones these were first written under: `skill` above is a
+        # Builder skill, and entries are append-only.
         # (the Workspace's id): its creation, and linking projects to it
         # (#131, #132, ADR-0029).
         "capability",

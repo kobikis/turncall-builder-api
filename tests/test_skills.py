@@ -1,4 +1,4 @@
-"""A Workspace's Capabilities and its Capability library (#131), on the
+"""A Workspace's Skills and its Skill library (#131), on the
 TestClient seam over a MockTransport TurnCall: what each route asks TurnCall,
 with which key, and what it answers the Console."""
 
@@ -36,13 +36,13 @@ def tc(mocks):
 
 
 def _create(client, **over):
-    return client.post("/capabilities", json={**VERIFY, **over})
+    return client.post("/skills", json={**VERIFY, **over})
 
 
 # --- the library ------------------------------------------------------------------
 
 
-def test_the_first_capability_makes_the_library(client, mocks, tc):
+def test_the_first_skill_makes_the_library(client, mocks, tc):
     r = _create(client)
     assert r.status_code == 200, r.text
     assert r.json()["data"]["name"] == "verify_caller"
@@ -51,21 +51,21 @@ def test_the_first_capability_makes_the_library(client, mocks, tc):
     assert project.headers["X-Platform-Key"] == PLATFORM_KEY
     (key,) = tc.sent("POST", "/v1/api-keys")
     assert key.url.params["project_id"] == "proj-1"
-    # The Capability itself, in the library, on its key.
+    # The Skill itself, in the library, on its key.
     (skill,) = tc.sent("POST", "/v1/skills")
     assert skill.headers["Authorization"] == LIBRARY_KEY
 
 
-def test_a_second_capability_reuses_the_library(client, tc):
+def test_a_second_skill_reuses_the_library(client, tc):
     assert _create(client).status_code == 200
     assert _create(client, name="take_payment").status_code == 200
     assert len(tc.sent("POST", "/v1/projects")) == 1
     assert len(tc.sent("POST", "/v1/skills")) == 2
 
 
-def test_listing_before_any_capability_asks_turncall_nothing(client, tc):
-    r = client.get("/capabilities")
-    assert r.json()["data"] == {"library": None, "capabilities": []}
+def test_listing_before_any_skill_asks_turncall_nothing(client, tc):
+    r = client.get("/skills")
+    assert r.json()["data"] == {"library": None, "skills": []}
     assert tc.requests == []
 
 
@@ -83,27 +83,27 @@ def test_no_platform_key_is_a_502_and_makes_nothing(client, mocks, tc):
 
 def test_every_route_reaches_turncalls_skill_route_on_the_library_key(client, tc):
     v1 = _create(client).json()["data"]["id"]
-    assert client.post(f"/capability-versions/{v1}/publish").status_code == 200
+    assert client.post(f"/skill-versions/{v1}/publish").status_code == 200
     v2 = _create(client, instructions="Ask for the postcode only.").json()["data"]["id"]
-    assert client.put(f"/capability-versions/{v2}", json={"description": "Billing callers"}).status_code == 200
-    assert client.post(f"/capability-versions/{v2}/publish").status_code == 200
-    assert client.post(f"/capability-versions/{v1}/rollback").status_code == 200
-    assert client.get(f"/capability-versions/{v2}").status_code == 200
+    assert client.put(f"/skill-versions/{v2}", json={"description": "Billing callers"}).status_code == 200
+    assert client.post(f"/skill-versions/{v2}/publish").status_code == 200
+    assert client.post(f"/skill-versions/{v1}/rollback").status_code == 200
+    assert client.get(f"/skill-versions/{v2}").status_code == 200
 
-    listed = client.get("/capabilities").json()["data"]
+    listed = client.get("/skills").json()["data"]
     assert listed["library"] == {"project_id": "proj-1"}
-    (summary,) = listed["capabilities"]
+    (summary,) = listed["skills"]
     assert summary["name"] == "verify_caller"
     assert summary["live"] == {"id": v1, "version": 1}
     assert summary["draft"] is None
     assert summary["latest"] == {"id": v2, "version": 2, "state": "archived"}
     assert summary["versions"] == 2
 
-    one = client.get("/capabilities/verify_caller").json()["data"]
+    one = client.get("/skills/verify_caller").json()["data"]
     assert [v["version"] for v in one["versions"]] == [2, 1]
     assert one["live"] == {"id": v1, "version": 1}
 
-    assert client.delete(f"/capability-versions/{v2}").status_code == 200
+    assert client.delete(f"/skill-versions/{v2}").status_code == 200
 
     skill_calls = [r for r in tc.requests if r.url.path.startswith("/v1/skills")]
     assert all(r.headers["Authorization"] == LIBRARY_KEY for r in skill_calls)
@@ -118,21 +118,21 @@ def test_every_route_reaches_turncalls_skill_route_on_the_library_key(client, tc
     assert edit.read() == b'{"description":"Billing callers"}'
 
 
-def test_an_unknown_capability_is_a_404(client, tc):
+def test_an_unknown_skill_is_a_404(client, tc):
     _create(client)
-    assert client.get("/capabilities/nothing_here").status_code == 404
+    assert client.get("/skills/nothing_here").status_code == 404
 
 
-def test_a_name_that_is_not_a_capability_name_never_reaches_turncall(client, tc):
+def test_a_name_that_is_not_a_skill_name_never_reaches_turncall(client, tc):
     _create(client)
     before = len(tc.requests)
-    assert client.get("/capabilities/Not..A-Name").status_code == 422
-    assert client.get("/capabilities/..%2Fagents").status_code in (404, 422)
+    assert client.get("/skills/Not..A-Name").status_code == 422
+    assert client.get("/skills/..%2Fagents").status_code in (404, 422)
     assert len(tc.requests) == before
 
 
 def test_a_version_route_before_the_library_is_a_404(client, tc):
-    r = client.get("/capability-versions/00000000-0000-0000-0000-000000000001")
+    r = client.get("/skill-versions/00000000-0000-0000-0000-000000000001")
     assert r.status_code == 404
     assert tc.requests == []
 
@@ -159,7 +159,7 @@ def test_turncalls_422_comes_back_naming_the_tool(client, mocks, tc):
         {"field": "tools[0]", "message": "tools[0] 'check_account' webhook_url: plain http is not allowed"},
         {"field": "tools[1]", "message": "tools[1] 'end_call' name: is a built-in"},
     ]
-    # The library was made and is recorded; the refused Capability is not.
+    # The library was made and is recorded; the refused Skill is not.
     assert [e["resource_type"] for e in audit_entries(mocks)] == ["capability_library"]
 
 
@@ -174,11 +174,11 @@ def test_a_field_turncall_names_by_location(client, tc):
 
 def test_editing_a_published_version_is_turncalls_409(client, tc):
     v1 = _create(client).json()["data"]["id"]
-    client.post(f"/capability-versions/{v1}/publish")
+    client.post(f"/skill-versions/{v1}/publish")
     tc.refuse("PUT", f"/v1/skills/{v1}", 409, {
         "success": False, "error": "Can only edit a draft skill version", "code": "conflict",
     })
-    r = client.put(f"/capability-versions/{v1}", json={"description": "x"})
+    r = client.put(f"/skill-versions/{v1}", json={"description": "x"})
     assert r.status_code == 409
     assert r.json()["detail"] == "Can only edit a draft skill version"
 
@@ -194,23 +194,23 @@ def _login_as(mocks, gate_client, role):
 
 def test_a_viewer_reads_and_cannot_write(gate_client, mocks, tc):
     _login_as(mocks, gate_client, "viewer")
-    assert gate_client.get("/capabilities", headers=WS).status_code == 200
-    assert gate_client.post("/capabilities", json=VERIFY, headers=WS).status_code == 403
+    assert gate_client.get("/skills", headers=WS).status_code == 200
+    assert gate_client.post("/skills", json=VERIFY, headers=WS).status_code == 403
     v = "00000000-0000-0000-0000-000000000001"
-    assert gate_client.put(f"/capability-versions/{v}", json={}, headers=WS).status_code == 403
-    assert gate_client.post(f"/capability-versions/{v}/publish", headers=WS).status_code == 403
-    assert gate_client.post(f"/capability-versions/{v}/rollback", headers=WS).status_code == 403
-    assert gate_client.delete(f"/capability-versions/{v}", headers=WS).status_code == 403
+    assert gate_client.put(f"/skill-versions/{v}", json={}, headers=WS).status_code == 403
+    assert gate_client.post(f"/skill-versions/{v}/publish", headers=WS).status_code == 403
+    assert gate_client.post(f"/skill-versions/{v}/rollback", headers=WS).status_code == 403
+    assert gate_client.delete(f"/skill-versions/{v}", headers=WS).status_code == 403
     assert tc.requests == []
 
 
 def test_an_editor_reads_and_writes(gate_client, mocks, tc):
     _login_as(mocks, gate_client, "editor")
-    created = gate_client.post("/capabilities", json=VERIFY, headers=WS)
+    created = gate_client.post("/skills", json=VERIFY, headers=WS)
     assert created.status_code == 200
     v1 = created.json()["data"]["id"]
-    assert gate_client.post(f"/capability-versions/{v1}/publish", headers=WS).status_code == 200
-    assert gate_client.get("/capabilities", headers=WS).status_code == 200
+    assert gate_client.post(f"/skill-versions/{v1}/publish", headers=WS).status_code == 200
+    assert gate_client.get("/skills", headers=WS).status_code == 200
 
 
 # --- the audit trail ---------------------------------------------------------------
@@ -218,10 +218,10 @@ def test_an_editor_reads_and_writes(gate_client, mocks, tc):
 
 def test_every_write_is_an_audit_entry_with_the_user(client, mocks, tc):
     v1 = _create(client).json()["data"]["id"]
-    client.put(f"/capability-versions/{v1}", json={"instructions": "Postcode first."})
-    client.post(f"/capability-versions/{v1}/publish")
+    client.put(f"/skill-versions/{v1}", json={"instructions": "Postcode first."})
+    client.post(f"/skill-versions/{v1}/publish")
     v2 = _create(client).json()["data"]["id"]
-    client.delete(f"/capability-versions/{v2}")
+    client.delete(f"/skill-versions/{v2}")
 
     entries = audit_entries(mocks)
     assert [(e["resource_type"], e["action"]) for e in entries] == [

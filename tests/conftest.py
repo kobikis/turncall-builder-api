@@ -31,7 +31,7 @@ os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decod
 from app import (
     audit_store,
     auth_store,
-    capability_store,
+    skill_store,
     compliance_store,
     db,
     deps,
@@ -82,7 +82,7 @@ def mocks(monkeypatch):
         twilio_store=create_autospec(twilio_store),
         compliance_store=create_autospec(compliance_store),
         audit_store=create_autospec(audit_store),
-        capability_store=create_autospec(capability_store),
+        skill_store=create_autospec(skill_store),
         client=AsyncMock(spec=TurnCallClient),
     )
     # Patch each function ON THE SOURCE MODULE so every importer sees the mock —
@@ -102,7 +102,7 @@ def mocks(monkeypatch):
         (twilio_store, m.twilio_store),
         (compliance_store, m.compliance_store),
         (audit_store, m.audit_store),
-        (capability_store, m.capability_store),
+        (skill_store, m.skill_store),
     ]:
         for attr in vars(mock_mod):
             if not attr.startswith("_"):
@@ -162,10 +162,10 @@ def mocks(monkeypatch):
     m.compliance_store.list_overrides.return_value = {}
     m.compliance_store.list_projections.return_value = {}
     m.compliance_store.get_projection.return_value = None
-    # No Capability library until a test makes one (#131).
-    m.capability_store.get.return_value = None
-    m.capability_store.library_project.return_value = None
-    m.capability_store.list_links.return_value = {}
+    # No Skill library until a test makes one (#131).
+    m.skill_store.get.return_value = None
+    m.skill_store.library_project.return_value = None
+    m.skill_store.list_links.return_value = {}
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

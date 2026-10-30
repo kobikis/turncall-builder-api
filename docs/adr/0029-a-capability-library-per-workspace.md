@@ -95,6 +95,10 @@ project other projects already read from), and a project that does not exist.
 
 The Console now calls these [[Skill|Skills]] and the Builder's own guidance
 [[Builder skill|Builder skills]]: one name for one thing, the name the agent's
-config, TurnCall's API and its call records already use. The Builder's routes,
-modules, tables and audit resource types keep `capability`, so nothing stored
-or called changes.
+config, TurnCall's API and its call records already use. The code follows:
+the routes are `/skills`, `/skill-versions/{id}` and `/skill-library` (the
+Builder skills' own moved to `/builder-skills`), and the tables are
+`skill_libraries` and `skill_links` (migration 0026). The audit log keeps the
+resource types its entries were written under, since they are append-only:
+`skill` is a Builder skill, `capability` and `capability_library` a skill and
+the skill library.
