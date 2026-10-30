@@ -195,7 +195,7 @@ def to_create_agent_request(
         "llm": {
             **_set(llm),
             "provider": llm.get("provider", "openai"),
-            "model": llm.get("model", "gpt-4o-mini"),
+            "model": llm.get("model", "gpt-5.4-mini"),
         },
         "tts": _tts_block(tts),
         "tools": tools,

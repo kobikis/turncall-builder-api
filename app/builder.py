@@ -121,7 +121,7 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
                 "model": {"type": "string"},
             },
             "required": ["provider", "model"],
-            "description": "Default to openai / gpt-4o-mini unless the use case "
+            "description": "Default to openai / gpt-5.4-mini unless the use case "
             "implies otherwise. Use 'bedrock' only when the user says they want to "
             "run on AWS / Bedrock / their own AWS account — its models are AWS ids "
             "like 'anthropic.claude-3-5-sonnet-20241022-v2:0'. AWS credentials are "
@@ -455,7 +455,7 @@ a prompt with "Tuesday to Sunday" in it needs this line too.
 - Never write today's date, or a year, into the system_prompt. A prompt is \
 written once and the date changes every night."""
 
-_D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
+_D_DEFAULTS = """Defaults: llm = openai/gpt-5.4-mini, tts = deepgram/\
 'aura-2-helena-en'. Enable end_call/transfer_call only when the use case needs \
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
 (navigate an IVR, enter a PIN/extension). Enable do_not_call for agents that \
