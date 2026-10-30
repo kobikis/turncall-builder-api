@@ -138,3 +138,44 @@ class FakeTurnCall:
 def _ok(data: Any, *, audited: bool = False, status: int = 200) -> httpx.Response:
     headers = {AUDIT_ID_HEADER: str(uuid.uuid4())} if audited else {}
     return httpx.Response(status, json={"success": True, "data": data}, headers=headers)
+
+
+class FakeLibraryStore:
+    """capability_store as its SQL behaves, in memory, on the conftest mock:
+    one library per Workspace (`create` runs only for the first) and one link
+    record per project."""
+
+    def __init__(self, mocks: Any) -> None:
+        self.library: dict[str, Any] = {}
+        self.links: dict[str, dict[str, Any]] = {}
+        store = mocks.capability_store
+        store.ensure.side_effect = self.ensure
+        store.get.side_effect = self.get
+        store.library_project.side_effect = self.library_project
+        store.record_link.side_effect = self.record_link
+        store.list_links.side_effect = self.list_links
+
+    async def ensure(self, _pool: Any, _workspace_id: str, create: Any) -> tuple[dict, bool]:
+        if self.library:
+            return dict(self.library), False
+        project_id, api_key = await create()
+        self.library.update(project_id=project_id, api_key=api_key, created_at=None)
+        return dict(self.library), True
+
+    async def get(self, _pool: Any, _workspace_id: str) -> dict[str, Any] | None:
+        return dict(self.library) if self.library else None
+
+    async def library_project(self, _pool: Any, _workspace_id: str) -> str | None:
+        return self.library.get("project_id")
+
+    async def record_link(
+        self, _pool: Any, _workspace_id: str, project_id: str, *,
+        library_project_id: str, state: str, error: str | None = None,
+    ) -> None:
+        self.links[project_id] = {
+            "library_project_id": library_project_id, "state": state, "error": error,
+            "updated_at": None,
+        }
+
+    async def list_links(self, _pool: Any, _workspace_id: str) -> dict[str, dict[str, Any]]:
+        return {k: dict(v) for k, v in self.links.items()}

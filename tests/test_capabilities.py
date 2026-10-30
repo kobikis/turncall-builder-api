@@ -8,7 +8,7 @@ import pytest
 
 from app.routers.auth import COOKIE_NAME as COOKIE
 from tests.conftest import TEST_WORKSPACE_ID, audit_entries
-from tests.turncall_fake import PLATFORM_KEY, FakeTurnCall
+from tests.turncall_fake import PLATFORM_KEY, FakeLibraryStore, FakeTurnCall
 
 WS = {"X-Workspace-Id": TEST_WORKSPACE_ID}
 LIBRARY_KEY = "Bearer tc_proj-1"
@@ -28,25 +28,10 @@ VERIFY = {
 
 @pytest.fixture
 def tc(mocks):
-    """The fake TurnCall, and a library store that keeps one row per Workspace
-    the way capability_store does: `create` runs only for the first."""
+    """The fake TurnCall, and the library store as its SQL behaves."""
     fake = FakeTurnCall()
     fake.install()
-    library: dict = {}
-
-    async def ensure(_pool, _workspace_id, create):
-        if library:
-            return dict(library), False
-        project_id, api_key = await create()
-        library.update(project_id=project_id, api_key=api_key, created_at=None)
-        return dict(library), True
-
-    async def get(_pool, _workspace_id):
-        return dict(library) if library else None
-
-    mocks.capability_store.ensure.side_effect = ensure
-    mocks.capability_store.get.side_effect = get
-    fake.library = library
+    fake.store = FakeLibraryStore(mocks)
     return fake
 
 

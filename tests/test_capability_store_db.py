@@ -22,7 +22,7 @@ from tests.conftest import __file__ as _conftest_file
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(_conftest_file)))
 _TEST_DB = "builder_capabilitytest"
-_TABLES = ("capability_libraries",)
+_TABLES = ("capability_libraries", "capability_links")
 
 
 def _base_url() -> str | None:
@@ -89,9 +89,21 @@ async def _run_assertions(dsn: str) -> None:
         sealed = await pool.fetchval("SELECT api_key_encrypted FROM capability_libraries")
         assert "tc_secret_key" not in sealed
 
-        # A Workspace's removal takes its library along.
+        assert await capability_store.library_project(pool, ws) == "proj-1"
+
+        # One record per project, rewritten in place.
+        await capability_store.record_link(
+            pool, ws, "p1", library_project_id="proj-1", state="failed", error="down"
+        )
+        await capability_store.record_link(pool, ws, "p1", library_project_id="proj-1", state="linked")
+        links = await capability_store.list_links(pool, ws)
+        assert list(links) == ["p1"]
+        assert (links["p1"]["state"], links["p1"]["error"]) == ("linked", None)
+
+        # A Workspace's removal takes its library and links along.
         await pool.execute("DELETE FROM workspaces WHERE id = $1", ws)
-        assert await pool.fetchval("SELECT count(*) FROM capability_libraries") == 0
+        for table in _TABLES:
+            assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0  # noqa: S608
     finally:
         await pool.close()
 

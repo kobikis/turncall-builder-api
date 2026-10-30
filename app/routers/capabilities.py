@@ -74,22 +74,32 @@ async def _library(workspace_id: str) -> dict[str, Any]:
 
 
 async def _ensure_library(audit: AuditTrail, ctx: AuthContext) -> dict[str, Any]:
-    """The Workspace's library, made (and recorded) on its first Capability."""
+    """The Workspace's library, made on its first Capability, every project of
+    the Workspace linked to it, and both recorded."""
+    pool, client = runtime.get_pool(), runtime.get_client()
     try:
-        library, created = await capability_library.ensure(
-            runtime.get_pool(), runtime.get_client(), ctx.workspace_id
-        )
+        library, created = await capability_library.ensure(pool, client, ctx.workspace_id)
     except integration_store.IntegrationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RuntimeError as exc:
         # The platform key is wrong or unset (turncall#102): nothing was made.
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if created:
+        # Each link is recorded, and one that failed is retried from the
+        # library's page: the Capability is made either way.
+        links = await capability_library.link_all(pool, client, ctx.workspace_id)
         await audit.record(
             ctx, "capability_library", ctx.workspace_id, "created",
-            resource_name="Capability library", after={"project_id": library["project_id"]},
+            resource_name="Capability library",
+            after={"project_id": library["project_id"], "links": _link_states(links)},
+            agent_ids=[link["agent_id"] for link in links],
         )
     return library
+
+
+def _link_states(links: list[dict[str, Any]]) -> dict[str, str]:
+    """What an entry says of the links it wrote: project -> linked | failed."""
+    return {link["project_id"]: link["state"] for link in links}
 
 
 async def _call(coro: Any) -> Any:
@@ -282,3 +292,41 @@ async def delete_version(
     await _call(runtime.get_client().delete_skill(str(version_id), library["api_key"]))
     await change.record()
     return {"success": True, "data": {"deleted": str(version_id)}}
+
+
+# --- the library and its links (#132) ---------------------------------------------
+
+
+@router.get("/capability-library")
+async def get_library(ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
+    """The Workspace's library, and each of its projects' link to it: `linked`,
+    `failed` (with why), or `pending`. `library` is null before the first
+    Capability."""
+    return {
+        "success": True,
+        "data": await capability_library.report(runtime.get_pool(), ctx.workspace_id),
+    }
+
+
+@router.post("/capability-library/links")
+async def relink(audit: Audit, ctx: AuthContext = Depends(require_editor)) -> dict[str, Any]:
+    """Link every project not yet linked: a failed link again, or a project
+    made while the library was. Projects already linked are left alone, so
+    running it again writes nothing."""
+    pool = runtime.get_pool()
+    if await capability_store.library_project(pool, ctx.workspace_id) is None:
+        raise _no_library()
+    links = await capability_library.link_all(pool, runtime.get_client(), ctx.workspace_id)
+    if links:
+        await audit.record(
+            ctx, "capability_library", ctx.workspace_id, "linked",
+            resource_name="Capability library",
+            changes={
+                f"/links/{link['project_id']}": {"before": link["was"], "after": link["state"]}
+                for link in links
+            },
+            agent_ids=[link["agent_id"] for link in links],
+        )
+    else:
+        audit.unchanged()
+    return {"success": True, "data": await capability_library.report(pool, ctx.workspace_id)}

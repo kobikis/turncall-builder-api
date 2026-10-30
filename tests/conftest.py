@@ -164,6 +164,8 @@ def mocks(monkeypatch):
     m.compliance_store.get_projection.return_value = None
     # No Capability library until a test makes one (#131).
     m.capability_store.get.return_value = None
+    m.capability_store.library_project.return_value = None
+    m.capability_store.list_links.return_value = {}
     # auth_store: mock the DB/hash functions but keep the real exception classes
     # (an `except` clause / a mock side_effect needs a real class) and the
     # SESSION_TTL timedelta (the cookie max-age calls .total_seconds() on it).

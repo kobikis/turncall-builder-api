@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
+    capability_library,
     compliance,
     integration_store,
     mcp_registry_store,
@@ -560,6 +561,10 @@ async def create_agent(
     key = ""
     try:
         key = await client.create_api_key(project_id)
+        # Linked to the Workspace's Capability library (ADR-0029) before the
+        # agent is saved, so a Config naming Capabilities resolves them there.
+        # Best-effort and recorded: a failed link is retried from the library.
+        await capability_library.link_new_project(pool, client, ctx.workspace_id, project_id)
 
         # Register the webhook BEFORE the agent so the same secret signs its tool
         # calls from the first call (events + tools share one backend secret).
