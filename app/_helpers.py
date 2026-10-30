@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import secrets
 from typing import Any
 
@@ -262,11 +263,64 @@ def check_variables(variables: dict[str, Any]) -> dict[str, str]:
     return as_text
 
 
+_LABELLED = re.compile(r"^([a-z_]+\[\d+\])")
+
+
+def _field(loc: list[Any]) -> str:
+    """A TurnCall error location as the field a form names: `tools[1].name`.
+    The request body, and an agent body's `config` wrapper, are not fields of
+    the form."""
+    parts = list(loc)
+    if parts[:1] == ["body"]:
+        parts = parts[1:]
+    if parts[:1] == ["config"] and len(parts) > 1:
+        parts = parts[1:]
+    out = ""
+    for part in parts:
+        out += f"[{part}]" if isinstance(part, int) else (f".{part}" if out else str(part))
+    return out
+
+
+def field_errors(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """What a TurnCall 422 says about each field, as `{field, message}` (plus
+    whatever else TurnCall named, such as the `skill` a `skills[1]` refusal is
+    about), so a form can show each on the entry it names.
+
+    TurnCall answers two shapes: a schema refusal, whose fields are in
+    `details.errors` (a skill's tools are named there in the message itself,
+    one `tools[i] 'name' ...` per line), and a refusal of its own, which names
+    its `details.field`."""
+    details = body.get("details") or {}
+    if not isinstance(details, dict):
+        return []
+    if details.get("field"):
+        return [{**details, "field": str(details["field"]), "message": body.get("error") or ""}]
+    out: list[dict[str, Any]] = []
+    for err in details.get("errors") or []:
+        if not isinstance(err, dict):
+            continue
+        message = str(err.get("msg") or "").removeprefix("Value error, ")
+        lines = message.split("; ")
+        labelled = [_LABELLED.match(line) for line in lines]
+        if all(labelled):
+            out += [
+                {"field": m.group(1), "message": line}  # type: ignore[union-attr]
+                for m, line in zip(labelled, lines, strict=True)
+            ]
+        else:
+            out.append({"field": _field(err.get("loc") or []), "message": message})
+    return out
+
+
 def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
     """Translate a TurnCall HTTPStatusError into an HTTPException carrying its
     message, so every proxy endpoint surfaces TurnCall failures identically.
-    A limit's 429 keeps its wait as Retry-After (#74, #76)."""
+    A limit's 429 keeps its wait as Retry-After (#74, #76).
+
+    A 422 is a Refusal: the same `detail`, TurnCall's `code` as its `reason`,
+    and `errors` naming each field (`field_errors`)."""
     headers = None
+    body: Any = None
     try:
         body = exc.response.json()
         retry_ms = (body.get("details") or {}).get("retry_after_ms")
@@ -283,6 +337,10 @@ def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
             detail = f"{detail}: " + "; ".join(reasons)
     except Exception:
         detail = exc.response.text
+    if exc.response.status_code == 422 and isinstance(body, dict):
+        return Refusal(
+            422, detail, str(body.get("code") or "validation_error"), errors=field_errors(body)
+        )
     return HTTPException(status_code=exc.response.status_code, detail=detail, headers=headers)
 
 

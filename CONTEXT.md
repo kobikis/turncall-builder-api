@@ -112,6 +112,31 @@ never what to pick, because a skill loads only when it looks relevant and a
 default that applies most of the time is worse than none.
 _Avoid_: custom skill, template, override
 
+**Capability**:
+What a finished agent can pick up mid-call: a name, a description of when to use
+it, instructions, and webhook tools that call the author's own [[Tool server]] by
+URL (no generated handler, no Agent Backend). It is TurnCall's *skill*, under the
+Console's name: the agent sees only the names and descriptions until it loads
+one with `load_skill`, so a Workspace can share many without carrying them all in
+every prompt. Versioned like an agent: a draft is edited, publishing makes it the
+live version every agent following it gets on its next call, rolling back
+restores an earlier one, and an agent may pin one version instead. Lives in the
+Workspace's [[Capability library]]; an agent lists the ones it may load in its
+Config (`skills`). Never about how to build an agent: that is a [[Skill]].
+_Avoid_: skill (the Builder's own, and TurnCall's word kept to its API), plugin,
+tool bundle
+
+**Capability library**:
+The one TurnCall project per [[Workspace]] that holds its [[Capability|Capabilities]],
+made by the Builder on the Workspace's first Capability through the platform
+bootstrap, with its admin key sealed here. Every agent project in the Workspace,
+and its webhook project, is linked to it (TurnCall's skill library link, which
+only the platform credential can set), so each agent resolves Capability names
+there and only there. Linking is a [[Projection]]-style write: recorded per
+project, idempotent on re-run, and a failed link kept, shown and retried. It
+holds no provider keys. See ADR-0029.
+_Avoid_: skill library (TurnCall's word for the link), shared project, catalog
+
 **Confirm**:
 The Builder turn between the last question and [[Finalize]]: it states what it
 understood, in the user's own words about their business, and waits to be told it
@@ -210,7 +235,7 @@ _Avoid_: orchestrator, gateway
 
 **Console**:
 The builder-web management UI: a sidebar with Agents, Phone Numbers,
-Integrations, Members and Skills (each list → detail → edit), plus the Builder
+Integrations, Capabilities, Members and Skills (each list → detail → edit), plus the Builder
 reached as the "new agent" path.
 _Avoid_: dashboard, admin panel
 

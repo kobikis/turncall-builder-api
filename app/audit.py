@@ -1,8 +1,8 @@
 """The audit trail a route records a person's changes on (ADR-0028).
 
 A route that changes one of ADR-0028's resources (agents, numbers, integrations
-and connected apps, members and roles, workspace skills, linked repos) takes
-`audit: Audit` and records each change with `await audit.record(ctx, ...)`.
+and connected apps, members and roles, workspace skills, Capabilities, linked
+repos) takes `audit: Audit` and records each change with `await audit.record(ctx, ...)`.
 Three things hold the rest:
 
 - **Every such route takes one.** `tests/test_audit_wiring.py` lists every
@@ -87,6 +87,11 @@ RESOURCE_TYPES = frozenset(
         # Redaction and retention (#103): the Workspace's ("workspace") or one
         # Agent's override (its agent id).
         "compliance",
+        # A Capability version (its id), and the Workspace's Capability library
+        # (the Workspace's id): its creation, and linking projects to it
+        # (#131, #132, ADR-0029).
+        "capability",
+        "capability_library",
     }
 )
 
