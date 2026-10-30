@@ -129,7 +129,7 @@ def test_a_change_that_never_reached_turncall_links_nothing(client, mocks):
 def test_a_builder_side_change_links_nothing(client, mocks):
     mocks.workspace_skills.save_skill.return_value = {"name": "orders", "description": "d", "body": "b"}
 
-    r = client.put("/skills/orders", json={"description": "d", "body": "b"}, headers=WS)
+    r = client.put("/builder-skills/orders", json={"description": "d", "body": "b"}, headers=WS)
 
     assert r.status_code == 200, r.text
     assert _only_entry(mocks)["engine_links"] == []

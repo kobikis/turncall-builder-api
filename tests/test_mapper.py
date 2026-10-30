@@ -10,7 +10,7 @@ def test_defaults_applied_when_omitted():
     cfg = req["config"]
     assert req["name"] == "Bot"
     assert req["environment"] == "development"
-    assert cfg["llm"] == {"provider": "openai", "model": "gpt-4o-mini"}
+    assert cfg["llm"] == {"provider": "openai", "model": "gpt-5.4-mini"}
     assert cfg["tts"] == {"provider": "deepgram", "voice": "aura-2-helena-en"}
     assert cfg["tools"] == []
 
@@ -581,7 +581,7 @@ class TestAgentSettingsReachTurnCall:
     def test_llm_keeps_its_defaults(self):
         assert _config(llm={"temperature": 0.2})["llm"] == {
             "provider": "openai",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "temperature": 0.2,
         }
 

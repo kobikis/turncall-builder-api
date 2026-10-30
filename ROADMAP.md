@@ -59,7 +59,7 @@ history + the **trimmed** TurnCall agent schema (see ADR-0003).
 ### Config surface the composer targets (V1)
 
 `name`, `system_prompt`, `first_message`, `llm` (provider+model, default
-openai/gpt-4o-mini), `voice`/TTS (default deepgram), built-in `tools`
+openai/gpt-5.4-mini), `voice`/TTS (default deepgram), built-in `tools`
 (`end_call`, `transfer_call`) when the use case needs them.
 
 Everything else (STT, VAD, smart turn, voicemail, S2S, analysis, custom/MCP

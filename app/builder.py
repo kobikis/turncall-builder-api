@@ -121,7 +121,7 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
                 "model": {"type": "string"},
             },
             "required": ["provider", "model"],
-            "description": "Default to openai / gpt-4o-mini unless the use case "
+            "description": "Default to openai / gpt-5.4-mini unless the use case "
             "implies otherwise. Use 'bedrock' only when the user says they want to "
             "run on AWS / Bedrock / their own AWS account — its models are AWS ids "
             "like 'anthropic.claude-3-5-sonnet-20241022-v2:0'. AWS credentials are "
@@ -276,6 +276,35 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "system_prompt", "llm", "tts"],
 }
+# The skills the agent may load mid-call (#135): names only, from the
+# Workspace's published list in the prompt. A skill is written on the
+# Console, never here.
+_AGENT_CONFIG_SCHEMA["properties"]["skills"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "skill": {"type": "string"},
+            "version_id": {
+                "type": "string",
+                "description": "A pinned version. Only ever kept from the current "
+                "config, never written.",
+            },
+        },
+        "required": ["skill"],
+    },
+    "description": "Skills the agent may load during a call, by name: "
+    "[{\"skill\": \"<name>\"}]. Only names from the Workspace's skills "
+    "listed in your instructions; leave it out when none are listed or none fit. "
+    "Keep an entry already in the config as it is (a version_id included).",
+}
+_AGENT_CONFIG_SCHEMA["properties"]["max_loaded_skills"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 10,
+    "description": "How many skills may be loaded at once (default 3). "
+    "Leave it out unless the user asks.",
+}
 
 COMPOSE_TOOL: dict[str, Any] = {
     "name": "compose",
@@ -426,7 +455,7 @@ a prompt with "Tuesday to Sunday" in it needs this line too.
 - Never write today's date, or a year, into the system_prompt. A prompt is \
 written once and the date changes every night."""
 
-_D_DEFAULTS = """Defaults: llm = openai/gpt-4o-mini, tts = deepgram/\
+_D_DEFAULTS = """Defaults: llm = openai/gpt-5.4-mini, tts = deepgram/\
 'aura-2-helena-en'. Enable end_call/transfer_call only when the use case needs \
 them. Enable send_dtmf when the agent must press keypad digits mid-call \
 (navigate an IVR, enter a PIN/extension). Enable do_not_call for agents that \
@@ -487,11 +516,31 @@ def _integrations_directive() -> str:
 _CLOSING = """Always respond by calling the compose tool."""
 
 
+def _agent_skills_directive(agent_skills: list[dict[str, str]]) -> str:
+    """The Workspace's published skills, which an agent may list in
+    `skills`. Nothing at all when there are none: a section saying "there are
+    none" is a topic the model then raises with the user."""
+    listed = "\n".join(f"- {c['name']}: {c['description']}" for c in agent_skills)
+    return (
+        "This Workspace has these published skills: instructions and tools an "
+        "agent loads during a call when it needs them. They are the agent's, not "
+        "your own builder skills.\n"
+        f"{listed}\n"
+        "When one fits what the agent has to do, list it in agent_config.skills as "
+        '{"skill": "<name>"} and leave its job to it: do not repeat its '
+        "instructions in the system prompt or write its tools as custom tools. "
+        "Use only these names. You never create, edit or describe a new "
+        "skill; when the agent needs one that is not here, say it can be "
+        "added on the Skills page."
+    )
+
+
 def build_system_prompt(
     *,
     first_turn: bool,
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> str:
     """Assemble the Builder's prompt from the disciplines this turn can use.
 
@@ -526,9 +575,12 @@ def build_system_prompt(
         parts.append(
             "The agent's knowledge base already contains these documents (their "
             "full text is available to the agent at call time): "
-            f"{', '.join(knowledge_docs)}. Build capabilities that rely on this "
+            f"{', '.join(knowledge_docs)}. Build an agent that relies on this "
             "content; do not ask the user to paste it."
         )
+
+    if agent_skills:
+        parts.append(_agent_skills_directive(agent_skills))
 
     if current_config is not None:
         parts.append(_EDIT_SYSTEM.format(config=json.dumps(current_config, indent=2)))
@@ -660,7 +712,7 @@ def _progress_for(name: str, args: dict[str, Any]) -> Progress | None:
         return Progress(f"Reading {os.path.basename(path)}")
     if name == "read_file" and "/SKILL.md" in path:
         skill = path.rsplit("/", 2)[-2]
-        return Progress(f"Using the {skill} skill", skill=skill)
+        return Progress(f"Using the {skill} builder skill", skill=skill)
     return None
 
 
@@ -700,6 +752,7 @@ async def step(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> ComposeResult:
     """Run one builder turn. `messages` is the running [{role, content}] history.
 
@@ -722,6 +775,7 @@ async def step(
         knowledge_docs=knowledge_docs,
         documents_dir=documents_dir,
         workspace_skills_dir=workspace_skills_dir,
+        agent_skills=agent_skills,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -739,6 +793,7 @@ async def stream(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
+    agent_skills: list[dict[str, str]] | None = None,
 ) -> AsyncIterator[Progress | ComposeResult]:
     """One turn, yielding what it is doing and finally what it decided.
 
@@ -759,6 +814,7 @@ async def stream(
             first_turn=first_turn,
             current_config=current_config,
             knowledge_docs=knowledge_docs,
+            agent_skills=agent_skills,
         ),
         backend=_backend(documents_dir, workspace_skills_dir),
         skills=_skill_sources(workspace_skills_dir),

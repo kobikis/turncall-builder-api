@@ -6,8 +6,10 @@ import json
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -15,6 +17,7 @@ from pydantic import BaseModel
 from .. import (
     agent_update,
     builder,
+    skill_library,
     compliance,
     integration_store,
     mcp_registry_store,
@@ -30,6 +33,7 @@ from .._helpers import (
     _backend_view,
     _normalize_config,
     _validate_agent_config,
+    _turncall_http_error,
 )
 from ..audit import Audit
 from ..backends import generator, registry, scaffold, toolgen
@@ -201,11 +205,9 @@ async def stt_models(provider: str, ctx: AuthContext = Depends(require_member)) 
 
 @router.get("/providers/s2s/{provider}/models")
 async def s2s_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
-    """Model ids for an S2S/realtime provider (openai live, the others fixed),
-    and which of them the vendor has deprecated, so the picker can say so."""
+    """Model ids for an S2S/realtime provider (openai live, the others fixed)."""
     return {"success": True, "data": {
         "models": await provider_catalog.s2s_models(provider, await _workspace_keys(ctx)),
-        "deprecated": provider_catalog.deprecated_s2s_models(provider),
     }}
 
 
@@ -314,12 +316,18 @@ async def _turn_events(
     # New list — never mutate the loaded session's history in place (coding-style).
     history = [*sess["history"], {"role": "user", "content": message}]
 
-    # Tell the builder which documents the agent has, so it builds capabilities
-    # that use them instead of asking for pasted content.
+    # Tell the builder which documents the agent has, so it builds an agent
+    # that uses them instead of asking for pasted content.
     doc_names = [*legacy_docs, *session_docs.names(sid)]
     if sess["agent_id"]:
         doc_names.extend(await _agent_kb_doc_names(sess["agent_id"], ctx.workspace_id))
     doc_names = list(dict.fromkeys(doc_names))  # de-dupe, keep order
+
+    # The Workspace's published skills, which the agent may list (#135).
+    # None when unreadable: the turn goes on, and nothing is filtered.
+    agent_skills = await skill_library.published(
+        runtime.get_pool(), runtime.get_client(), ctx.workspace_id
+    )
 
     result: ComposeResult | None = None
     # Ground on the session's current config (if any) so the builder edits it
@@ -336,6 +344,7 @@ async def _turn_events(
         workspace_skills_dir=await workspace_skills.materialize(
             runtime.get_pool(), ctx.workspace_id
         ),
+        agent_skills=agent_skills,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -351,19 +360,46 @@ async def _turn_events(
         history.append(
             {"role": "assistant", "content": result.question or result.summary or ""}
         )
-    else:
+    notes: list[str] = []
+    if result.action == "finalize":
+        config, notes = _published_skills_only(result.agent_config or {}, agent_skills)
+        result = replace(result, agent_config=config)
         history.append(
-            {"role": "assistant", "content": "Updated the agent configuration."}
+            {"role": "assistant", "content": " ".join(["Updated the agent configuration.", *notes])}
         )
-        await store.save_config(runtime.get_pool(), sid, result.agent_config or {})
+        await store.save_config(runtime.get_pool(), sid, config)
     await store.save_history(runtime.get_pool(), sid, history)
 
     payload = _result_payload(result)
+    if notes:
+        payload["notes"] = notes
     # For a generated agent, a finalize is a *proposed* edit — confirm-first: the
     # console shows it and calls /apply to push it live (never auto-mutated here).
     if result.action == "finalize" and sess["agent_id"]:
         payload["pending_apply"] = True
     yield {"type": "result", **payload}
+
+
+def _published_skills_only(
+    config: dict[str, Any], agent_skills: list[dict[str, str]] | None
+) -> tuple[dict[str, Any], list[str]]:
+    """The config with every `skills` entry naming no published skill
+    dropped, and a note for each: TurnCall would refuse the whole save for it.
+    Unchanged when the list could not be read (`None`)."""
+    if agent_skills is None or not config.get("skills"):
+        return config, []
+    names = {c["name"] for c in agent_skills}
+    kept, notes = [], []
+    for entry in config["skills"]:
+        name = entry.get("skill") if isinstance(entry, dict) else None
+        if name in names:
+            kept.append(entry)
+        else:
+            notes.append(
+                f"Left out the skill {name!r}: this workspace has no published "
+                "skill by that name."
+            )
+    return {**config, "skills": kept}, notes
 
 
 def _builder_failure(sid: str, exc: BuilderError) -> tuple[int, str]:
@@ -495,9 +531,13 @@ async def apply_edit(
     if not b:
         raise HTTPException(status_code=404, detail="agent backend not found")
     change = begin_config_change(audit, ctx, b, sess["config"])
-    result = await agent_update.apply_update(
-        pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
-    )
+    try:
+        result = await agent_update.apply_update(
+            pool, runtime.get_client(), b, sess["config"], on_landed=change.landed
+        )
+    except httpx.HTTPStatusError as exc:
+        # TurnCall refused the config: its status and reason, as the form's save.
+        raise _turncall_http_error(exc) from exc
     await change.record()
     return {"success": True, "data": {"agent_id": sess["agent_id"], **result}}
 
@@ -560,6 +600,10 @@ async def create_agent(
     key = ""
     try:
         key = await client.create_api_key(project_id)
+        # Linked to the Workspace's skill library (ADR-0029) before the
+        # agent is saved, so a Config naming skills resolves them there.
+        # Best-effort and recorded: a failed link is retried from the library.
+        await skill_library.link_new_project(pool, client, ctx.workspace_id, project_id)
 
         # Register the webhook BEFORE the agent so the same secret signs its tool
         # calls from the first call (events + tools share one backend secret).
@@ -589,6 +633,10 @@ async def create_agent(
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent provisioning failed for project %s", project_id)
         await _rollback_provisioning(client, project_id, agent_id, key)
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422:
+            # TurnCall refused the config (a skill's tool colliding, say):
+            # a retry fails the same way, so say what to fix instead.
+            raise _turncall_http_error(exc) from exc
         raise HTTPException(
             status_code=502,
             detail="Agent provisioning failed in TurnCall — rolled back; please retry.",

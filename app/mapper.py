@@ -48,6 +48,11 @@ _PASSTHROUGH = (
     "idle_message",
     "max_call_duration_seconds",
     "avatar",
+    # The Skills an agent may load ([{skill, version_id?}]) and how many
+    # at once (#133). Sent as written: TurnCall checks each against the
+    # Workspace's Skill library, and its 422 names the entry.
+    "skills",
+    "max_loaded_skills",
 )
 
 
@@ -190,7 +195,7 @@ def to_create_agent_request(
         "llm": {
             **_set(llm),
             "provider": llm.get("provider", "openai"),
-            "model": llm.get("model", "gpt-4o-mini"),
+            "model": llm.get("model", "gpt-5.4-mini"),
         },
         "tts": _tts_block(tts),
         "tools": tools,

@@ -370,12 +370,13 @@ def test_a_skill_records_created_then_updated(client, mocks):
     mocks.workspace_skills.validate.side_effect = None
     mocks.workspace_skills.save_skill.return_value = {"name": "orders", "description": "d", "body": "new"}
 
-    assert client.put("/skills/orders", json={"description": "d", "body": "new"}, headers=WS).status_code == 200
+    assert client.put("/builder-skills/orders", json={"description": "d", "body": "new"}, headers=WS).status_code == 200
     mocks.workspace_skills.get_skill.return_value = {"name": "orders", "description": "d", "body": "old"}
-    assert client.put("/skills/orders", json={"description": "d", "body": "new"}, headers=WS).status_code == 200
+    assert client.put("/builder-skills/orders", json={"description": "d", "body": "new"}, headers=WS).status_code == 200
 
     created, updated = audit_entries(mocks)
     assert (created["action"], updated["action"]) == ("created", "updated")
+    assert created["resource_type"] == "builder_skill"
     assert updated["changes"] == {"/body": {"before": "old", "after": "new"}}
 
 

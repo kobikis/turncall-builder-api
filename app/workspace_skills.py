@@ -53,19 +53,19 @@ def validate(name: str, description: str, body: str) -> None:
             "'restaurant-reservations'"
         )
     if name in builtin_names():
-        raise ValueError(f"'{name}' is a built-in skill — choose another name")
+        raise ValueError(f"'{name}' is a built-in builder skill — choose another name")
     description = description.strip()
     if not description:
         raise ValueError(
             "describe when the builder should use this — it is the only part "
-            "always in front of the model, and a skill without it is never opened"
+            "always in front of the model, and a builder skill without it is never opened"
         )
     if len(description) > MAX_DESCRIPTION:
         raise ValueError(f"the description must be under {MAX_DESCRIPTION} characters")
     if not body.strip():
-        raise ValueError("the skill needs instructions")
+        raise ValueError("the builder skill needs instructions")
     if len(body) > MAX_BODY:
-        raise ValueError("the skill is too long")
+        raise ValueError("the builder skill is too long")
 
 
 def render(name: str, description: str, body: str) -> str:

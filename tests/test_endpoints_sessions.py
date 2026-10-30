@@ -109,11 +109,9 @@ def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     assert client.get("/providers/s2s/openai/voices").json()["data"]["voices"] == ["alloy", "echo"]
 
 
-def test_s2s_models_name_the_deprecated_ones(client):
-    """grok-voice-2.0 is still offered, and the console can label it."""
-    data = client.get("/providers/s2s/xai/models").json()["data"]
-    assert data["models"] == ["grok-voice-3.0", "grok-voice-2.0"]
-    assert data["deprecated"] == ["grok-voice-2.0"]
+def test_s2s_models_offer_no_deprecated_one(client):
+    """xAI's deprecated grok-voice-2.0 is not offered."""
+    assert client.get("/providers/s2s/xai/models").json()["data"] == {"models": ["grok-voice-3.0"]}
 
 
 def test_s2s_voices_are_listed_with_the_workspaces_key(client, monkeypatch):
@@ -276,6 +274,22 @@ def test_apply_pushes_to_generated_agent(client, mocks, monkeypatch):
     r = client.post("/sessions/sess-1/apply")
     assert r.status_code == 200
     assert r.json()["data"] == {"agent_id": "a1", "backend_regenerated": True}
+
+
+def test_apply_refused_by_turncall_is_its_422(client, mocks, monkeypatch):
+    from tests.test_endpoints_agents import COLLISION, _refused
+
+    mocks.store.get_session.return_value = {
+        "history": [], "config": {"name": "A", "system_prompt": "hi"}, "agent_id": "a1",
+    }
+    mocks.registry.get_backend.return_value = {"agent_id": "a1", "port": 9001, "status": "running", "config": {}}
+    monkeypatch.setattr(
+        sessions.agent_update, "apply_update",
+        AsyncMock(side_effect=_refused(COLLISION, {"field": "skills[0]"})),
+    )
+    r = client.post("/sessions/sess-1/apply")
+    assert r.status_code == 422
+    assert r.json()["errors"] == [{"field": "skills[0]", "message": COLLISION}]
 
 
 def test_apply_before_generation_400(client, mocks):
@@ -496,7 +510,7 @@ def test_a_streamed_turn_narrates_then_answers(client, mocks, monkeypatch):
         "stream",
         FakeStream(
             Progress("Reading menu.pdf"),
-            Progress("Using the takeaway-orders skill", skill="takeaway-orders"),
+            Progress("Using the takeaway-orders builder skill", skill="takeaway-orders"),
             ComposeResult(action="ask", question="How many covers, typically?"),
         ),
     )

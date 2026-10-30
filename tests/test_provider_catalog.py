@@ -52,6 +52,21 @@ def test_google_llm_models_are_the_ones_that_generate_content(monkeypatch):
     assert seen[0].headers["x-goog-api-key"] == "k"
 
 
+def test_openai_offers_no_model_it_has_deprecated(monkeypatch):
+    # OpenAI's list carries a shutdown_date on each model it has deprecated
+    # (measured 2026-10-30): o4-mini's has passed and answers 404.
+    listing = {"data": [
+        {"id": "gpt-5.4-mini", "shutdown_date": None},
+        {"id": "gpt-4o-mini", "shutdown_date": "2027-01-14"},
+        {"id": "o4-mini", "shutdown_date": "2026-10-23"},
+        {"id": "gpt-realtime-2", "shutdown_date": None},
+        {"id": "gpt-4o-realtime-preview", "shutdown_date": "2026-10-23"},
+    ]}
+    _serving(monkeypatch, lambda r: httpx.Response(200, json=listing))
+    assert asyncio.run(provider_catalog.llm_models("openai", {"openai": "k"})) == ["gpt-5.4-mini"]
+    assert asyncio.run(provider_catalog.s2s_models("openai", {"openai": "k"})) == ["gpt-realtime-2"]
+
+
 def test_flux_survives_a_failed_deepgram_fetch(monkeypatch):
     _serving(monkeypatch, lambda r: httpx.Response(401))
     models = asyncio.run(provider_catalog.stt_models("deepgram", {"deepgram": "bad"}))
@@ -74,13 +89,12 @@ _XAI_VOICES = {"voices": [
 ]}
 
 
-def test_xai_models_are_the_flagship_then_the_deprecated_one():
+def test_xai_models_are_the_flagship_alone():
     """Curated: xAI's model list is not what the realtime endpoint takes, and
-    TurnCall pins grok-voice-3.0 rather than the moving `grok-voice-latest`."""
+    TurnCall pins grok-voice-3.0 rather than the moving `grok-voice-latest`.
+    The deprecated grok-voice-2.0 is not offered."""
     provider_catalog._CACHE.clear()
-    assert asyncio.run(provider_catalog.s2s_models("xai")) == ["grok-voice-3.0", "grok-voice-2.0"]
-    assert provider_catalog.deprecated_s2s_models("xai") == ["grok-voice-2.0"]
-    assert provider_catalog.deprecated_s2s_models("openai") == []
+    assert asyncio.run(provider_catalog.s2s_models("xai")) == ["grok-voice-3.0"]
 
 
 def test_xai_voices_are_the_accounts_own_listed_with_its_key(monkeypatch):

@@ -140,11 +140,10 @@ _AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
 
 # Grok Voice (turncall#384). Curated, not fetched: grok-voice-3.0 is what
 # TurnCall runs when none is named (pinned, never the moving
-# `grok-voice-latest`); 2.0 is deprecated by xAI but still answers, so it is
-# offered and named as such. Voices are the account's own, custom ones
+# `grok-voice-latest`). xAI's deprecated 2.0 is not offered, as no picker
+# offers a deprecated model. Voices are the account's own, custom ones
 # included, from xAI's voice list.
-_XAI_S2S_MODELS = ["grok-voice-3.0", "grok-voice-2.0"]
-_DEPRECATED_S2S_MODELS = {"xai": ["grok-voice-2.0"]}
+_XAI_S2S_MODELS = ["grok-voice-3.0"]
 # xai as a cascade LLM (turncall#385): TurnCall's default, offered whenever the
 # account's own list cannot be had — no key, or a voice-only key xAI refuses
 # on its chat endpoints (403).
@@ -217,11 +216,6 @@ async def s2s_models(provider: str, keys: dict[str, str] | None = None) -> list[
     return await _cached(f"s2s:{provider}:{_fp(key)}", lambda c: _fetch_s2s_models(c, provider, key))
 
 
-def deprecated_s2s_models(provider: str) -> list[str]:
-    """The provider's listed models its vendor has deprecated, for the label."""
-    return list(_DEPRECATED_S2S_MODELS.get(provider, []))
-
-
 async def s2s_voices(provider: str, keys: dict[str, str] | None = None) -> list[dict[str, str]]:
     key = _key(provider, keys)
     return await _cached(f"s2sv:{provider}:{_fp(key)}", lambda c: _fetch_s2s_voices(c, provider, key))
@@ -239,7 +233,7 @@ async def _fetch_llm_models(client: httpx.AsyncClient, provider: str, key: str) 
             "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}
         )
         r.raise_for_status()
-        ids = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+        ids = _live_ids(r.json())
         # "instruct": completions-only models (no chat/responses support).
         skip = ("audio", "realtime", "transcribe", "tts", "image", "embedding", "moderation", "dall-e", "instruct")
         return sorted(
@@ -285,7 +279,7 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) 
             "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}
         )
         r.raise_for_status()
-        ids = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+        ids = _live_ids(r.json())
         # Only the account's actual realtime models — injecting known-but-
         # unavailable ids (e.g. deprecated gpt-4o previews) fails at call time
         # with model_not_found. "realtime" also matches transcription/translation
@@ -300,7 +294,7 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) 
             "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}
         )
         r.raise_for_status()
-        ids = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+        ids = _live_ids(r.json())
         # "live" also matches gpt-live-transcribe, a transcription model the
         # dialog endpoint rejects — same reason the realtime branch drops
         # gpt-realtime-whisper.
@@ -330,6 +324,16 @@ async def _google_models(client: httpx.AsyncClient, key: str, method: str) -> li
         for m in r.json().get("models", [])
         if method in (m.get("supportedGenerationMethods") or [])
     )
+
+
+def _live_ids(listing: dict[str, Any]) -> list[str]:
+    """The ids in OpenAI's model list that it has not deprecated: a model with
+    a `shutdown_date` is on its way out (or already answers 404), so no picker
+    offers it. An agent already on one keeps it; the picker shows its value."""
+    return [
+        m["id"] for m in listing.get("data", [])
+        if m.get("id") and m.get("shutdown_date") is None
+    ]
 
 
 def _pair(value: str, label: str) -> dict[str, str]:

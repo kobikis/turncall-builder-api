@@ -100,6 +100,38 @@ def test_create_agent_provision_failure_rolls_back_and_502(client, mocks):
     mocks.generator.materialize_and_run.assert_not_called()
 
 
+def _refused(error: str, details: dict) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://turncall/v1/agents")
+    response = httpx.Response(
+        422,
+        json={"success": False, "error": error, "code": "invalid_agent_config",
+              "details": details},
+        request=request,
+    )
+    return httpx.HTTPStatusError("422", request=request, response=response)
+
+
+COLLISION = (
+    "skills[0] 'explain_bill' tool 'get_invoices' collides with the agent's own tool "
+    "'get_invoices'"
+)
+
+
+def test_create_agent_refused_by_turncall_is_its_422_not_a_retry(client, mocks):
+    # A config TurnCall refuses fails the same way on every retry, so it is
+    # TurnCall's refusal naming the field, not "please retry"; still rolled back.
+    _wire_create_success(mocks)
+    mocks.client.create_agent.side_effect = _refused(COLLISION, {"field": "skills[0]"})
+    r = client.post("/sessions/s1/create")
+    assert r.status_code == 422
+    body = r.json()
+    assert body["reason"] == "invalid_agent_config"
+    assert body["detail"] == COLLISION
+    assert body["errors"] == [{"field": "skills[0]", "message": COLLISION}]
+    mocks.client.delete_project.assert_awaited_once()
+    mocks.generator.materialize_and_run.assert_not_called()
+
+
 def test_create_agent_rolls_back_project_when_tracking_fails(client, mocks):
     # Agent created in TurnCall but store.set_agent_id then fails -> the whole
     # dedicated project is soft-deleted (compensation), caller gets a clean 502.

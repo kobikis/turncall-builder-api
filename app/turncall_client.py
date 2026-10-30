@@ -763,6 +763,75 @@ class TurnCallClient:
             "DELETE", f"/v1/takeaways/{takeaway_id}", api_key=api_key, extract="none"
         )
 
+    # --- skills (turncall#423): the Console's Skills, ADR-0029 -----------
+    # Every call is made with the Workspace's Skill library key.
+
+    async def list_skills(
+        self,
+        api_key: str,
+        *,
+        name: str | None = None,
+        state: str | None = None,
+        page: int = 1,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """One page of the project's skill versions, newest first: the whole
+        paginated envelope (`data`, `total`, `page`, `limit`)."""
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if name:
+            params["name"] = name
+        if state:
+            params["state"] = state
+        return await self._request(
+            "GET", "/v1/skills", api_key=api_key, extract="json", params=params
+        )
+
+    async def get_skill(self, skill_id: str, api_key: str) -> dict[str, Any]:
+        return await self._request("GET", f"/v1/skills/{skill_id}", api_key=api_key)
+
+    async def create_skill(self, body: dict[str, Any], api_key: str) -> dict[str, Any]:
+        """A new draft: version 1 of a new name, or the next version of one."""
+        return await self._request("POST", "/v1/skills", api_key=api_key, json=body)
+
+    async def update_skill(
+        self, skill_id: str, body: dict[str, Any], api_key: str
+    ) -> dict[str, Any]:
+        """Edit a draft; a field left out is kept. A published one is a 409."""
+        return await self._request(
+            "PUT", f"/v1/skills/{skill_id}", api_key=api_key, json=body
+        )
+
+    async def publish_skill(self, skill_id: str, api_key: str) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/skills/{skill_id}/publish", api_key=api_key)
+
+    async def rollback_skill(self, skill_id: str, api_key: str) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/skills/{skill_id}/rollback", api_key=api_key)
+
+    async def delete_skill(self, skill_id: str, api_key: str) -> None:
+        """One version. A 409 naming the agents while any lists the name."""
+        await self._request(
+            "DELETE", f"/v1/skills/{skill_id}", api_key=api_key, extract="none"
+        )
+
+    async def skill_agents(self, name: str, api_key: str) -> list[dict[str, Any]]:
+        """The draft and published agent versions listing the skill, in the
+        library and every project linked to it, each with its `project_id` and
+        the version it resolves to now."""
+        return await self._request("GET", f"/v1/skills/{name}/agents", api_key=api_key)
+
+    async def set_skill_library(
+        self, project_id: str, library_project_id: str | None
+    ) -> dict[str, Any]:
+        """Link a project to the skill library it resolves skill names in (null
+        unlinks). The platform credential only: no project key can link itself
+        to another project's skills."""
+        return await self._bootstrap(
+            "PUT",
+            f"/v1/projects/{project_id}/skill-library",
+            json={"library_project_id": library_project_id},
+            project_id=project_id,
+        )
+
     async def register_webhook(
         self, url: str, events: list[str], api_key: str
     ) -> dict[str, Any]:

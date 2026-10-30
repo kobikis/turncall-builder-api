@@ -41,6 +41,8 @@ def test_emitted_fields_match_the_mapper():
         "idle_message",
         "max_call_duration_seconds",
         "avatar",
+        "skills",
+        "max_loaded_skills",
     }
 
 

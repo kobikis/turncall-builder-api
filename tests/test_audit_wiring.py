@@ -105,7 +105,7 @@ def test_every_mutating_route_is_audited_or_says_why_not():
         ("PUT", "/integrations/providers/{provider}"),
         ("DELETE", "/integrations/{account_id}"),
         ("PUT", "/members/{user_id}"),
-        ("PUT", "/skills/{name}"),
+        ("PUT", "/builder-skills/{name}"),
         ("POST", "/agents/{agent_id}/github/push"),
         ("PUT", "/compliance"),
         ("PUT", "/agents/{agent_id}/compliance"),
