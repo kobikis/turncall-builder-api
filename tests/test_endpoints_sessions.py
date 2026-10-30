@@ -109,11 +109,9 @@ def test_s2s_models_and_voices_endpoints(client, monkeypatch):
     assert client.get("/providers/s2s/openai/voices").json()["data"]["voices"] == ["alloy", "echo"]
 
 
-def test_s2s_models_name_the_deprecated_ones(client):
-    """grok-voice-2.0 is still offered, and the console can label it."""
-    data = client.get("/providers/s2s/xai/models").json()["data"]
-    assert data["models"] == ["grok-voice-3.0", "grok-voice-2.0"]
-    assert data["deprecated"] == ["grok-voice-2.0"]
+def test_s2s_models_offer_no_deprecated_one(client):
+    """xAI's deprecated grok-voice-2.0 is not offered."""
+    assert client.get("/providers/s2s/xai/models").json()["data"] == {"models": ["grok-voice-3.0"]}
 
 
 def test_s2s_voices_are_listed_with_the_workspaces_key(client, monkeypatch):

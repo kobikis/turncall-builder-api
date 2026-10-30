@@ -205,11 +205,9 @@ async def stt_models(provider: str, ctx: AuthContext = Depends(require_member)) 
 
 @router.get("/providers/s2s/{provider}/models")
 async def s2s_models(provider: str, ctx: AuthContext = Depends(require_member)) -> dict[str, Any]:
-    """Model ids for an S2S/realtime provider (openai live, the others fixed),
-    and which of them the vendor has deprecated, so the picker can say so."""
+    """Model ids for an S2S/realtime provider (openai live, the others fixed)."""
     return {"success": True, "data": {
         "models": await provider_catalog.s2s_models(provider, await _workspace_keys(ctx)),
-        "deprecated": provider_catalog.deprecated_s2s_models(provider),
     }}
 
 
