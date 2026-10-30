@@ -51,4 +51,5 @@ seed-guest: ## Seed a dev guest login (guest/guest); needs the stack up. Refuses
 test: ## Run unit tests (in the api image — no host Python needed)
 	docker compose run --rm --build \
 		-v "$(CURDIR)/app:/app/app" -v "$(CURDIR)/tests:/app/tests" \
+		-v "$(CURDIR)/agent-runtime:/app/agent-runtime:ro" \
 		api python -m pytest tests/ -q
