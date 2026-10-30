@@ -21,7 +21,8 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from .. import capability_library, capability_store, integration_store, runtime
-from .._helpers import _turncall_http_error
+from .._helpers import Refusal, _turncall_http_error
+from ..backends import registry
 from ..audit import Audit, AuditTrail
 from ..deps import AuthContext, require_editor, require_member
 
@@ -214,6 +215,76 @@ async def get_capability(name: Name, ctx: AuthContext = Depends(require_member))
     }
 
 
+async def _console_agents(workspace_id: str) -> dict[str, dict[str, Any]]:
+    """project_id -> the Console agent it runs: one TurnCall project per agent."""
+    return {
+        b["project_id"]: b
+        for b in await registry.list_backends(runtime.get_pool(), workspace_id)
+        if b.get("project_id")
+    }
+
+
+def _as_console_agent(
+    row: dict[str, Any], agents: dict[str, dict[str, Any]], *, name_key: str, version_key: str
+) -> dict[str, Any]:
+    """A TurnCall agent row named as the Console agent of its project. A project
+    the registry does not know is kept, as unknown, under TurnCall's name."""
+    backend = agents.get(row.get("project_id") or "")
+    return {
+        "agent_id": backend["agent_id"] if backend else None,
+        "name": ((backend.get("config") or {}).get("name") or backend.get("slug"))
+        if backend else row.get(name_key),
+        "known": backend is not None,
+        "project_id": row.get("project_id"),
+        "turncall_agent_id": row.get("agent_id"),
+        "agent_version": row.get(version_key),
+        "agent_state": row.get("agent_state", row.get("state")),
+    }
+
+
+@router.get("/capabilities/{name}/agents")
+async def capability_agents(
+    name: Name, ctx: AuthContext = Depends(require_member)
+) -> dict[str, Any]:
+    """The agents listing the Capability, across every project linked to the
+    library, each with the version it resolves to now and whether it is pinned."""
+    library = await _library(ctx.workspace_id)
+    rows = await _call(runtime.get_client().skill_agents(name, library["api_key"]))
+    agents = await _console_agents(ctx.workspace_id)
+    return {
+        "success": True,
+        "data": [
+            {
+                **_as_console_agent(row, agents, name_key="agent_name", version_key="agent_version"),
+                "resolved_skill_id": row.get("resolved_skill_id"),
+                "resolved_version": row.get("resolved_version"),
+                "pinned": bool(row.get("pinned")),
+            }
+            for row in rows
+        ],
+    }
+
+
+async def _in_use(exc: httpx.HTTPStatusError, name: str, workspace_id: str) -> HTTPException:
+    """TurnCall's refusal to delete a Capability an agent lists, naming the
+    Console agents; any other refusal as TurnCall gave it."""
+    try:
+        body = exc.response.json()
+        listed = (body.get("details") or {})["agents"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return _turncall_http_error(exc)
+    agents = await _console_agents(workspace_id)
+    named = [_as_console_agent(a, agents, name_key="name", version_key="version") for a in listed]
+    return Refusal(
+        409,
+        f"{name!r} is used by " + ", ".join(repr(a["name"]) for a in named)
+        + "; take it off them first",
+        "capability_in_use",
+        capability=name,
+        agents=named,
+    )
+
+
 # --- one version ----------------------------------------------------------------
 
 
@@ -289,7 +360,12 @@ async def delete_version(
         ctx, "capability", str(version_id), "deleted", landed=False,
         resource_name=before["name"], before=_audited(before), after=None,
     )
-    await _call(runtime.get_client().delete_skill(str(version_id), library["api_key"]))
+    try:
+        await runtime.get_client().delete_skill(str(version_id), library["api_key"])
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            raise await _in_use(exc, before["name"], ctx.workspace_id) from exc
+        raise _turncall_http_error(exc) from exc
     await change.record()
     return {"success": True, "data": {"deleted": str(version_id)}}
 

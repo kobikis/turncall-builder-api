@@ -127,7 +127,7 @@ def test_a_name_that_is_not_a_capability_name_never_reaches_turncall(client, tc)
     _create(client)
     before = len(tc.requests)
     assert client.get("/capabilities/Not..A-Name").status_code == 422
-    assert client.get("/capabilities/..%2Fagents").status_code == 404
+    assert client.get("/capabilities/..%2Fagents").status_code in (404, 422)
     assert len(tc.requests) == before
 
 
