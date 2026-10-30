@@ -165,8 +165,10 @@ _Avoid_: webhook, callback, notification
 
 **Config surface**:
 The subset of TurnCall agent fields the Builder is allowed to set (name,
-system_prompt, first_message, llm, voice, built-in tools, and `aws.region` for
-the AWS providers). Everything outside it takes TurnCall defaults.
+system_prompt, first_message, llm, voice, built-in tools, `aws.region` for
+the AWS providers, and the [[Capability|Capabilities]] it may load: `skills`,
+`[{skill, version_id?}]`, and `max_loaded_skills`, passed through as written).
+Everything outside it takes TurnCall defaults.
 
 **Credentials reach TurnCall as [[Integration]]s, never as config.** The Builder
 may select an AWS *region* but never emits `access_key_id`, `secret_access_key`
