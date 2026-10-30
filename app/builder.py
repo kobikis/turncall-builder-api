@@ -276,6 +276,35 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "system_prompt", "llm", "tts"],
 }
+# The Capabilities the agent may load mid-call (#135): names only, from the
+# Workspace's published list in the prompt. A Capability is written on the
+# Console, never here.
+_AGENT_CONFIG_SCHEMA["properties"]["skills"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "skill": {"type": "string"},
+            "version_id": {
+                "type": "string",
+                "description": "A pinned version. Only ever kept from the current "
+                "config, never written.",
+            },
+        },
+        "required": ["skill"],
+    },
+    "description": "Capabilities the agent may load during a call, by name: "
+    "[{\"skill\": \"<name>\"}]. Only names from the Workspace's Capabilities "
+    "listed in your instructions; leave it out when none are listed or none fit. "
+    "Keep an entry already in the config as it is (a version_id included).",
+}
+_AGENT_CONFIG_SCHEMA["properties"]["max_loaded_skills"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 10,
+    "description": "How many Capabilities may be loaded at once (default 3). "
+    "Leave it out unless the user asks.",
+}
 
 COMPOSE_TOOL: dict[str, Any] = {
     "name": "compose",
@@ -487,11 +516,30 @@ def _integrations_directive() -> str:
 _CLOSING = """Always respond by calling the compose tool."""
 
 
+def _capabilities_directive(capabilities: list[dict[str, str]]) -> str:
+    """The Workspace's published Capabilities, which an agent may list in
+    `skills`. Nothing at all when there are none: a section saying "there are
+    none" is a topic the model then raises with the user."""
+    listed = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+    return (
+        "This Workspace has these published Capabilities: instructions and tools "
+        "an agent loads during a call when it needs them.\n"
+        f"{listed}\n"
+        "When one fits what the agent has to do, list it in agent_config.skills as "
+        '{"skill": "<name>"} and leave its job to it: do not repeat its '
+        "instructions in the system prompt or write its tools as custom tools. "
+        "Use only these names. You never create, edit or describe a new "
+        "Capability; when the agent needs one that is not here, say it can be "
+        "added on the Capabilities page."
+    )
+
+
 def build_system_prompt(
     *,
     first_turn: bool,
     current_config: dict[str, Any] | None = None,
     knowledge_docs: list[str] | None = None,
+    capabilities: list[dict[str, str]] | None = None,
 ) -> str:
     """Assemble the Builder's prompt from the disciplines this turn can use.
 
@@ -526,9 +574,12 @@ def build_system_prompt(
         parts.append(
             "The agent's knowledge base already contains these documents (their "
             "full text is available to the agent at call time): "
-            f"{', '.join(knowledge_docs)}. Build capabilities that rely on this "
+            f"{', '.join(knowledge_docs)}. Build an agent that relies on this "
             "content; do not ask the user to paste it."
         )
+
+    if capabilities:
+        parts.append(_capabilities_directive(capabilities))
 
     if current_config is not None:
         parts.append(_EDIT_SYSTEM.format(config=json.dumps(current_config, indent=2)))
@@ -700,6 +751,7 @@ async def step(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
+    capabilities: list[dict[str, str]] | None = None,
 ) -> ComposeResult:
     """Run one builder turn. `messages` is the running [{role, content}] history.
 
@@ -722,6 +774,7 @@ async def step(
         knowledge_docs=knowledge_docs,
         documents_dir=documents_dir,
         workspace_skills_dir=workspace_skills_dir,
+        capabilities=capabilities,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -739,6 +792,7 @@ async def stream(
     knowledge_docs: list[str] | None = None,
     documents_dir: str | None = None,
     workspace_skills_dir: str | None = None,
+    capabilities: list[dict[str, str]] | None = None,
 ) -> AsyncIterator[Progress | ComposeResult]:
     """One turn, yielding what it is doing and finally what it decided.
 
@@ -759,6 +813,7 @@ async def stream(
             first_turn=first_turn,
             current_config=current_config,
             knowledge_docs=knowledge_docs,
+            capabilities=capabilities,
         ),
         backend=_backend(documents_dir, workspace_skills_dir),
         skills=_skill_sources(workspace_skills_dir),

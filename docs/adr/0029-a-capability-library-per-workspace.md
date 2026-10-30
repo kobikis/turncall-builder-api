@@ -22,7 +22,7 @@ the Workspace.
 
 **Every agent project in the Workspace is linked to it**, and so is the
 Workspace's webhook project, through TurnCall's skill library link (a project's
-`skill_library_id`, set with `PUT /v1/projects/{id}/skill-library`). A linked
+`skill_library.library_project_id`, set with `PUT /v1/projects/{id}/skill-library`). A linked
 project resolves skill names in its library and nowhere else. Existing projects
 are linked when the library is made, a new agent's project at Create (before its
 agent is saved, so a finalized config naming Capabilities saves), and the
@@ -78,13 +78,15 @@ A linked project reads another project's skills. If a project's own key could
 set the link, any key could read any project's skills by naming it. Only the
 platform credential, which the Builder holds, can set it, and TurnCall records
 each link in its own audit log as the platform's. TurnCall refuses a link to
-itself, a chain (a library that is itself linked), and a project that does not
-exist.
+itself, a chain either way (a library that is itself linked, or linking a
+project other projects already read from), and a project that does not exist.
 
 ## Consequences
 
 - A Workspace's first Capability costs one more TurnCall project and key.
 - An agent created while the library was being made can miss its link; it then
   shows as not linked on `GET /capability-library` until the links are retried.
-- A deleted or unlinked library degrades softly in TurnCall: an agent's skills
-  become a warning and a skipped skill on the call, never a failed call.
+- A deleted or unlinked library degrades softly on a call: an agent's skills
+  become a warning and a skipped skill, never a failed call. Saving an agent
+  that lists them is refused, naming each entry (`skills[i] '<name>' cannot be
+  resolved: this project's skill library is gone`).

@@ -68,8 +68,17 @@ class FakeTurnCall:
         if method == "PUT" and parts[:2] == ["v1", "projects"] and parts[-1] == "skill-library":
             if request.headers.get("X-Platform-Key") != PLATFORM_KEY:
                 return httpx.Response(401, json={"success": False, "error": "platform key"})
+            if not isinstance(body, dict) or "library_project_id" not in body:
+                return httpx.Response(422, json={
+                    "success": False, "error": "library_project_id is required",
+                    "code": "validation_error", "details": {"field": "library_project_id"},
+                })
             self.links[parts[2]] = body["library_project_id"]
-            return _ok({"id": parts[2], "skill_library_id": body["library_project_id"]}, audited=True)
+            # The project read, its link nested like limits and retention.
+            return _ok({
+                "id": parts[2],
+                "skill_library": {"library_project_id": body["library_project_id"]},
+            }, audited=True)
         if parts[:2] == ["v1", "skills"]:
             return self._skills(method, parts[2:], body, request)
         if parts[:2] == ["v1", "agents"]:

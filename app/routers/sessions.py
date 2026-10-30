@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -315,12 +316,18 @@ async def _turn_events(
     # New list — never mutate the loaded session's history in place (coding-style).
     history = [*sess["history"], {"role": "user", "content": message}]
 
-    # Tell the builder which documents the agent has, so it builds capabilities
-    # that use them instead of asking for pasted content.
+    # Tell the builder which documents the agent has, so it builds an agent
+    # that uses them instead of asking for pasted content.
     doc_names = [*legacy_docs, *session_docs.names(sid)]
     if sess["agent_id"]:
         doc_names.extend(await _agent_kb_doc_names(sess["agent_id"], ctx.workspace_id))
     doc_names = list(dict.fromkeys(doc_names))  # de-dupe, keep order
+
+    # The Workspace's published Capabilities, which the agent may list (#135).
+    # None when unreadable: the turn goes on, and nothing is filtered.
+    capabilities = await capability_library.published(
+        runtime.get_pool(), runtime.get_client(), ctx.workspace_id
+    )
 
     result: ComposeResult | None = None
     # Ground on the session's current config (if any) so the builder edits it
@@ -337,6 +344,7 @@ async def _turn_events(
         workspace_skills_dir=await workspace_skills.materialize(
             runtime.get_pool(), ctx.workspace_id
         ),
+        capabilities=capabilities,
     ):
         if isinstance(event, ComposeResult):
             result = event
@@ -352,19 +360,46 @@ async def _turn_events(
         history.append(
             {"role": "assistant", "content": result.question or result.summary or ""}
         )
-    else:
+    notes: list[str] = []
+    if result.action == "finalize":
+        config, notes = _published_skills_only(result.agent_config or {}, capabilities)
+        result = replace(result, agent_config=config)
         history.append(
-            {"role": "assistant", "content": "Updated the agent configuration."}
+            {"role": "assistant", "content": " ".join(["Updated the agent configuration.", *notes])}
         )
-        await store.save_config(runtime.get_pool(), sid, result.agent_config or {})
+        await store.save_config(runtime.get_pool(), sid, config)
     await store.save_history(runtime.get_pool(), sid, history)
 
     payload = _result_payload(result)
+    if notes:
+        payload["notes"] = notes
     # For a generated agent, a finalize is a *proposed* edit — confirm-first: the
     # console shows it and calls /apply to push it live (never auto-mutated here).
     if result.action == "finalize" and sess["agent_id"]:
         payload["pending_apply"] = True
     yield {"type": "result", **payload}
+
+
+def _published_skills_only(
+    config: dict[str, Any], capabilities: list[dict[str, str]] | None
+) -> tuple[dict[str, Any], list[str]]:
+    """The config with every `skills` entry naming no published Capability
+    dropped, and a note for each: TurnCall would refuse the whole save for it.
+    Unchanged when the list could not be read (`None`)."""
+    if capabilities is None or not config.get("skills"):
+        return config, []
+    names = {c["name"] for c in capabilities}
+    kept, notes = [], []
+    for entry in config["skills"]:
+        name = entry.get("skill") if isinstance(entry, dict) else None
+        if name in names:
+            kept.append(entry)
+        else:
+            notes.append(
+                f"Left out the Capability {name!r}: this workspace has no published "
+                "Capability by that name."
+            )
+    return {**config, "skills": kept}, notes
 
 
 def _builder_failure(sid: str, exc: BuilderError) -> tuple[int, str]:

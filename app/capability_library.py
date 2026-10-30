@@ -44,6 +44,43 @@ async def ensure(pool: Any, client: Any, workspace_id: str) -> tuple[dict[str, A
     return await capability_store.ensure(pool, workspace_id, create)
 
 
+_PAGE = 200  # TurnCall's largest page of skill versions
+
+
+async def versions(
+    client: Any, api_key: str, *, name: str | None = None, state: str | None = None
+) -> list[dict[str, Any]]:
+    """Every version in the library (of `name`, in `state`). TurnCall's
+    refusal is raised as it came."""
+    out: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        body = await client.list_skills(api_key, name=name, state=state, page=page, limit=_PAGE)
+        out += body.get("data") or []
+        if not body.get("data") or len(out) >= int(body.get("total") or 0):
+            return out
+        page += 1
+
+
+async def published(pool: Any, client: Any, workspace_id: str) -> list[dict[str, str]] | None:
+    """The Workspace's published Capabilities, [{name, description}] by name:
+    what the Builder may put in an agent's `skills` (#135). [] before the
+    library exists. None when they could not be read, which a caller takes as
+    "unknown", never as "none"."""
+    try:
+        library = await capability_store.get(pool, workspace_id)
+        if library is None:
+            return []
+        rows = await versions(client, library["api_key"], state="published")
+    except Exception:  # noqa: BLE001 — a builder turn goes on without the list
+        logger.exception("reading the published capabilities of %s failed", workspace_id)
+        return None
+    return sorted(
+        ({"name": r["name"], "description": r.get("description") or ""} for r in rows),
+        key=lambda c: c["name"],
+    )
+
+
 async def _targets(pool: Any, workspace_id: str) -> list[dict[str, Any]]:
     """Every project of the Workspace: each agent's, then its webhook project
     once it has one."""

@@ -32,7 +32,6 @@ router = APIRouter()
 # never reaches a TurnCall path it could leave.
 NAME_PATTERN = r"^[a-z_][a-z0-9_]*$"
 Name = Annotated[str, Path(max_length=64, pattern=NAME_PATTERN)]
-_PAGE = 200  # TurnCall's largest page of skill versions
 
 
 class CapabilityCreate(BaseModel):
@@ -114,16 +113,10 @@ async def _call(coro: Any) -> Any:
 async def all_versions(
     api_key: str, *, name: str | None = None, state: str | None = None
 ) -> list[dict[str, Any]]:
-    """Every version in the library (of `name`, in `state`), newest first."""
-    client, out, page = runtime.get_client(), [], 1
-    while True:
-        body = await _call(
-            client.list_skills(api_key, name=name, state=state, page=page, limit=_PAGE)
-        )
-        out += body.get("data") or []
-        if not body.get("data") or len(out) >= int(body.get("total") or 0):
-            return out
-        page += 1
+    """Every version in the library (of `name`, in `state`)."""
+    return await _call(
+        capability_library.versions(runtime.get_client(), api_key, name=name, state=state)
+    )
 
 
 def _ref(version: dict[str, Any] | None) -> dict[str, Any] | None:
