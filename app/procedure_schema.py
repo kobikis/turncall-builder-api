@@ -66,7 +66,9 @@ _PROCEDURE_SCHEMA: dict[str, Any] = {
                     "tool": {
                         "type": "string",
                         "description": "A tool the agent calls at this step: one of "
-                        "its own `tools` or `custom_tools`, by name.",
+                        "its own `tools` or `custom_tools`, a tool of a Connected "
+                        "app it uses during calls, or one an MCP server of its "
+                        "serves, by name.",
                     },
                     "moves": {
                         "type": "array",

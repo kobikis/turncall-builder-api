@@ -69,9 +69,17 @@ A broken procedure refuses the whole save, so get these right:
 ## Step tools
 
 A step's `tool` names a tool the agent calls there, so a lookup happens where it
-belongs. It must be one of the agent's own: a name in `tools` (built-ins) or in
-`custom_tools`. When a step needs a lookup the agent has no tool for, write
-that tool as a custom_tool (see the agent-tools builder skill) and name it.
+belongs. It must be one the agent has on a call:
+
+- a name in `tools` (built-ins) or in `custom_tools`;
+- a tool of a Connected app already in `integrations` with `mid_call` on, by
+  its full name (`google_calendar-create-event`) — never an app the agent
+  does not have yet, which you cannot attach;
+- a tool of one of the agent's `mcp_servers`, only when the user names it:
+  those are discovered when a call starts, so nothing checks the name first.
+
+When a step needs a lookup the agent has no tool for, write that tool as a
+custom_tool (see the agent-tools builder skill) and name it.
 
 ## Escalation is a transfer
 
