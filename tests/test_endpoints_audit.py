@@ -376,6 +376,7 @@ def test_a_skill_records_created_then_updated(client, mocks):
 
     created, updated = audit_entries(mocks)
     assert (created["action"], updated["action"]) == ("created", "updated")
+    assert created["resource_type"] == "builder_skill"
     assert updated["changes"] == {"/body": {"before": "old", "after": "new"}}
 
 

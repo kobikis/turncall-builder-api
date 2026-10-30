@@ -54,7 +54,7 @@ def test_making_the_library_links_every_agent_project_and_the_webhook_project(cl
     ]
 
     library_entry = audit_entries(mocks)[0]
-    assert (library_entry["resource_type"], library_entry["action"]) == ("capability_library", "created")
+    assert (library_entry["resource_type"], library_entry["action"]) == ("skill_library", "created")
     assert library_entry["agent_ids"] == ["a1", "a2"]
     assert library_entry["changes"]["/links/p1"] == {"before": None, "after": "linked"}
     # Each link is in TurnCall's log too, as a change to that project.
@@ -73,7 +73,7 @@ def test_a_library_whose_linking_fails_is_in_the_log_as_partial(client, mocks, t
     assert r.status_code == 500
     assert tc.sent("POST", "/v1/projects")  # the library was made
     [entry] = audit_entries(mocks)
-    assert (entry["resource_type"], entry["action"]) == ("capability_library", "created")
+    assert (entry["resource_type"], entry["action"]) == ("skill_library", "created")
     assert entry["outcome"] == "partial"
     assert entry["changes"]["/project_id"] == {"before": None, "after": "proj-1"}
     assert not tc.sent("POST", "/v1/skills")  # and no Skill
@@ -111,7 +111,7 @@ def test_a_failed_link_is_kept_shown_and_retried(client, mocks, tc):
     assert len(tc.sent("PUT", "/v1/projects/p1/")) == 1
     assert _links(client)["p2"] == ("linked", None)
     entry = audit_entries(mocks)[-1]
-    assert (entry["resource_type"], entry["action"]) == ("capability_library", "linked")
+    assert (entry["resource_type"], entry["action"]) == ("skill_library", "linked")
     assert entry["changes"] == {"/links/p2": {"before": "failed", "after": "linked"}}
     assert entry["agent_ids"] == ["a2"]
 

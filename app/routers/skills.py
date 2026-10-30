@@ -28,10 +28,6 @@ from ..deps import AuthContext, require_editor, require_member
 
 router = APIRouter()
 
-# The audit log's resource types for these keep the names they were first
-# written under: entries are append-only, and `skill` there is a Builder skill.
-AUDIT_SKILL, AUDIT_LIBRARY = "capability", "capability_library"
-
 # TurnCall's skill name rule (SKILL_NAME_PATTERN), checked here too so a name
 # never reaches a TurnCall path it could leave.
 NAME_PATTERN = r"^[a-z_][a-z0-9_]*$"
@@ -92,7 +88,7 @@ async def _ensure_library(audit: AuditTrail, ctx: AuthContext) -> dict[str, Any]
         # Begun before linking: the library exists from here, so linking that
         # raises leaves it in the log as partial, never absent.
         change = audit.begin(
-            ctx, AUDIT_LIBRARY, ctx.workspace_id, "created",
+            ctx, "skill_library", ctx.workspace_id, "created",
             resource_name="Skill library",
             after={"project_id": library["project_id"], "links": {}},
         )
@@ -193,7 +189,7 @@ async def create_skill(
     if this is the Workspace's first."""
     library = await _ensure_library(audit, ctx)
     change = audit.begin(
-        ctx, AUDIT_SKILL, body.name, "created", landed=False, resource_name=body.name,
+        ctx, "skill", body.name, "created", landed=False, resource_name=body.name,
     )
     row = await _call(runtime.get_client().create_skill(body.model_dump(), library["api_key"]))
     await change.record(resource_id=row["id"], after=_audited(row))
@@ -309,7 +305,7 @@ async def edit_version(
     library = await _library(ctx.workspace_id)
     before = await _version(library, version_id)
     change = audit.begin(
-        ctx, AUDIT_SKILL, str(version_id), "updated", landed=False,
+        ctx, "skill", str(version_id), "updated", landed=False,
         resource_name=before["name"], before=_audited(before),
     )
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -324,7 +320,7 @@ async def _transition(
     library = await _library(ctx.workspace_id)
     before = await _version(library, version_id)
     change = audit.begin(
-        ctx, AUDIT_SKILL, str(version_id), action, landed=False,
+        ctx, "skill", str(version_id), action, landed=False,
         resource_name=before["name"], before=_audited(before),
     )
     client = runtime.get_client()
@@ -359,7 +355,7 @@ async def delete_version(
     library = await _library(ctx.workspace_id)
     before = await _version(library, version_id)
     change = audit.begin(
-        ctx, AUDIT_SKILL, str(version_id), "deleted", landed=False,
+        ctx, "skill", str(version_id), "deleted", landed=False,
         resource_name=before["name"], before=_audited(before), after=None,
     )
     try:
@@ -397,7 +393,7 @@ async def relink(audit: Audit, ctx: AuthContext = Depends(require_editor)) -> di
     links = await skill_library.link_all(pool, runtime.get_client(), ctx.workspace_id)
     if links:
         await audit.record(
-            ctx, AUDIT_LIBRARY, ctx.workspace_id, "linked",
+            ctx, "skill_library", ctx.workspace_id, "linked",
             resource_name="Skill library",
             changes={
                 f"/links/{link['project_id']}": {"before": link["was"], "after": link["state"]}

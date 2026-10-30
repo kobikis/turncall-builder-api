@@ -160,7 +160,7 @@ def test_turncalls_422_comes_back_naming_the_tool(client, mocks, tc):
         {"field": "tools[1]", "message": "tools[1] 'end_call' name: is a built-in"},
     ]
     # The library was made and is recorded; the refused Skill is not.
-    assert [e["resource_type"] for e in audit_entries(mocks)] == ["capability_library"]
+    assert [e["resource_type"] for e in audit_entries(mocks)] == ["skill_library"]
 
 
 def test_a_field_turncall_names_by_location(client, tc):
@@ -225,12 +225,12 @@ def test_every_write_is_an_audit_entry_with_the_user(client, mocks, tc):
 
     entries = audit_entries(mocks)
     assert [(e["resource_type"], e["action"]) for e in entries] == [
-        ("capability_library", "created"),
-        ("capability", "created"),
-        ("capability", "updated"),
-        ("capability", "published"),
-        ("capability", "created"),
-        ("capability", "deleted"),
+        ("skill_library", "created"),
+        ("skill", "created"),
+        ("skill", "updated"),
+        ("skill", "published"),
+        ("skill", "created"),
+        ("skill", "deleted"),
     ]
     assert all(e["user_id"] == "u-test" and e["role"] == "admin" for e in entries)
     created = entries[1]

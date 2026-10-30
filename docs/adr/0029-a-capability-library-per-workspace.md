@@ -98,7 +98,8 @@ The Console now calls these [[Skill|Skills]] and the Builder's own guidance
 config, TurnCall's API and its call records already use. The code follows:
 the routes are `/skills`, `/skill-versions/{id}` and `/skill-library` (the
 Builder skills' own moved to `/builder-skills`), and the tables are
-`skill_libraries` and `skill_links` (migration 0026). The audit log keeps the
-resource types its entries were written under, since they are append-only:
-`skill` is a Builder skill, `capability` and `capability_library` a skill and
-the skill library.
+`skill_libraries` and `skill_links` (migration 0026). The audit log's resource
+types follow, in the entries already written too (migration 0027, which steps
+past the append-only trigger as the table's owner): `skill` (a Builder skill)
+is now `builder_skill`, and `capability` and `capability_library` are `skill`
+and `skill_library`.

@@ -95,7 +95,7 @@ def test_a_refused_delete_names_the_console_agents(client, mocks, tc):
         (None, "someone-else", False, 3, "published"),
     ]
     # Nothing was deleted, so nothing is recorded.
-    assert [e["action"] for e in audit_entries(mocks) if e["resource_type"] == "capability"] == ["created"]
+    assert [e["action"] for e in audit_entries(mocks) if e["resource_type"] == "skill"] == ["created"]
 
 
 def test_another_conflict_is_turncalls_as_given(client, tc):

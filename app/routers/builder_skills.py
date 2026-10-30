@@ -63,7 +63,7 @@ async def save_skill(
             body=body.body,
         )
         await audit.record(
-            ctx, "skill", name, "updated" if before else "created",
+            ctx, "builder_skill", name, "updated" if before else "created",
             resource_name=name, before=_audited(before), after=_audited(skill), db=conn,
         )
     return {"success": True, "data": skill}
@@ -87,7 +87,7 @@ async def delete_skill(
         deleted = await workspace_skills.delete_skill(conn, ctx.workspace_id, name)
         if deleted:
             await audit.record(
-                ctx, "skill", name, "deleted",
+                ctx, "builder_skill", name, "deleted",
                 resource_name=name, before=_audited(before), after=None, db=conn,
             )
     if not deleted:
