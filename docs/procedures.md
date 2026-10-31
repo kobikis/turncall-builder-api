@@ -112,7 +112,9 @@ After a tool runs, the model replies without a fresh window, since the
 conversation no longer ends on the caller's turn. So a move's result carries
 what the window would: the new step's text, its tool, and where it moves next
 (`Then move on: confirmed (when the calendar event was created); ...`). That
-is how a step whose tool answers still knows to move on.
+is how a step whose tool answers still knows to move on. The step's own tool
+says it again when it answers, since a skill load or another call can come
+between the move and the tool.
 
 ### Which wins when they disagree
 
