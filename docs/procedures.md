@@ -114,7 +114,8 @@ what the window would: the new step's text, its tool, and where it moves next
 (`Then move on: confirmed (when the calendar event was created); ...`). That
 is how a step whose tool answers still knows to move on. The step's own tool
 says it again when it answers, since a skill load or another call can come
-between the move and the tool.
+between the move and the tool; and when the model calls the tool of the next
+step without moving there first, its result names the move it skipped.
 
 ### Which wins when they disagree
 
