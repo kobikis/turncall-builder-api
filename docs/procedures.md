@@ -90,7 +90,8 @@ Procedure "table_reservation" — current step: time (ask)
     → guest_name  when: the caller chose a time between six and eleven pm
     ← back to date  (always allowed)
   Next steps (preview): what comes next, not what to do now. Do a step's
-  work (ask its question, call its tool) only in a reply that also moves there.
+  work (ask its question, call its tool) only once you move there, in that
+  same reply or a later one.
     guest_name (ask): Ask for the name the booking should be under.
   Report every move with move_to_step. Do not skip a step. ...
 
@@ -115,8 +116,11 @@ what the window would: the new step's text, its tool, and where it moves next
 (`Then move on: confirmed (when the calendar event was created); ...`). That
 is how a step whose tool answers still knows to move on. The step's own tool
 says it again when it answers, since a skill load or another call can come
-between the move and the tool; and when the model calls the tool of the next
-step without moving there first, its result names the move it skipped.
+between the move and the tool: if one of the step's moves now applies,
+report it; if none does, stay. And when the model calls the tool of the next
+step without moving there first, its result names that move, so the record
+still ends where the call did (never for an escalate step, whose move would
+run its transfer again).
 
 ### Which wins when they disagree
 
