@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -281,7 +282,47 @@ def _field(loc: list[Any]) -> str:
     return out
 
 
-def field_errors(body: dict[str, Any]) -> list[dict[str, Any]]:
+# TurnCall's graph rule for procedures (turncall#444): `procedures[i] '<name>':
+# step '<id>' ...` when the problem is one step's, the step left out otherwise.
+_PROCEDURE = re.compile(r"^procedures\[(\d+)\] '([^']*)'(?:: step '([^']*)')?")
+
+
+def _procedure_error(line: str, sent: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A graph refusal of one procedure as `{field, message, procedure, step?}`:
+    on `procedures[i].steps[j]` when its message names a step the sent config
+    has (the step's index, from its id), else on `procedures[i]`."""
+    m = _PROCEDURE.match(line)
+    if not m:
+        return None
+    index, name, step = int(m.group(1)), m.group(2), m.group(3)
+    out: dict[str, Any] = {"field": f"procedures[{index}]", "message": line, "procedure": name}
+    if step is None:
+        return out
+    out["step"] = step
+    procedures = (sent or {}).get("procedures") or []
+    steps = procedures[index].get("steps") if index < len(procedures) else None
+    ids = [s.get("id") if isinstance(s, dict) else None for s in steps or []]
+    if step in ids:
+        out["field"] = f"procedures[{index}].steps[{ids.index(step)}]"
+    return out
+
+
+def _sent_config(exc: httpx.HTTPStatusError) -> dict[str, Any] | None:
+    """The agent config the refused request carried (`{config: ...}` or the
+    config itself), or None when it carried none we can read."""
+    try:
+        body = json.loads(exc.request.content)
+    except (RuntimeError, ValueError, httpx.RequestNotRead):
+        return None
+    if not isinstance(body, dict):
+        return None
+    config = body.get("config", body)
+    return config if isinstance(config, dict) else None
+
+
+def field_errors(
+    body: dict[str, Any], sent: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """What a TurnCall 422 says about each field, as `{field, message}` (plus
     whatever else TurnCall named, such as the `skill` a `skills[1]` refusal is
     about), so a form can show each on the entry it names.
@@ -289,7 +330,8 @@ def field_errors(body: dict[str, Any]) -> list[dict[str, Any]]:
     TurnCall answers two shapes: a schema refusal, whose fields are in
     `details.errors` (a skill's tools are named there in the message itself,
     one `tools[i] 'name' ...` per line), and a refusal of its own, which names
-    its `details.field`."""
+    its `details.field`. A procedure's graph refusal names the step by id;
+    `sent`, the config the refused request carried, turns it into an index."""
     details = body.get("details") or {}
     if not isinstance(details, dict):
         return []
@@ -304,7 +346,8 @@ def field_errors(body: dict[str, Any]) -> list[dict[str, Any]]:
         labelled = [_LABELLED.match(line) for line in lines]
         if all(labelled):
             out += [
-                {"field": m.group(1), "message": line}  # type: ignore[union-attr]
+                _procedure_error(line, sent)
+                or {"field": m.group(1), "message": line}  # type: ignore[union-attr]
                 for m, line in zip(labelled, lines, strict=True)
             ]
         else:
@@ -339,7 +382,10 @@ def _turncall_http_error(exc: httpx.HTTPStatusError) -> HTTPException:
         detail = exc.response.text
     if exc.response.status_code == 422 and isinstance(body, dict):
         return Refusal(
-            422, detail, str(body.get("code") or "validation_error"), errors=field_errors(body)
+            422,
+            detail,
+            str(body.get("code") or "validation_error"),
+            errors=field_errors(body, _sent_config(exc)),
         )
     return HTTPException(status_code=exc.response.status_code, detail=detail, headers=headers)
 

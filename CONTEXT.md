@@ -137,6 +137,17 @@ project, idempotent on re-run, and a failed link kept, shown and retried. It
 holds no provider keys. See ADR-0029.
 _Avoid_: Capability library, shared project, catalog
 
+**Procedure**:
+A step-by-step process a finished agent follows on a call — troubleshooting,
+collections, intake, a regulated script: steps (ask, instruct, check, escalate,
+end), the moves between them and the condition for each. It is TurnCall's
+procedure (turncall#417): TurnCall holds the route and shows the model one step
+at a time. Part of the agent's Config (`procedures`); the Builder writes one
+when the user describes such a process, and its escalation is a transfer to a
+number, never a handoff (each agent is its own project). A call's `procedures`
+says how far each got. See ADR-0030.
+_Avoid_: flow, script, workflow, playbook
+
 **Confirm**:
 The Builder turn between the last question and [[Finalize]]: it states what it
 understood, in the user's own words about their business, and waits to be told it
@@ -167,7 +178,8 @@ _Avoid_: webhook, callback, notification
 The subset of TurnCall agent fields the Builder is allowed to set (name,
 system_prompt, first_message, llm, voice, built-in tools, `aws.region` for
 the AWS providers, and the [[Skill|Skills]] it may load: `skills`,
-`[{skill, version_id?}]`, and `max_loaded_skills`, passed through as written).
+`[{skill, version_id?}]`, and `max_loaded_skills`, passed through as written,
+and its [[Procedure|Procedures]], `procedures`, passed through the same way).
 Everything outside it takes TurnCall defaults.
 
 **Credentials reach TurnCall as [[Integration]]s, never as config.** The Builder
