@@ -89,7 +89,8 @@ Procedure "table_reservation" — current step: time (ask)
   Allowed moves:
     → guest_name  when: the caller chose a time between six and eleven pm
     ← back to date  (always allowed)
-  Next steps (preview):
+  Next steps (preview): what comes next, not what to do now. Do a step's
+  work (ask its question, call its tool) only in a reply that also moves there.
     guest_name (ask): Ask for the name the booking should be under.
   Report every move with move_to_step. Do not skip a step. ...
 
