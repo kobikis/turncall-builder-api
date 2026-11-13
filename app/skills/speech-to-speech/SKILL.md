@@ -20,6 +20,7 @@ Set `pipeline_mode: "s2s"` and an `s2s` block:
 | `google` | `models/gemini-3.1-flash-live-preview` | Aoede, Charon, Fenrir, Kore, Leda, Orus, Puck, Zephyr |
 | `aws` | `amazon.nova-2-sonic-v1:0` | matthew, tiffany, amy, lupe, carlos |
 | `xai` | `grok-voice-3.0` | eve (default), ara, rex, leo, sal, or a voice of the account's own |
+| `elevenlabs` | `eleven_realtime_v1_mini` | brian (default), chris, george, jessica, liam, lily, matilda, michael, sarah, will, or a voice id of the account's own |
 
 Pick the voice from the chosen provider's set — they are not interchangeable.
 Use `aws` when the user wants it running in their own AWS account, and set
@@ -38,6 +39,13 @@ understood.
 Grok has no temperature, output token limit or custom endpoint: never set
 `temperature`, `max_tokens` or `base_url` on an `xai` block — TurnCall refuses
 the agent if you do.
+
+**Choose `elevenlabs` when the user asks for ElevenLabs speech-to-speech**
+(Eleven Realtime). `eleven_realtime_v1_mini` is the default, cheap and fast;
+use `eleven_realtime_v1_max` when the agent leans on tools or has to reason.
+`extra.language` (e.g. `"es"`) sets the language it hears and answers in, and
+`extra.eagerness` (`low`, `medium`, `high`) how soon it takes its turn. Never
+set `base_url`, and keep `max_call_duration_seconds` at 7200 or less.
 
 In s2s the `tts` block does not apply: the voice comes from `s2s.voice`.
 

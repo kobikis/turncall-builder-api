@@ -120,6 +120,8 @@ _S2S_DEFAULTS = {
     "aws": ("amazon.nova-2-sonic-v1:0", "matthew"),
     # Pinned, never xAI's moving `grok-voice-latest` (turncall#384).
     "xai": ("grok-voice-3.0", "eve"),
+    # Eleven Realtime (turncall#465): Mini is the cheap, fast one.
+    "elevenlabs": ("eleven_realtime_v1_mini", "brian"),
 }
 # Providers whose whole s2s block is sent, as the llm block is. Grok Voice
 # takes its session settings in s2s.extra (reasoning, replace, resumption), and
@@ -127,8 +129,9 @@ _S2S_DEFAULTS = {
 # the field (turncall#387), which a save passes through. Dropping them here
 # would run the agent without what its author set, saying nothing. The older
 # providers keep the trimmed block: a field the builder never sent must not
-# start failing their stored agents' saves.
-_S2S_SENT_WHOLE = {"xai"}
+# start failing their stored agents' saves. Eleven Realtime takes temperature,
+# max_tokens and s2s.extra's language/eagerness, and refuses base_url, the same way.
+_S2S_SENT_WHOLE = {"xai", "elevenlabs"}
 
 
 def to_create_agent_request(

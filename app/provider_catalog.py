@@ -144,6 +144,10 @@ _AWS_S2S_VOICES = ["matthew", "tiffany", "amy", "lupe", "carlos"]
 # offers a deprecated model. Voices are the account's own, custom ones
 # included, from xAI's voice list.
 _XAI_S2S_MODELS = ["grok-voice-3.0"]
+# Eleven Realtime (turncall#465). Its session takes these named voices (from
+# ElevenLabs' own error listing them) or any voice id the account can use.
+_ELEVENLABS_S2S_MODELS = ["eleven_realtime_v1_mini", "eleven_realtime_v1_max"]
+_ELEVENLABS_S2S_VOICES = ["brian", "chris", "george", "jessica", "liam", "lily", "matilda", "michael", "sarah", "will"]
 # xai as a cascade LLM (turncall#385): TurnCall's default, offered whenever the
 # account's own list cannot be had — no key, or a voice-only key xAI refuses
 # on its chat endpoints (403).
@@ -308,6 +312,8 @@ async def _fetch_s2s_models(client: httpx.AsyncClient, provider: str, key: str) 
         return list(_AWS_S2S_MODELS)
     if provider == "xai":
         return list(_XAI_S2S_MODELS)
+    if provider == "elevenlabs":
+        return list(_ELEVENLABS_S2S_MODELS)
     return []
 
 
@@ -359,6 +365,9 @@ async def _fetch_s2s_voices(client: httpx.AsyncClient, provider: str, key: str) 
         return _same(_AWS_S2S_VOICES)
     if provider == "xai":
         return await _xai_voices(client, key)
+    if provider == "elevenlabs":
+        account = await _fetch_tts_voices(client, provider, key) if key else []
+        return _same(_ELEVENLABS_S2S_VOICES) + account
     return []
 
 

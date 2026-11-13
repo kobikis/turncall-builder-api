@@ -25,7 +25,7 @@ def test_providers_lists_stt_llm_tts_s2s(client):
     assert {"openai", "anthropic", "custom_openai", "openrouter", "ollama", "bedrock"} <= set(d["llm"])
     assert "deepgram" in d["tts"]
     assert "deepgram" in d["stt"]
-    assert set(d["s2s"]) == {"openai", "openai_live", "google", "aws", "xai"}
+    assert set(d["s2s"]) == {"openai", "openai_live", "google", "aws", "xai", "elevenlabs"}
 
 
 def test_providers_offer_assemblyai_stt_and_google_llm(client):
