@@ -315,7 +315,7 @@ def test_compose_schema_allows_openai_live():
 
     enum = _AGENT_CONFIG_SCHEMA["properties"]["s2s"]["properties"]["provider"]["enum"]
     assert "openai_live" in enum
-    assert enum == ["openai", "openai_live", "google", "aws", "xai"]
+    assert enum == ["openai", "openai_live", "google", "aws", "xai", "elevenlabs"]
 
 
 def test_providers_endpoint_offers_openai_live():

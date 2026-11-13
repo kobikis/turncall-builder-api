@@ -178,7 +178,7 @@ BUILDER_ERROR_RESPONSES: dict[str, tuple[int, str]] = {
 _LLM_PROVIDERS = ["openai", "anthropic", "google", "openrouter", "ollama", "custom_openai", "bedrock", "xai"]
 _TTS_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia", "xai"]
 _STT_PROVIDERS = ["deepgram", "openai", "elevenlabs", "cartesia", "assemblyai", "xai"]
-_S2S_PROVIDERS = ["openai", "openai_live", "google", "aws", "xai"]
+_S2S_PROVIDERS = ["openai", "openai_live", "google", "aws", "xai", "elevenlabs"]
 
 
 async def _workspace_keys(ctx: AuthContext) -> dict[str, str]:

@@ -210,7 +210,7 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "enum": ["openai", "openai_live", "google", "aws", "xai"],
+                    "enum": ["openai", "openai_live", "google", "aws", "xai", "elevenlabs"],
                 },
                 "model": {
                     "type": "string",
@@ -218,7 +218,9 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
                     "openai_live: 'gpt-live-1' (full duplex). "
                     "google: 'models/gemini-3.1-flash-live-preview'. "
                     "aws: 'amazon.nova-2-sonic-v1:0' (Amazon Nova Sonic 2). "
-                    "xai: 'grok-voice-3.0' (Grok Voice).",
+                    "xai: 'grok-voice-3.0' (Grok Voice). "
+                    "elevenlabs: 'eleven_realtime_v1_mini' (default) or "
+                    "'eleven_realtime_v1_max' (Eleven Realtime).",
                 },
                 "voice": {
                     "type": "string",
@@ -227,7 +229,9 @@ _AGENT_CONFIG_SCHEMA: dict[str, Any] = {
                     "ballad, coral, echo, sage, shimmer, verse. google voices: Aoede, "
                     "Charon, Fenrir, Kore, Leda, Orus, Puck, Zephyr. aws voices: "
                     "matthew, tiffany, amy, lupe, carlos. xai voices: eve, ara, "
-                    "rex, leo, sal, or one of the account's own.",
+                    "rex, leo, sal, or one of the account's own. elevenlabs voices: "
+                    "brian (default), chris, george, jessica, liam, lily, matilda, "
+                    "michael, sarah, will, or a voice id of the account's own.",
                 },
             },
             "required": ["provider", "model", "voice"],
